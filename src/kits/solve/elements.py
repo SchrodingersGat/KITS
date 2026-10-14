@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import re
 
-import shapely
-
 from ..config import PadGroup, SolveSettings
 from ..ingest.model import Footprint, Pad
-from ..mesh.geometry import pad_area
+from ..mesh.geometry import footprint_body
 
 MM2 = 1e-6  # m² per mm²
 
@@ -83,26 +81,22 @@ def auto_pad_groups(footprint: Footprint) -> tuple[PadGroup, PadGroup] | None:
 
 
 def body_area_mm2(footprint: Footprint) -> float:
-    """Approximate component body area: the bounding box of its copper pads.
+    """Plan area of the component body (see :func:`kits.mesh.geometry.footprint_body`).
 
     Args:
         footprint: The footprint.
 
     Returns:
-        Area in mm² (0 if it has no copper pads).
+        Area in mm² (0 if the footprint has no outline and no copper pads).
     """
-    pads = _copper_pads(footprint)
-    if not pads:
-        return 0.0
-    x0, y0, x1, y1 = shapely.union_all([pad_area(p) for p in pads]).bounds
-    return (x1 - x0) * (y1 - y0)
+    return footprint_body(footprint)[0].area
 
 
 def default_ambient_conductance(footprint: Footprint, settings: SolveSettings) -> float:
     """Body-to-ambient conductance used when an element has no thermal resistance to ambient.
 
-    Convection from the body: ``h · area``, with ``h`` for the board face the
-    footprint is on and the area from :func:`body_area_mm2`.
+    Convection from the top of the body: ``h · area``, with ``h`` for the board
+    face the footprint is on and the body's plan area (:func:`body_area_mm2`).
 
     Args:
         footprint: The element's footprint.

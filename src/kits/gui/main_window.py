@@ -1262,7 +1262,11 @@ class MainWindow(QMainWindow):
         if self.scene is None:
             return
         self._click_marker = None
-        if self.document.results is not None and self.scene.results_overlay_visible(self.scene.active_layer):
+        if (
+            self.document.results is not None
+            and self.scene.results_overlay_visible(self.scene.active_layer)
+            and self.scene.on_board(pos)  # nothing to probe off the board
+        ):
             self._click_marker = self.document.add_marker(pos.x(), pos.y())
         key = self.scene.pad_at(pos)
         self.select_pad(key)

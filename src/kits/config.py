@@ -464,8 +464,9 @@ class ResistiveElement:
         group_a: One terminal's pads.
         group_b: The other terminal's pads.
         resistance_ohm: Resistance between the groups, Ω.
-        thermal_resistance_board_k_w: Body-to-pads thermal resistance, K/W; None
-            for ideal contact (the heat goes straight into the pads' copper).
+        thermal_resistance_board_k_w: Body-to-board thermal resistance, K/W; None
+            for ideal contact (the heat goes straight into the board under the
+            body's plan area: Fab outline, else courtyard, else the pads' extent).
         thermal_resistance_ambient_k_w: Body-to-ambient thermal resistance, K/W;
             None for convection from the body (``1 / (h · area)``, see
             :func:`kits.solve.elements.default_ambient_conductance`).

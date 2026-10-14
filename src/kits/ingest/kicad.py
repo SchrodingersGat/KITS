@@ -40,6 +40,9 @@ from .sexpr import Node, Quoted, children, find, has_flag, value
 PROJECT_SUFFIX = ".kicad_pro"
 BOARD_SUFFIX = ".kicad_pcb"
 
+# Footprint layers outlining the component body (kept per footprint, see Footprint.body_graphics).
+BODY_LAYERS = ("F.Fab", "B.Fab", "F.CrtYd", "B.CrtYd")
+
 _GRAPHIC_KINDS = {
     "line": "line",
     "arc": "arc",
@@ -523,6 +526,10 @@ class _BoardReader:
                 g = self._graphic(item, origin=pos, angle=rot)
                 if g is not None:
                     board.graphics.append(g)
+                elif str(value(item, "layer", "")) in BODY_LAYERS:
+                    body = self._graphic(item, origin=pos, angle=rot, any_layer=True)
+                    if body is not None:
+                        fp.body_graphics.append(body)
             elif kw == "zone":
                 board.zones.append(self._zone(item))
         return fp

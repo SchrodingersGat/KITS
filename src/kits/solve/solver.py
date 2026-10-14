@@ -29,10 +29,11 @@ import scipy.sparse as sp
 import shapely
 from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import spsolve
+from shapely.geometry.base import BaseGeometry
 
 from ..config import HeatLoad, HeatLoadKind, ResistiveElement, SolveSettings
 from ..ingest.model import Board
-from ..mesh.geometry import board_holes, pad_area
+from ..mesh.geometry import board_holes, footprint_body, pad_area
 from ..mesh.mesher import layer_heights
 from ..mesh.model import BoardMesh
 from .elements import default_ambient_conductance
@@ -229,15 +230,58 @@ class LayeredModel:
                 raise SolveError(f"no pad {ref}.{n} with copper on the board")
             pads += found
         areas = {
-            layer: shapely.union_all([pad_area(p) for p in pads if layer in p.layers]).buffer(1e-6)
+            layer: shapely.union_all([pad_area(p) for p in pads if layer in p.layers])
             for layer in {layer for p in pads for layer in p.layers}
         }
+        found = self.area_nodes(areas, copper_only=True)
+        if found is None:
+            raise SolveError(f"pad {label} has no copper in the mesh")
+        return found
+
+    def body_nodes(self, element: ResistiveElement) -> tuple[np.ndarray, np.ndarray]:
+        """Global nodes under a resistive element's body, with their lumped area weights.
+
+        The body is the footprint's plan area (:func:`kits.mesh.geometry.footprint_body`)
+        on the outer copper layer of the footprint's side, copper and bare board
+        alike. If no mesh lies under it, the element's pads are used instead.
+
+        Args:
+            element: The element.
+
+        Returns:
+            ``(nodes, weights)``, the weights summing to 1.
+
+        Raises:
+            SolveError: If the footprint or its pads can't be found.
+        """
+        footprint = next((fp for fp in self.board.footprints if fp.reference == element.ref), None)
+        if footprint is None:
+            raise SolveError(f"no footprint {element.ref} on the board (resistive element {element.name})")
+        area, _source = footprint_body(footprint)
+        side = footprint.side if footprint.side in self.by_name else self.layers[0].layer
+        found = self.area_nodes({side: area}, copper_only=False) if not area.is_empty else None
+        return found if found is not None else self.pad_nodes(element.ref, element.all_pads)
+
+    def area_nodes(
+        self, areas: dict[str, BaseGeometry], copper_only: bool
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        """Global nodes of the triangles inside some areas, with lumped area weights.
+
+        Args:
+            areas: ``{layer: area}`` in board millimetres.
+            copper_only: Only count copper triangles.
+
+        Returns:
+            ``(nodes, weights)`` with the weights summing to 1, or None if no
+            triangle's centroid falls inside the areas.
+        """
         nodes, weights = [], []
         for lf in self.layers:
             area = areas.get(lf.layer)
-            if area is None:
+            if area is None or area.is_empty:
                 continue
-            t = lf.mesh.t[:, lf.copper]
+            area = area.buffer(1e-6)
+            t = lf.mesh.t[:, lf.copper] if copper_only else lf.mesh.t
             centroids = lf.nodes_mm[t].mean(axis=0)
             inside = shapely.contains_xy(area, centroids[:, 0], centroids[:, 1])
             if not inside.any():
@@ -248,7 +292,7 @@ class LayeredModel:
             nodes.append(lf.offset + local)
             weights.append(lumped[local])
         if not nodes:
-            raise SolveError(f"pad {label} has no copper in the mesh")
+            return None
         weights = np.concatenate(weights)
         return np.concatenate(nodes), weights / weights.sum()
 
@@ -424,12 +468,14 @@ class LayeredModel:
         a thermal resistance ``R`` ties the pad to ambient with a total
         conductance ``1/R``.
 
-        A resistive element's ``I²R`` (from ``dc``) heats its body. With ideal
-        board contact the body is its pads (heat shared by area over both
-        groups); otherwise it is a node joined to the pads' mean temperature
-        through the thermal resistance to the board. The body also loses heat to
-        ambient through its thermal resistance to ambient, or by convection from
-        its area by default.
+        A resistive element's ``I²R`` (from ``dc``) heats its body, whose plan
+        area (Fab outline, courtyard or pads' bounding box) covers part of the
+        board on the footprint's side. With ideal board contact the heat goes
+        straight into the board under the body, shared by area; otherwise the
+        body is a node joined to that area's mean temperature through the
+        thermal resistance to the board. The body also loses heat to ambient
+        through its thermal resistance to ambient, or by default by convection
+        from its plan area.
 
         Args:
             dc: The DC solution supplying Joule heat, or None for no current flow.
@@ -504,12 +550,12 @@ class LayeredModel:
         junction_index = {e.name: self.size + i for i, e in enumerate(junctions)}
         bodies = {}
         for e in elements:
-            nodes, weights = self.pad_nodes(e.ref, e.all_pads)
+            nodes, weights = self.body_nodes(e)
             if e.name in junction_index:
                 j = junction_index[e.name]
-                to_pads = np.concatenate([[1.0], -weights])
+                to_board = np.concatenate([[1.0], -weights])
                 k = k + _rank_one(
-                    np.concatenate([[j], nodes]), to_pads, 1.0 / e.thermal_resistance_board_k_w, n
+                    np.concatenate([[j], nodes]), to_board, 1.0 / e.thermal_resistance_board_k_w, n
                 )
                 nodes, weights = np.array([j]), np.array([1.0])
             if e.thermal_resistance_ambient_k_w is not None:

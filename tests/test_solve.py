@@ -350,11 +350,12 @@ def test_resistive_element_heat(bridged_board):
     # 10 A through 10 mΩ (to the 1e-12 leakage that keeps floating copper solvable).
     assert dc.element_power["R1"] == pytest.approx(1.0, rel=1e-6)
 
-    # Ideal contact: the body is its pads; by default it also convects from its body area.
+    # Ideal contact: the heat goes into the board under the body, which also convects from its area.
     thermal = model.solve_thermal(dc, elements=[ideal])
     footprint = next(fp for fp in bridged_board.footprints if fp.reference == "R1")
     assert body_area_mm2(footprint) == pytest.approx(14 * 6)
-    nodes, weights = model.pad_nodes("R1", ["1", "2"])
+    # No Fab/courtyard drawing: the body is the pads' bounding box, gap included.
+    nodes, weights = model.body_nodes(ideal)
     temperature = np.concatenate(list(thermal.temperature.values()))
     body = thermal.element_temperatures["R1"]
     assert body == pytest.approx(float(weights @ temperature[nodes]))
@@ -404,3 +405,65 @@ def test_auto_pad_groups(tmp_path):
     r1 = next(fp for fp in board.footprints if fp.reference == "R1")
     a, b = auto_pad_groups(r1)
     assert (a.name, a.pads, b.name, b.pads) == ("A", ["1"], "B", ["2"])
+
+
+_FAB_RESISTOR = """  (footprint "T:R" (layer "F.Cu") (at 25 5 90)
+    (property "Reference" "R1")
+    (fp_rect (start -6 -2.5) (end 6 2.5) (stroke (width 0.1) (type solid)) (fill none) (layer "F.Fab"))
+    (fp_line (start -6 -1.5) (end -5 -2.5) (stroke (width 0.1) (type solid)) (layer "F.Fab"))
+    (fp_rect (start -7 -3) (end 7 3) (stroke (width 0.05) (type solid)) (fill none) (layer "F.CrtYd"))
+    (pad "1" smd rect (at -5 0) (size 4 6) (layers "F.Cu") (net 1 "N"))
+    (pad "2" smd rect (at 5 0) (size 4 6) (layers "F.Cu") (net 1 "N")))
+"""
+
+
+def _footprint(tmp_path, text, name="fp"):
+    path = tmp_path / f"{name}.kicad_pcb"
+    path.write_text(_HEADER + _zone(5, 22) + _zone(28, 45) + text + ")\n")
+    board = load_board(path)
+    return board, next(fp for fp in board.footprints if fp.reference == "R1")
+
+
+def test_footprint_body_sources(tmp_path):
+    from kits.mesh.geometry import footprint_body
+
+    # Fab outline (a 12 x 5 rectangle, rotated 90 degrees with the footprint);
+    # the pin-1 mark inside it doesn't change the area.
+    board, fp = _footprint(tmp_path, _FAB_RESISTOR, "fab")
+    area, source = footprint_body(fp)
+    assert source == "Fab outline" and area.area == pytest.approx(60)
+    x0, y0, x1, y1 = area.bounds
+    assert (x1 - x0, y1 - y0) == pytest.approx((5, 12))
+    # No Fab drawing: the courtyard.
+    _, fp = _footprint(tmp_path, _FAB_RESISTOR.replace('(layer "F.Fab")', '(layer "F.SilkS")'), "crtyd")
+    area, source = footprint_body(fp)
+    assert source == "courtyard" and area.area == pytest.approx(14 * 6)
+    # Neither: the pads' bounding box.
+    _, fp = _footprint(tmp_path, _RESISTOR, "pads")
+    area, source = footprint_body(fp)
+    assert source == "pads" and area.area == pytest.approx(14 * 6)
+
+
+def test_element_heat_enters_over_the_body_area(tmp_path):
+    from kits.solve.elements import default_ambient_conductance
+
+    # Rotated 90 degrees, the body is 5 wide (x 22.5..27.5) and 12 long (y -1..11): it
+    # covers the gap between the strips and overhangs the board edge, where there's no mesh.
+    board, fp = _footprint(tmp_path, _FAB_RESISTOR)
+    settings = SolveSettings(convection_top_w_m2k=10.0, convection_bottom_w_m2k=10.0, ambient_c=25.0)
+    model = _model(board, settings)
+    element = _element(resistance_ohm=0.01)
+    nodes, weights = model.body_nodes(element)
+    assert weights.sum() == pytest.approx(1.0)
+    f_cu = model.by_name["F.Cu"]
+    xy = f_cu.nodes_mm[nodes - f_cu.offset]
+    # Triangles whose centroid is inside count, so nodes reach up to one element (1 mm) out.
+    assert xy[:, 0].min() >= 22.5 - 1.0 and xy[:, 0].max() <= 27.5 + 1.0
+    assert xy[:, 1].min() >= 0 - 1e-6 and xy[:, 1].max() <= 10 + 1e-6  # clipped to the board
+    # Bare board in the gap between the strips is part of the body area.
+    assert ((xy[:, 0] > 22.5) & (xy[:, 0] < 27.5)).any()
+
+    # Default cooling: convection from the 5 x 12 body.
+    assert default_ambient_conductance(fp, settings) == pytest.approx(10.0 * 60e-6)
+    thermal = model.solve_thermal(None, elements=[element])  # no current: no heat, ambient everywhere
+    assert thermal.element_temperatures["R1"] == pytest.approx(25.0)

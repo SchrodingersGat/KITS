@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from ..config import ConfigError, PadGroup, ResistiveElement, SolveSettings
 from ..ingest.model import Footprint
+from ..mesh.geometry import footprint_body
 from ..solve.elements import auto_pad_groups, default_ambient_conductance, pad_numbers, parse_resistance
 from .document import Document
 from .field_display import format_resistance
@@ -144,7 +145,7 @@ class ElementDialog(QDialog):
             f"≈ {1 / ambient_default:.3g} K/W" if ambient_default > 0 else "none: no convection on that side"
         )
         self.board_default, self.board_theta, board_row = _theta_editor(
-            "Ideal contact (heat goes into the pads)"
+            "Ideal contact (heat goes into the board under the body)"
         )
         self.ambient_default, self.ambient_theta, ambient_row = _theta_editor(
             f"Convection from the body ({ambient_text})"
@@ -160,6 +161,19 @@ class ElementDialog(QDialog):
 
         thermal = QGroupBox("Thermal")
         thermal_form = QFormLayout(thermal)
+        body, source = footprint_body(footprint)
+        if body.is_empty:
+            body_text = "none (the footprint has no outline or pads)"
+        else:
+            x0, y0, x1, y1 = body.bounds
+            body_text = f"{source}, {x1 - x0:.2f} × {y1 - y0:.2f} mm ({body.area:.3g} mm²)"
+        self.body_label = QLabel(body_text)
+        self.body_label.setToolTip(
+            "The component body's plan area, from the footprint's Fab outline, else its courtyard,\n"
+            "else its pads. The element's I²R heats the board over this area, and the body\n"
+            "loses heat to ambient from it."
+        )
+        thermal_form.addRow("Body:", self.body_label)
         thermal_form.addRow("To board:", board_row)
         thermal_form.addRow("To ambient:", ambient_row)
 

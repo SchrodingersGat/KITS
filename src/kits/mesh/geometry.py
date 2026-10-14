@@ -32,7 +32,7 @@ from shapely.geometry.base import BaseGeometry
 
 from ..config import MeshSettings
 from ..ingest.geometry import arc_points, bezier_points
-from ..ingest.model import Board, Drill, Graphic, Pad
+from ..ingest.model import Board, Drill, Footprint, Graphic, Pad
 
 # Coordinates are snapped to this grid (mm) so near-coincident vertices from
 # separate shapes merge instead of creating slivers. KiCad's own resolution is 1 nm.
@@ -242,6 +242,46 @@ def _outline_lines(g: Graphic) -> list[tuple[float, float]]:
     if g.kind == "bezier" and len(g.points) == 4:
         return bezier_points(*g.points)
     return list(g.points)
+
+
+# Where a component body's outline is taken from, in order of preference.
+BODY_SOURCES = (("Fab outline", ("F.Fab", "B.Fab")), ("courtyard", ("F.CrtYd", "B.CrtYd")))
+
+
+def footprint_body(footprint: Footprint) -> tuple[BaseGeometry, str]:
+    """The plan area of a component body.
+
+    Taken from the footprint's Fab drawing, else its courtyard, else the
+    bounding box of its copper pads. Closed loops in the drawing (rectangles,
+    polygons, circles, or lines that join up) are filled and merged, so pin-1
+    marks inside the outline don't matter; a drawing with no closed loop gives
+    the convex hull of its points.
+
+    Args:
+        footprint: The footprint.
+
+    Returns:
+        ``(area, source)``: the area in board millimetres (empty if the footprint
+        has neither drawings nor copper pads) and ``"Fab outline"``,
+        ``"courtyard"`` or ``"pads"``.
+    """
+    for source, layers in BODY_SOURCES:
+        lines = [
+            LineString(pts)
+            for g in footprint.body_graphics
+            if g.layer in layers and len(pts := _outline_lines(g)) >= 2
+        ]
+        if not lines:
+            continue
+        noded = shapely.union_all(shapely.set_precision(lines, SNAP_GRID_MM))
+        faces = [Polygon(face.exterior) for face in shapely.get_parts(shapely.polygonize([noded]))]
+        area = shapely.union_all(faces) if faces else noded.convex_hull
+        if area.area > 0:
+            return area, source
+    pads = [pad_area(p) for p in footprint.pads if p.layers]
+    if not pads:
+        return Polygon(), "pads"
+    return box(*shapely.union_all(pads).bounds), "pads"
 
 
 def board_outline(board: Board) -> BaseGeometry:

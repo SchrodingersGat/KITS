@@ -224,7 +224,11 @@ class Pad:
 
 @dataclass
 class Footprint:
-    """A placed footprint and its pads; ``rotation`` in degrees CCW as displayed."""
+    """A placed footprint and its pads; ``rotation`` in degrees CCW as displayed.
+
+    ``body_graphics`` holds the footprint's Fab and courtyard drawings (board
+    coordinates), which outline the component body.
+    """
 
     reference: str
     value: str
@@ -233,6 +237,7 @@ class Footprint:
     rotation: float
     side: str  # F.Cu or B.Cu
     pads: list[Pad] = field(default_factory=list)
+    body_graphics: list[Graphic] = field(default_factory=list)
 
 
 @dataclass

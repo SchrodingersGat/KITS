@@ -10,11 +10,13 @@ layer is a single operation on that container.
 
 from __future__ import annotations
 
+import functools
 import itertools
 import math
 from dataclasses import dataclass
 
 import numpy as np
+import shapely
 from PySide6.QtCore import QLineF, QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
@@ -29,6 +31,7 @@ from PySide6.QtWidgets import (
 from ..config import CurrentSource, HeatLoad, ResistiveElement
 from ..ingest.geometry import arc_points
 from ..ingest.model import EDGE_CUTS, Board, Pad
+from ..mesh.geometry import GeometryError, board_outline, footprint_body
 from ..mesh.model import BoardMesh, LayerMesh
 from ..solve.results import LayerResult, SolveResults
 from . import colors
@@ -467,7 +470,24 @@ class BoardScene(QGraphicsScene):
         outline_pen.setStyle(Qt.PenStyle.DotLine)
         link_pen = _cosmetic_pen(color, 2.0)
         link_pen.setStyle(Qt.PenStyle.DashLine)
+        body_pen = _cosmetic_pen(color, 1.2)
+        body_pen.setStyle(Qt.PenStyle.DashLine)
+        body_brush = QColor(color.red(), color.green(), color.blue(), 45)
+        footprints = {fp.reference: fp for fp in self.board.footprints}
         for element in elements:
+            footprint = footprints.get(element.ref)
+            if footprint is not None:
+                # The body's plan area: where the element's I²R goes into the board.
+                area, source = footprint_body(footprint)
+                for polygon in shapely.get_parts(area):
+                    if polygon.is_empty or polygon.geom_type != "Polygon":
+                        continue
+                    body = QGraphicsPathItem(
+                        polygon_path(list(polygon.exterior.coords)), self._element_markers
+                    )
+                    body.setPen(body_pen)
+                    body.setBrush(body_brush)
+                    body.setToolTip(f"{element.name} body ({source}): its I²R heats the board here")
             centres = []
             for group in element.groups:
                 items = [i for number in group.pads for i in self._pad_items.get((element.ref, number), [])]
@@ -875,6 +895,33 @@ class BoardScene(QGraphicsScene):
             return self.itemsBoundingRect()
         x0, y0, x1, y1 = bbox
         return QRectF(x0, y0, x1 - x0, y1 - y0)
+
+    @functools.cached_property
+    def _board_area(self):
+        """The board's outline area (prepared for fast point tests), or None if it has no usable outline."""
+        try:
+            outline = board_outline(self.board)
+        except GeometryError:
+            return None
+        if outline.is_empty:
+            return None
+        shapely.prepare(outline)
+        return outline
+
+    def on_board(self, pos: QPointF) -> bool:
+        """Whether a point lies on the board: inside the Edge.Cuts outline, not in a cutout.
+
+        Boards without a usable outline fall back to their bounding box.
+
+        Args:
+            pos: Scene position in millimetres.
+
+        Returns:
+            True if the point is on the board.
+        """
+        if self._board_area is None:
+            return self.board_rect().contains(pos)
+        return bool(shapely.intersects_xy(self._board_area, pos.x(), pos.y()))
 
     # -- grid ----------------------------------------------------------------
 

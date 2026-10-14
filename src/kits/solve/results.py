@@ -16,7 +16,7 @@ from ..mesh.fingerprint import MeshFingerprint
 from .solver import SolveSettings
 
 # Bump when the physics model changes in a way that alters results.
-SOLVER_VERSION = 2  # 2: stackup sub-layers summed; top/bottom convection
+SOLVER_VERSION = 3  # 2: stackup sub-layers summed; top/bottom convection. 3: element heat over the body area
 
 
 def inputs_hash(

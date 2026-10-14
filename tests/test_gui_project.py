@@ -644,8 +644,10 @@ def test_markers(app, window, strip_kits):
     window.solve()
     _wait(app, lambda: not window.solve_job_running)
     window._on_board_clicked(QPointF(25.0, 5.0))
-    window._on_board_clicked(QPointF(80.0, 80.0))  # off the board: marker without a value
-    assert doc.markers == [(25.0, 5.0), (80.0, 80.0)]
+    window._on_board_clicked(QPointF(80.0, 80.0))  # off the board: no marker
+    window._on_board_clicked(QPointF(50.5, 5.0))  # just past the board edge: no marker
+    window._on_board_clicked(QPointF(25.0, 9.5))  # on the board but off copper: marker without a value
+    assert doc.markers == [(25.0, 5.0), (25.0, 9.5)]
     labels = scene.marker_labels
     assert labels[0].endswith("A/mm²") and labels[1] == "—"
     assert panel.markers_table.rowCount() == 2
@@ -665,7 +667,7 @@ def test_markers(app, window, strip_kits):
     # Remove the selected marker, then clear.
     panel.markers_table.selectRow(0)
     panel.remove_selected_markers()
-    assert doc.markers == [(80.0, 80.0)] and panel.markers_table.rowCount() == 1
+    assert doc.markers == [(25.0, 9.5)] and panel.markers_table.rowCount() == 1
     panel.clear_markers_button.click()
     assert doc.markers == [] and scene.marker_labels == []
 
