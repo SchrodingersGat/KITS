@@ -1,4 +1,5 @@
 board: Simple-In-Out.kicad_pro
 mesh:
-  max_size_mm: 0.3
+  max_size_mm: 0.5
   min_size_mm: 0.01
+  min_circle_points: 36

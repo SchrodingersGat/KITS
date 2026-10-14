@@ -262,3 +262,13 @@ def test_saved_mesh_is_reloaded_only_while_current(window, kits_v9_path, board_v
 
     window.document.set_mesh(mesh_board(window.document.board, MeshSettings()))
     assert window.document.mesh_notice is None and not window.document.mesh_from_file
+
+
+def test_mesh_panel_edits_hole_points(window, kits_v9_path):
+    assert window.open_path(kits_v9_path)
+    panel = window.mesh_panel
+    assert panel.circle_points.value() == 36
+    panel.circle_points.setValue(48)
+    assert window.document.project.mesh.min_circle_points == 48 and window.document.dirty
+    assert window.save()
+    assert load_kits_project(kits_v9_path).mesh.min_circle_points == 48

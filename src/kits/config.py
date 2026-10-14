@@ -10,6 +10,8 @@ from dataclasses import dataclass
 
 DEFAULT_MESH_MAX_SIZE_MM = 1.0
 DEFAULT_MESH_MIN_SIZE_MM = 0.1
+DEFAULT_MIN_CIRCLE_POINTS = 36
+MIN_CIRCLE_POINTS_RANGE = (8, 1000)
 
 
 class ConfigError(ValueError):
@@ -18,24 +20,31 @@ class ConfigError(ValueError):
 
 @dataclass
 class MeshSettings:
-    """Mesh element size limits for the gmsh mesher.
+    """Mesh resolution settings for the gmsh mesher.
 
     Attributes:
         max_size_mm: Largest allowed element edge length, in millimetres.
         min_size_mm: Smallest element edge length gmsh may choose, in millimetres.
             Geometry finer than this (e.g. very short outline segments) can still
             force smaller elements locally.
+        min_circle_points: Minimum number of mesh nodes around each drill hole
+            edge. Takes precedence over ``min_size_mm`` for small holes.
     """
 
     max_size_mm: float = DEFAULT_MESH_MAX_SIZE_MM
     min_size_mm: float = DEFAULT_MESH_MIN_SIZE_MM
+    min_circle_points: int = DEFAULT_MIN_CIRCLE_POINTS
 
     def validate(self) -> None:
-        """Check the sizes are positive and ordered.
+        """Check the sizes are positive and ordered, and the circle point count is in range.
 
         Raises:
-            ConfigError: If a size is not positive or the minimum exceeds the maximum.
+            ConfigError: If a size is not positive, the minimum exceeds the maximum, or
+                ``min_circle_points`` is not an integer in :data:`MIN_CIRCLE_POINTS_RANGE`.
         """
+        lo, hi = MIN_CIRCLE_POINTS_RANGE
+        if not isinstance(self.min_circle_points, int) or not lo <= self.min_circle_points <= hi:
+            raise ConfigError(f"min circle points must be a whole number from {lo} to {hi}")
         if not (self.min_size_mm > 0 and self.max_size_mm > 0):
             raise ConfigError("mesh sizes must be positive")
         if self.min_size_mm > self.max_size_mm:
@@ -49,7 +58,11 @@ class MeshSettings:
         Returns:
             Mapping suitable for the ``mesh:`` section of the config file.
         """
-        return {"max_size_mm": self.max_size_mm, "min_size_mm": self.min_size_mm}
+        return {
+            "max_size_mm": self.max_size_mm,
+            "min_size_mm": self.min_size_mm,
+            "min_circle_points": self.min_circle_points,
+        }
 
     @classmethod
     def from_dict(cls, data: dict | None) -> MeshSettings:
@@ -72,8 +85,26 @@ class MeshSettings:
             settings = cls(
                 max_size_mm=float(data.get("max_size_mm", DEFAULT_MESH_MAX_SIZE_MM)),
                 min_size_mm=float(data.get("min_size_mm", DEFAULT_MESH_MIN_SIZE_MM)),
+                min_circle_points=_whole_number(data.get("min_circle_points", DEFAULT_MIN_CIRCLE_POINTS)),
             )
         except (TypeError, ValueError) as exc:
-            raise ConfigError(f"invalid mesh size: {exc}") from exc
+            raise ConfigError(f"invalid mesh setting: {exc}") from exc
         settings.validate()
         return settings
+
+
+def _whole_number(value) -> int:
+    """Convert a YAML value to an int, rejecting fractions and booleans.
+
+    Args:
+        value: The parsed value, e.g. ``36`` or ``36.0``.
+
+    Returns:
+        The integer value.
+
+    Raises:
+        ValueError: If the value is not a whole number.
+    """
+    if isinstance(value, bool) or float(value) != int(float(value)):
+        raise ValueError(f"{value!r} is not a whole number")
+    return int(float(value))

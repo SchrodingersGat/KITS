@@ -7,15 +7,19 @@ mesh is conformal across copper/dielectric boundaries.
 
 Simplifications (2.5D model, see PLAN.md):
 
-* Drill holes are not cut out of the copper or the board; vias and plated
-  holes are treated as solid copper discs. Their centres are returned as
-  *anchor points* so the mesher can put a node there for inter-layer links.
-* Geometry is simplified to a tolerance tied to the minimum mesh size, so
-  finely-faceted arcs don't force elements far smaller than requested.
+* Drill holes (vias, plated and non-plated holes) are cut out of every layer
+  they pass through, at the drill radius. Each hole edge is a regular polygon
+  with at least ``min_circle_points`` vertices, generated identically for every
+  layer, so a hole's edge nodes sit at the same XY on each layer it crosses
+  (plated barrels can later link layers through them).
+* Other geometry is simplified to a tolerance tied to the minimum mesh size, so
+  finely-faceted arcs don't force elements far smaller than requested. Hole
+  edges are cut after simplification and keep all their vertices.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -26,7 +30,7 @@ from shapely.geometry.base import BaseGeometry
 
 from ..config import MeshSettings
 from ..ingest.geometry import arc_points, bezier_points
-from ..ingest.model import Board, Graphic, Pad
+from ..ingest.model import Board, Drill, Graphic, Pad
 
 # Coordinates are snapped to this grid (mm) so near-coincident vertices from
 # separate shapes merge instead of creating slivers. KiCad's own resolution is 1 nm.
@@ -59,13 +63,13 @@ class LayerGeometry:
 
     Attributes:
         layer: Copper layer name, e.g. ``"F.Cu"``.
-        faces: Planar partition of the board outline into copper/bare faces.
-        anchors: Points (via and plated-hole centres) that must become mesh nodes.
+        faces: Planar partition of the board outline (minus holes) into copper/bare faces.
+        holes: Drill-hole outlines cut from this layer.
     """
 
     layer: str
     faces: list[Face] = field(default_factory=list)
-    anchors: list[tuple[float, float]] = field(default_factory=list)
+    holes: list[Polygon] = field(default_factory=list)
 
     @property
     def copper_area(self) -> float:
@@ -74,8 +78,23 @@ class LayerGeometry:
 
     @property
     def total_area(self) -> float:
-        """Total meshed area (the board outline), in mm²."""
+        """Total meshed area (the board outline minus holes), in mm²."""
         return sum(f.polygon.area for f in self.faces)
+
+
+@dataclass
+class Hole:
+    """A drill hole and the copper layers it passes through.
+
+    Attributes:
+        polygon: The hole outline in board millimetres.
+        layers: Copper layers the hole is cut from.
+        plated: True for vias and plated through-holes.
+    """
+
+    polygon: Polygon
+    layers: list[str]
+    plated: bool
 
 
 # -- shape conversion ----------------------------------------------------------
@@ -298,23 +317,91 @@ def layer_copper(board: Board, layer: str, spans: list[list[str]] | None = None)
     return shapely.union_all([p for p in parts if not p.is_empty])
 
 
-def layer_anchors(
-    board: Board, layer: str, spans: list[list[str]] | None = None
-) -> list[tuple[float, float]]:
-    """Centres of vias and plated through-hole pads present on a layer.
+def circle_points(radius: float, settings: MeshSettings) -> int:
+    """Number of vertices for a hole edge of the given radius.
+
+    At least ``settings.min_circle_points``, and more if needed to keep edge
+    segments no longer than the maximum mesh size.
+
+    Args:
+        radius: Hole radius in millimetres.
+        settings: Mesh settings.
+
+    Returns:
+        The vertex count for a full circle.
+    """
+    by_size = math.ceil(2 * math.pi * radius / settings.max_size_mm)
+    return max(settings.min_circle_points, by_size)
+
+
+def hole_polygon(
+    drill: Drill, position: tuple[float, float], rotation: float, settings: MeshSettings
+) -> Polygon:
+    """Outline of a round hole or slot as a polygon with vertices on the drill edge.
+
+    Round holes are regular polygons starting at angle 0. Slots (oval drills) are
+    two half-circles, each with half the full-circle vertex count, joined by
+    straight sides.
+
+    Args:
+        drill: The drill size and offset (in the pad's frame).
+        position: Pad or via position in board coordinates.
+        rotation: Pad rotation in KiCad degrees (0 for vias).
+        settings: Mesh settings (``min_circle_points`` and max size).
+
+    Returns:
+        The hole outline in board coordinates.
+    """
+    w, h = drill.width, drill.height
+    r = min(w, h) / 2
+    n = circle_points(r, settings)
+    if not drill.is_oval:
+        pts = [(r * math.cos(2 * math.pi * k / n), r * math.sin(2 * math.pi * k / n)) for k in range(n)]
+    else:
+        half = abs(w - h) / 2
+        per_end = math.ceil(n / 2)
+        pts = []
+        for cx, start in ((half, -math.pi / 2), (-half, math.pi / 2)):
+            angles = [start + math.pi * k / per_end for k in range(per_end + 1)]
+            pts += [(cx + r * math.cos(a), r * math.sin(a)) for a in angles]
+        if h > w:  # long axis vertical
+            pts = [(-y, x) for x, y in pts]
+    local = Polygon([(x + drill.offset[0], y + drill.offset[1]) for x, y in pts])
+    # Snap to the same grid as the partition, so the hole's vertices appear
+    # unchanged in the meshed faces (the mesher looks them up by coordinate).
+    return shapely.set_precision(_to_board(local, position, rotation), SNAP_GRID_MM)
+
+
+def board_holes(board: Board, settings: MeshSettings, spans: list[list[str]] | None = None) -> list[Hole]:
+    """All drill holes on the board with the layers they cut.
+
+    Vias cut the layers they span (blind/buried vias only some); plated and
+    non-plated through-hole pads cut every copper layer.
 
     Args:
         board: The board.
-        layer: Copper layer name.
+        settings: Mesh settings for the hole outlines.
         spans: Precomputed :func:`via_layers` result.
 
     Returns:
-        Unique anchor positions in board coordinates.
+        The holes.
     """
     spans = via_layers(board) if spans is None else spans
-    points = [v.position for v, span in zip(board.vias, spans, strict=True) if layer in span]
-    points += [p.position for p in board.pads() if p.is_through_hole and layer in p.layers]
-    return list(dict.fromkeys(points))
+    holes = [
+        Hole(hole_polygon(Drill(v.drill, v.drill), v.position, 0.0, settings), span, True)
+        for v, span in zip(board.vias, spans, strict=True)
+        if v.drill > 0 and span
+    ]
+    holes += [
+        Hole(
+            hole_polygon(p.drill, p.position, p.rotation, settings),
+            list(board.copper_layers),
+            p.kind == "thru_hole",
+        )
+        for p in board.pads()
+        if p.drill is not None and p.drill.width > 0 and p.kind in ("thru_hole", "np_thru_hole")
+    ]
+    return holes
 
 
 def _polygons(geom: BaseGeometry) -> list[Polygon]:
@@ -344,13 +431,19 @@ def _open(geom: BaseGeometry, distance: float) -> BaseGeometry:
     return geom.buffer(-distance, join_style="mitre").buffer(distance, join_style="mitre")
 
 
-def partition_layer(board_area: BaseGeometry, copper: BaseGeometry, tolerance: float) -> list[Face]:
+def partition_layer(
+    board_area: BaseGeometry,
+    copper: BaseGeometry,
+    tolerance: float,
+    holes: list[Polygon] | None = None,
+) -> list[Face]:
     """Split the board area into copper and bare faces sharing exact boundaries.
 
     Args:
         board_area: The board outline area.
         copper: Copper on this layer (any extent; it is clipped to the board).
         tolerance: Simplification tolerance in millimetres.
+        holes: Drill holes to cut out, after simplification so they keep every vertex.
 
     Returns:
         The faces of the partition.
@@ -364,6 +457,16 @@ def partition_layer(board_area: BaseGeometry, copper: BaseGeometry, tolerance: f
     copper_s = _open(copper_s, tolerance)
     bare = _open(board_s.difference(copper_s), tolerance)
     copper_s = shapely.set_precision(board_s.difference(bare), SNAP_GRID_MM)
+    if holes:
+        # Holes are cut last, so the offsets above never touch (and round) their
+        # edges, and after simplifying, so they keep every vertex. Copper edges
+        # within the tolerance of a hole edge (a pad the same size as its drill,
+        # a track running into a via) are first snapped onto the hole's
+        # vertices, so the two don't leave a sliver or near-duplicate nodes.
+        cut = shapely.union_all(holes)
+        copper_s = shapely.snap(copper_s, cut, tolerance)
+        board_s = board_s.difference(cut)
+        copper_s = shapely.set_precision(copper_s, SNAP_GRID_MM).intersection(board_s)
     # Snap-rounded noding: a copper vertex lying (within the grid) on a board
     # edge splits that edge, instead of the two nearly-coincident lines
     # enclosing a zero-width sliver face.
@@ -396,17 +499,19 @@ def extract_layers(
     """
     outline = board_outline(board)
     spans = via_layers(board)
+    holes = board_holes(board, settings, spans)
     tolerance = settings.min_size_mm * SIMPLIFY_FRACTION
     layers = []
     for i, layer in enumerate(board.copper_layers):
         if progress:
             progress(f"Extracting geometry: {layer}", i / len(board.copper_layers))
         copper = layer_copper(board, layer, spans)
+        layer_holes = [h.polygon for h in holes if layer in h.layers]
         layers.append(
             LayerGeometry(
                 layer=layer,
-                faces=partition_layer(outline, copper, tolerance),
-                anchors=layer_anchors(board, layer, spans),
+                faces=partition_layer(outline, copper, tolerance, layer_holes),
+                holes=layer_holes,
             )
         )
     return layers

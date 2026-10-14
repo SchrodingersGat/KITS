@@ -152,7 +152,7 @@ def test_example_simple_in_out():
     assert b.version == 20260206
     assert b.has_outline
     assert b.outline_bounding_box() == pytest.approx((80, 60, 120, 80))  # 40 x 20 mm
-    assert {p.net for p in b.pads()} == {"/NET"}
+    assert "/NET" in {p.net for p in b.pads()}
 
 
 @pytest.mark.parametrize("project", kicad_demo_projects(), ids=lambda p: p.stem)

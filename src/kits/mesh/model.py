@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..config import MeshSettings
+from ..config import DEFAULT_MIN_CIRCLE_POINTS, MeshSettings
 from .fingerprint import MeshFingerprint
 
 
@@ -113,6 +113,7 @@ class BoardMesh:
             "layers": np.array([m.layer for m in self.layers]),
             "z_mm": np.array([m.z_mm for m in self.layers]),
             "sizes_mm": np.array([self.settings.max_size_mm, self.settings.min_size_mm]),
+            "min_circle_points": np.array(self.settings.min_circle_points),
             "msh_path": np.array(str(self.msh_path) if self.msh_path else ""),
             "settings_hash": np.array(self.fingerprint.settings),
             "board_hash": np.array(self.fingerprint.board),
@@ -145,6 +146,8 @@ class BoardMesh:
                 for i, name in enumerate(data["layers"])
             ]
             max_size, min_size = (float(v) for v in data["sizes_mm"])
+            # Files from before this setting existed are stale anyway (their fingerprint won't match).
+            circle_points = int(data.get("min_circle_points", DEFAULT_MIN_CIRCLE_POINTS))
             msh_path = str(data["msh_path"])
             fingerprint = MeshFingerprint(
                 settings=str(data["settings_hash"]) if "settings_hash" in data else "",
@@ -152,7 +155,7 @@ class BoardMesh:
             )
         return cls(
             layers=layers,
-            settings=MeshSettings(max_size, min_size),
+            settings=MeshSettings(max_size, min_size, circle_points),
             msh_path=Path(msh_path) if msh_path else None,
             fingerprint=fingerprint,
         )

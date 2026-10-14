@@ -9,11 +9,12 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLabel,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from ..config import ConfigError, MeshSettings
+from ..config import MIN_CIRCLE_POINTS_RANGE, ConfigError, MeshSettings
 from .document import Document
 
 _MIN_SIZE_MM = 0.001
@@ -73,6 +74,14 @@ class MeshPanel(QWidget):
         )
         self.max_size.valueChanged.connect(self._on_size_changed)
         self.min_size.valueChanged.connect(self._on_size_changed)
+        self.circle_points = QSpinBox()
+        self.circle_points.setRange(*MIN_CIRCLE_POINTS_RANGE)
+        self.circle_points.setKeyboardTracking(False)
+        self.circle_points.setToolTip(
+            "Minimum number of mesh nodes around each drill hole (vias, plated and non-plated holes).\n"
+            "Holes are cut out of the mesh; this takes precedence over the min size for small holes."
+        )
+        self.circle_points.valueChanged.connect(self._on_size_changed)
 
         self.build_button = QPushButton("Build mesh")
         self.build_button.clicked.connect(self.build_requested)
@@ -90,6 +99,7 @@ class MeshPanel(QWidget):
         form = QFormLayout()
         form.addRow("Max size:", self.max_size)
         form.addRow("Min size:", self.min_size)
+        form.addRow("Hole points:", self.circle_points)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -121,7 +131,11 @@ class MeshPanel(QWidget):
         Returns:
             The (possibly invalid) settings.
         """
-        return MeshSettings(max_size_mm=self.max_size.value(), min_size_mm=self.min_size.value())
+        return MeshSettings(
+            max_size_mm=self.max_size.value(),
+            min_size_mm=self.min_size.value(),
+            min_circle_points=self.circle_points.value(),
+        )
 
     def _load_settings(self, *_args) -> None:
         """Show the open project's saved settings.
@@ -131,7 +145,12 @@ class MeshPanel(QWidget):
         """
         project = self._document.project
         settings = project.mesh if project else MeshSettings()
-        for box, value in ((self.max_size, settings.max_size_mm), (self.min_size, settings.min_size_mm)):
+        values = (
+            (self.max_size, settings.max_size_mm),
+            (self.min_size, settings.min_size_mm),
+            (self.circle_points, settings.min_circle_points),
+        )
+        for box, value in values:
             box.blockSignals(True)
             box.setValue(value)
             box.blockSignals(False)
@@ -167,7 +186,7 @@ class MeshPanel(QWidget):
         can_build = board is not None and board.has_outline and valid and not self._busy
         self.build_button.setEnabled(can_build)
         self.build_button.setText("Rebuild mesh" if doc.mesh else "Build mesh")
-        for box in (self.max_size, self.min_size):
+        for box in (self.max_size, self.min_size, self.circle_points):
             box.setEnabled(doc.project is not None and not self._busy)
 
         style, lines = "", []

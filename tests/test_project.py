@@ -14,7 +14,7 @@ def test_round_trip_with_relative_board_path(tmp_path):
 
     data = yaml.safe_load(project.path.read_text(encoding="utf-8"))
     assert data["board"] == "../boards/b.kicad_pro"  # relative, POSIX separators
-    assert data["mesh"] == {"max_size_mm": 0.5, "min_size_mm": 0.05}
+    assert data["mesh"] == {"max_size_mm": 0.5, "min_size_mm": 0.05, "min_circle_points": 36}
 
     loaded = load_kits_project(project.path)
     assert loaded.board == board.absolute()
@@ -64,6 +64,9 @@ def test_empty_file_gives_defaults(tmp_path):
         "mesh:\n  max_size_mm: big\n",
         "mesh: 3\n",
         "board: [1, 2]\n",
+        "mesh:\n  min_circle_points: 4\n",  # below the allowed range
+        "mesh:\n  min_circle_points: 36.5\n",
+        "mesh:\n  min_circle_points: true\n",
         "- a list\n",
         "mesh: [unclosed\n",
     ],

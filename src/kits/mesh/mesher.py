@@ -7,14 +7,13 @@ responsive UI should run :func:`mesh_board` in a separate process (see
 
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
 
 import gmsh
 import numpy as np
-import shapely
-from shapely.geometry import Point
 
 from ..config import MeshSettings
 from ..ingest.model import Board, is_copper_layer
@@ -25,6 +24,12 @@ from .model import BoardMesh, LayerMesh
 DEFAULT_BOARD_THICKNESS_MM = 1.6
 _TRIANGLE = 2  # gmsh element type: 3-node triangle
 _COORD_DECIMALS = 6  # vertex de-duplication precision, mm
+# Element size growth around holes: mm of size per mm of distance from the hole edge.
+HOLE_SIZE_GRADING = 1.0
+# Hole-edge points used to measure distance to a hole. Fewer points makes the
+# size field much cheaper to evaluate; the distance error (< one point spacing)
+# only matters right at the edge, where the edge vertices themselves set the size.
+_DISTANCE_POINTS_PER_HOLE = 9
 
 Progress = Callable[[str, float], None]
 
@@ -77,19 +82,75 @@ def _configure(settings: MeshSettings) -> None:
     # boundary segments at edges and grow towards max size inside.
     gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
     gmsh.option.setNumber("Mesh.Algorithm", 6)  # Frontal-Delaunay
+    # Each layer has many surfaces (copper/bare faces); mesh them in parallel.
+    gmsh.option.setNumber("General.NumThreads", os.cpu_count() or 1)
+
+
+def _refine_around_holes(
+    geom: LayerGeometry, point_tags: dict[tuple[float, float], int], settings: MeshSettings
+) -> None:
+    """Grade element size from each hole's edge segment length up to the max size.
+
+    Hole edges are much finer than the surrounding copper outlines, and with
+    boundary-size propagation off (see :func:`_configure`) gmsh would fill the
+    gap between them with slivers. A distance-based size field around each hole
+    fixes that locally. Holes are grouped by edge segment length so a large
+    mounting hole doesn't get a tiny-via-sized field.
+
+    Also lowers ``Mesh.MeshSizeMin`` to the finest hole segment for this layer:
+    ``min_circle_points`` takes precedence over the minimum size.
+
+    Must be called on the current gmsh model after ``synchronize()``.
+
+    Args:
+        geom: The layer geometry, including its hole outlines.
+        point_tags: gmsh point tags keyed by rounded coordinates, as created for the faces.
+        settings: Mesh settings.
+    """
+    gmsh.option.setNumber("Mesh.MeshSizeMin", settings.min_size_mm)
+    groups: dict[float, list[int]] = defaultdict(list)
+    for hole in geom.holes:
+        coords = list(hole.exterior.coords)[:-1]
+        segment = round(hole.exterior.length / len(coords), 6)
+        stride = max(1, len(coords) // _DISTANCE_POINTS_PER_HOLE)
+        for x, y in coords[::stride]:
+            tag = point_tags.get((round(x, _COORD_DECIMALS), round(y, _COORD_DECIMALS)))
+            if tag is not None:
+                groups[segment].append(tag)
+    if not groups:
+        return
+
+    fields = []
+    for size, tags in groups.items():
+        distance = gmsh.model.mesh.field.add("Distance")
+        gmsh.model.mesh.field.setNumbers(distance, "PointsList", tags)
+        threshold = gmsh.model.mesh.field.add("Threshold")
+        gmsh.model.mesh.field.setNumber(threshold, "InField", distance)
+        gmsh.model.mesh.field.setNumber(threshold, "SizeMin", size)
+        gmsh.model.mesh.field.setNumber(threshold, "SizeMax", settings.max_size_mm)
+        gmsh.model.mesh.field.setNumber(threshold, "DistMin", 0)
+        gmsh.model.mesh.field.setNumber(
+            threshold, "DistMax", max(settings.max_size_mm - size, 0) / HOLE_SIZE_GRADING
+        )
+        gmsh.model.mesh.field.setNumber(threshold, "StopAtDistMax", 1)
+        fields.append(threshold)
+    combined = gmsh.model.mesh.field.add("Min")
+    gmsh.model.mesh.field.setNumbers(combined, "FieldsList", fields)
+    gmsh.model.mesh.field.setAsBackgroundMesh(combined)
+    gmsh.option.setNumber("Mesh.MeshSizeMin", min(settings.min_size_mm, min(groups)))
 
 
 def mesh_layer(geom: LayerGeometry, settings: MeshSettings, z_mm: float) -> LayerMesh:
     """Mesh one layer's faces with gmsh's built-in kernel.
 
     Faces are built from shared points and lines, so adjacent copper and bare
-    faces get identical nodes along their common boundary. Anchor points are
-    embedded so each becomes a mesh node.
+    faces get identical nodes along their common boundary. Every face vertex
+    (including each hole-edge vertex) becomes a mesh node.
 
     Must be called inside an initialised gmsh session.
 
     Args:
-        geom: The layer's planar partition and anchor points.
+        geom: The layer's planar partition.
         settings: Mesh size limits.
         z_mm: Layer height, stored on the result.
 
@@ -139,30 +200,15 @@ def mesh_layer(geom: LayerGeometry, settings: MeshSettings, z_mm: float) -> Laye
             return gmsh.model.geo.addCurveLoop(curves) if len(curves) >= 3 else None
 
         surfaces: dict[int, bool] = {}  # surface tag -> is copper
-        face_polys = []
         for face in geom.faces:
             outer = loop(face.polygon.exterior.coords)
             if outer is None:
                 continue
             holes = [h for ring in face.polygon.interiors if (h := loop(ring.coords)) is not None]
             surfaces[gmsh.model.geo.addPlaneSurface([outer, *holes])] = face.is_copper
-            face_polys.append(face.polygon)
-
-        # Anchors: embed a point in whichever face contains it (skip existing vertices).
-        tree = shapely.STRtree(face_polys)
-        surface_list = list(surfaces)
-        embeds: dict[int, list[int]] = defaultdict(list)
-        for xy in geom.anchors:
-            key = (round(xy[0], _COORD_DECIMALS), round(xy[1], _COORD_DECIMALS))
-            if key in point_tags:
-                continue
-            hits = tree.query(Point(xy), predicate="within")
-            if len(hits):
-                embeds[surface_list[int(hits[0])]].append(point(xy))
 
         gmsh.model.geo.synchronize()
-        for surface, points in embeds.items():
-            gmsh.model.mesh.embed(0, points, 2, surface)
+        _refine_around_holes(geom, point_tags, settings)
         gmsh.model.mesh.generate(2)
 
         node_tags, coords, _ = gmsh.model.mesh.getNodes()

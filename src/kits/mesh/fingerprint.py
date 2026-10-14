@@ -20,7 +20,7 @@ from pathlib import Path
 from ..config import MeshSettings
 
 # Bump when geometry extraction or meshing changes in a way that alters results.
-MESHER_VERSION = 1
+MESHER_VERSION = 2  # 2: drill holes cut out, min points per hole edge
 
 _CHUNK = 1 << 20
 
