@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QScrollArea,
     QStackedWidget,
+    QToolBar,
 )
 
 from .. import __version__
@@ -28,6 +29,7 @@ from ..ingest.kicad import BOARD_SUFFIX
 from ..ingest.kicad import PROJECT_SUFFIX as KICAD_PROJECT_SUFFIX
 from ..mesh.model import BoardMesh
 from ..project import PROJECT_SUFFIX, KitsProject, default_project_path
+from . import colors
 from .board_info import BoardInfoPanel
 from .board_scene import BoardScene
 from .board_view import BoardView
@@ -126,6 +128,7 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self._cursor_label)
 
         self._create_actions()
+        self._create_toolbar()
         self._create_menus()
         for label, act in (
             ("Mesh", self.show_mesh_action),
@@ -288,6 +291,26 @@ class MainWindow(QMainWindow):
             self.solve_action,
         ]
 
+    def _create_toolbar(self) -> None:
+        """Add the toolbar with quick actions: build the mesh and solve."""
+        self.toolbar = QToolBar("Toolbar", self)
+        self.toolbar.setObjectName("MainToolbar")
+        self.toolbar.setMovable(False)
+        self.toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.toolbar)
+        for act, tip, color in (
+            (self.build_mesh_action, "Mesh the board with the project's mesh settings", colors.MESH_BUTTON),
+            (
+                self.solve_action,
+                "Solve current flow and temperature (meshes first if needed)",
+                colors.SOLVE_BUTTON,
+            ),
+        ):
+            shortcut = act.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
+            act.setToolTip(f"{tip} ({shortcut})" if shortcut else tip)
+            self.toolbar.addAction(act)
+            colors.style_action_button(self.toolbar.widgetForAction(act), color)
+
     def _create_menus(self) -> None:
         """Populate the File, Edit, Project, View and Mesh menus."""
         file_menu = self.menuBar().addMenu("&File")
@@ -321,6 +344,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.show_heat_loads_action)
         view_menu.addAction(self.show_elements_action)
         view_menu.addSeparator()
+        view_menu.addAction(self.toolbar.toggleViewAction())
         view_menu.addAction(self._layer_dock.toggleViewAction())
         view_menu.addAction(self._info_dock.toggleViewAction())
         view_menu.addAction(self._mesh_dock.toggleViewAction())

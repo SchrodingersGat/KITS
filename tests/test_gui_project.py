@@ -885,3 +885,23 @@ def test_resistive_elements_panel(app, window, bridged_kits, monkeypatch):
     panel.table.selectRow(0)
     panel.remove_selected_rows()
     assert doc.resistive_elements == [] and doc.results_staleness is not None
+
+
+def test_toolbar_quick_actions(window, kits_v9_path):
+    from kits.gui import colors
+
+    toolbar = window.toolbar
+    assert toolbar.actions() == [window.build_mesh_action, window.solve_action]
+    assert not any(a.isEnabled() for a in toolbar.actions())  # no board yet
+    assert "F9" in window.solve_action.toolTip()
+    # Distinct solid colours so they stand out on the dark theme.
+    mesh_style, solve_style = (toolbar.widgetForAction(a).styleSheet() for a in toolbar.actions())
+    assert colors.MESH_BUTTON.name() in mesh_style and colors.SOLVE_BUTTON.name() in solve_style
+    assert colors.MESH_BUTTON != colors.SOLVE_BUTTON
+    # The panels' buttons for the same actions match.
+    assert colors.MESH_BUTTON.name() in window.mesh_panel.build_button.styleSheet()
+    assert colors.SOLVE_BUTTON.name() in window.solve_panel.solve_button.styleSheet()
+    assert window.open_path(kits_v9_path)
+    assert all(a.isEnabled() for a in toolbar.actions())
+    view_menu = next(a.menu() for a in window.menuBar().actions() if a.text() == "&View")
+    assert window.toolbar.toggleViewAction() in view_menu.actions()  # can be hidden from the View menu

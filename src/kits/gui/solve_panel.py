@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import ConfigError, SolveSettings
+from . import colors
 from .document import Document
 from .field_display import (
     CURRENT_DENSITY_PERCENTILE,
@@ -129,6 +130,7 @@ class SolvePanel(QWidget):
         self._busy = False
 
         self.solve_button = QPushButton("Solve")
+        colors.style_action_button(self.solve_button, colors.SOLVE_BUTTON)
         self.solve_button.setToolTip("Solve current flow and temperature for the current sources (F9)")
         self.solve_button.clicked.connect(self.solve_requested)
 

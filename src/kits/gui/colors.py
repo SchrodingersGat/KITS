@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QAbstractButton
 
 BACKGROUND = QColor(0, 16, 35)
 EDGE_CUTS = QColor(208, 210, 205)
@@ -21,6 +22,8 @@ MARKER = QColor(80, 220, 255)  # result probe markers
 HEAT_SOURCE = QColor(235, 64, 52)  # heat injected at a pad
 HEAT_SINK = QColor(66, 135, 245)  # pad held at a temperature or tied to ambient
 ELEMENT = QColor(190, 110, 255)  # resistive element terminals and link
+MESH_BUTTON = QColor(37, 99, 235)  # toolbar: Build mesh
+SOLVE_BUTTON = QColor(22, 163, 74)  # toolbar: Solve
 ZONE_DARKEN = 160  # zones drawn this much darker than tracks on the same layer
 
 _FRONT = QColor(200, 52, 52)
@@ -60,3 +63,24 @@ def copper_color(name: str) -> QColor:
     digits = "".join(ch for ch in name if ch.isdigit())
     index = int(digits) - 1 if digits else 0
     return QColor(_INNER[index % len(_INNER)])
+
+
+def style_action_button(button: QAbstractButton, color: QColor) -> None:
+    """Make a main action button (Build mesh, Solve) a prominent solid colour.
+
+    Used for every button of the same action (toolbar and panels) so each
+    action keeps one colour throughout the app.
+
+    Args:
+        button: The tool button or push button.
+        color: Background colour (e.g. :data:`MESH_BUTTON`); hover lightens it,
+            pressing darkens it, and disabled buttons are a muted grey.
+    """
+    kind = button.metaObject().className()
+    button.setStyleSheet(
+        f"{kind} {{ background: {color.name()}; color: white; font-weight: bold;"
+        " border: none; border-radius: 4px; padding: 4px 14px; margin: 2px 3px; }"
+        f"{kind}:hover {{ background: {color.lighter(120).name()}; }}"
+        f"{kind}:pressed {{ background: {color.darker(130).name()}; }}"
+        f"{kind}:disabled {{ background: #4a4f57; color: #9aa0a8; }}"
+    )

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import MIN_CIRCLE_POINTS_RANGE, ConfigError, MeshSettings
+from . import colors
 from .document import Document
 
 _MIN_SIZE_MM = 0.001
@@ -92,6 +93,7 @@ class MeshPanel(QWidget):
         self.corner_size.valueChanged.connect(self._on_size_changed)
 
         self.build_button = QPushButton("Build mesh")
+        colors.style_action_button(self.build_button, colors.MESH_BUTTON)
         self.build_button.clicked.connect(self.build_requested)
         self.show_mesh = QCheckBox("Show mesh")
         self.show_mesh.setChecked(True)
