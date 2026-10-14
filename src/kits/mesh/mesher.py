@@ -14,6 +14,7 @@ from pathlib import Path
 
 import gmsh
 import numpy as np
+import shapely
 
 from ..config import MeshSettings
 from ..ingest.model import Board, is_copper_layer
@@ -200,14 +201,36 @@ def mesh_layer(geom: LayerGeometry, settings: MeshSettings, z_mm: float) -> Laye
             return gmsh.model.geo.addCurveLoop(curves) if len(curves) >= 3 else None
 
         surfaces: dict[int, bool] = {}  # surface tag -> is copper
+        face_polygons = []
         for face in geom.faces:
             outer = loop(face.polygon.exterior.coords)
             if outer is None:
                 continue
             holes = [h for ring in face.polygon.interiors if (h := loop(ring.coords)) is not None]
             surfaces[gmsh.model.geo.addPlaneSurface([outer, *holes])] = face.is_copper
+            face_polygons.append(face.polygon)
+
+        # Pad edges inside copper: embed them so the mesh follows each pad's outline.
+        embedded: dict[int, list[int]] = defaultdict(list)
+        if geom.pad_edges:
+            tree = shapely.STRtree(face_polygons)
+            surface_tags = list(surfaces)
+            for line in geom.pad_edges:
+                hits = tree.query(line.interpolate(0.5, normalized=True), predicate="within")
+                if not len(hits):
+                    continue
+                tags = [point(c) for c in line.coords]
+                for a, b in zip(tags, tags[1:], strict=False):
+                    if a == b:
+                        continue
+                    key = (min(a, b), max(a, b))
+                    if key not in line_tags:
+                        line_tags[key] = gmsh.model.geo.addLine(*key)
+                    embedded[surface_tags[int(hits[0])]].append(line_tags[key])
 
         gmsh.model.geo.synchronize()
+        for surface, curves in embedded.items():
+            gmsh.model.mesh.embed(1, sorted(set(curves)), 2, surface)
         _refine_around_holes(geom, point_tags, settings)
         gmsh.model.mesh.generate(2)
 

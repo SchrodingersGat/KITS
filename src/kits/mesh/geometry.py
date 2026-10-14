@@ -65,11 +65,15 @@ class LayerGeometry:
         layer: Copper layer name, e.g. ``"F.Cu"``.
         faces: Planar partition of the board outline (minus holes) into copper/bare faces.
         holes: Drill-hole outlines cut from this layer.
+        pad_edges: Pad outlines running through copper, to be embedded as mesh
+            edges so each pad's area is resolved exactly (pads are where current
+            enters). Kept a tolerance away from copper and hole edges.
     """
 
     layer: str
     faces: list[Face] = field(default_factory=list)
     holes: list[Polygon] = field(default_factory=list)
+    pad_edges: list[LineString] = field(default_factory=list)
 
     @property
     def copper_area(self) -> float:
@@ -479,6 +483,39 @@ def partition_layer(
     return faces
 
 
+def pad_edge_lines(board: Board, layer: str, faces: list[Face], tolerance: float) -> list[LineString]:
+    """Pad outlines on a layer that run through the interior of its copper.
+
+    Pad edges that coincide with the copper outline are already mesh edges;
+    the rest (where a pad joins a track or pour) are returned so they can be
+    embedded. They stop ``tolerance`` short of copper and hole edges so they
+    never create near-duplicate nodes there.
+
+    Args:
+        board: The board.
+        layer: Copper layer name.
+        faces: The layer's partition (see :func:`partition_layer`).
+        tolerance: Inset from copper/hole edges, and minimum kept line length, in mm.
+
+    Returns:
+        Non-overlapping line pieces, noded where pad outlines cross.
+    """
+    copper = shapely.union_all([f.polygon for f in faces if f.is_copper])
+    interior = copper.buffer(-tolerance)
+    if interior.is_empty:
+        return []
+    outlines = [
+        pad_area(p).simplify(tolerance).boundary
+        for p in board.pads()
+        if layer in p.layers and p.kind != "np_thru_hole"
+    ]
+    if not outlines:
+        return []
+    clipped = shapely.union_all(outlines, grid_size=SNAP_GRID_MM).intersection(interior)
+    lines = [g for g in shapely.get_parts(shapely.line_merge(clipped) if not clipped.is_empty else clipped)]
+    return [g for g in lines if isinstance(g, LineString) and g.length > tolerance]
+
+
 def extract_layers(
     board: Board,
     settings: MeshSettings,
@@ -507,11 +544,13 @@ def extract_layers(
             progress(f"Extracting geometry: {layer}", i / len(board.copper_layers))
         copper = layer_copper(board, layer, spans)
         layer_holes = [h.polygon for h in holes if layer in h.layers]
+        faces = partition_layer(outline, copper, tolerance, layer_holes)
         layers.append(
             LayerGeometry(
                 layer=layer,
-                faces=partition_layer(outline, copper, tolerance, layer_holes),
+                faces=faces,
                 holes=layer_holes,
+                pad_edges=pad_edge_lines(board, layer, faces, settings.min_size_mm),
             )
         )
     return layers

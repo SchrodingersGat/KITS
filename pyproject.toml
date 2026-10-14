@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "KiCad current density and thermal simulation tool"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["numpy", "shapely>=2.0", "gmsh>=4.11", "PyYAML"]
+dependencies = ["numpy", "scipy", "shapely>=2.0", "gmsh>=4.11", "PyYAML", "scikit-fem>=12"]
 
 [project.optional-dependencies]
 gui = ["PySide6>=6.6"]
