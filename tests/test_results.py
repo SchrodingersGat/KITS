@@ -62,7 +62,7 @@ def test_inputs_hash_ignores_source_order_but_not_values():
     settings = SolveSettings()
     assert inputs_hash([a, b], settings) == inputs_hash([b, a], settings)
     assert inputs_hash([a, b], settings) != inputs_hash([CurrentSource("J1", "1", 2.0), b], settings)
-    assert inputs_hash([a, b], settings) != inputs_hash([a, b], SolveSettings(convection_w_m2k=20))
+    assert inputs_hash([a, b], settings) != inputs_hash([a, b], SolveSettings(convection_top_w_m2k=20))
 
 
 def test_load_saved_results_checks_fingerprints(tmp_path):

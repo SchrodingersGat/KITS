@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QProgressDialog,
+    QScrollArea,
     QStackedWidget,
 )
 
@@ -91,7 +92,13 @@ class MainWindow(QMainWindow):
         )
         self.tabifyDockWidget(self._info_dock, self._sources_dock)
         self._sources_dock.raise_()
-        self._solve_dock = self._add_dock("Solve", self.solve_panel, Qt.DockWidgetArea.RightDockWidgetArea)
+        # Scrollable: the Solve tab is tall, and a dock's minimum height would
+        # otherwise set the whole window's minimum size.
+        solve_scroll = QScrollArea()
+        solve_scroll.setWidget(self.solve_panel)
+        solve_scroll.setWidgetResizable(True)
+        solve_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._solve_dock = self._add_dock("Solve", solve_scroll, Qt.DockWidgetArea.RightDockWidgetArea)
         self.tabifyDockWidget(self._mesh_dock, self._solve_dock)
         self._mesh_dock.raise_()
 

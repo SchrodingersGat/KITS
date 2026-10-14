@@ -6,6 +6,7 @@ stored in its section of the ``.kits`` YAML file.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass
 
@@ -190,6 +191,143 @@ def current_sources_from_list(data) -> list[CurrentSource]:
             raise ConfigError(f"pad {source.label} has more than one current source")
         seen.add(source.key)
     return sources
+
+
+@dataclass
+class SolveSettings:
+    """Material and boundary-condition inputs for the solver.
+
+    Stored in the project file as ``ambient_temperature_c``, ``materials:`` and
+    ``convection:`` (see :meth:`to_sections`).
+
+    Attributes:
+        copper_conductivity_s_m: Electrical conductivity of copper and plating, S/m.
+        copper_thermal_conductivity_w_mk: Thermal conductivity of copper, W/mK.
+        dielectric_thermal_conductivity_w_mk: Thermal conductivity of the board material, W/mK.
+        plating_thickness_mm: Barrel plating thickness of vias and plated holes, mm.
+        convection_top_w_m2k: Heat transfer coefficient from the top surface, W/m²K.
+        convection_bottom_w_m2k: Heat transfer coefficient from the bottom surface, W/m²K.
+        ambient_c: Ambient temperature, °C.
+    """
+
+    copper_conductivity_s_m: float = 5.8e7
+    copper_thermal_conductivity_w_mk: float = 390.0
+    dielectric_thermal_conductivity_w_mk: float = 0.3
+    plating_thickness_mm: float = 0.025
+    convection_top_w_m2k: float = 10.0
+    convection_bottom_w_m2k: float = 10.0
+    ambient_c: float = 25.0
+
+    def validate(self) -> None:
+        """Check the values are physically meaningful.
+
+        Raises:
+            ConfigError: If a conductivity or the plating thickness isn't positive, a
+                convection coefficient is negative, both are zero, or a value isn't finite.
+        """
+        for name, value in dataclasses.asdict(self).items():
+            if not math.isfinite(value):
+                raise ConfigError(f"{name} must be a finite number")
+        positive = {
+            "copper conductivity": self.copper_conductivity_s_m,
+            "copper thermal conductivity": self.copper_thermal_conductivity_w_mk,
+            "dielectric thermal conductivity": self.dielectric_thermal_conductivity_w_mk,
+            "plating thickness": self.plating_thickness_mm,
+        }
+        for label, value in positive.items():
+            if value <= 0:
+                raise ConfigError(f"{label} must be positive")
+        if self.convection_top_w_m2k < 0 or self.convection_bottom_w_m2k < 0:
+            raise ConfigError("convection coefficients can't be negative")
+        if self.convection_top_w_m2k + self.convection_bottom_w_m2k <= 0:
+            raise ConfigError("at least one surface needs convection, or the heat has nowhere to go")
+        if self.ambient_c < -273.15:
+            raise ConfigError("ambient temperature is below absolute zero")
+
+    def to_sections(self) -> dict:
+        """Return the project-file representation (three top-level keys).
+
+        Returns:
+            Mapping with ``ambient_temperature_c``, ``materials`` and ``convection``.
+        """
+        return {
+            "ambient_temperature_c": self.ambient_c,
+            "materials": {
+                "copper": {
+                    "conductivity_s_m": self.copper_conductivity_s_m,
+                    "thermal_conductivity_w_mk": self.copper_thermal_conductivity_w_mk,
+                    "plating_thickness_mm": self.plating_thickness_mm,
+                },
+                "dielectric": {"thermal_conductivity_w_mk": self.dielectric_thermal_conductivity_w_mk},
+            },
+            "convection": {
+                "top_w_m2k": self.convection_top_w_m2k,
+                "bottom_w_m2k": self.convection_bottom_w_m2k,
+            },
+        }
+
+    @classmethod
+    def from_sections(cls, ambient=None, materials=None, convection=None) -> SolveSettings:
+        """Build settings from the project-file sections, using defaults for anything missing.
+
+        Args:
+            ambient: The ``ambient_temperature_c`` value, or None.
+            materials: The ``materials:`` mapping, or None.
+            convection: The ``convection:`` mapping, or None.
+
+        Returns:
+            The validated settings.
+
+        Raises:
+            ConfigError: If a section has the wrong shape or a value is invalid.
+        """
+        defaults = cls()
+        materials = _mapping(materials, "materials")
+        copper = _mapping(materials.get("copper"), "materials.copper")
+        dielectric = _mapping(materials.get("dielectric"), "materials.dielectric")
+        convection = _mapping(convection, "convection")
+        try:
+            settings = cls(
+                copper_conductivity_s_m=float(
+                    copper.get("conductivity_s_m", defaults.copper_conductivity_s_m)
+                ),
+                copper_thermal_conductivity_w_mk=float(
+                    copper.get("thermal_conductivity_w_mk", defaults.copper_thermal_conductivity_w_mk)
+                ),
+                dielectric_thermal_conductivity_w_mk=float(
+                    dielectric.get("thermal_conductivity_w_mk", defaults.dielectric_thermal_conductivity_w_mk)
+                ),
+                plating_thickness_mm=float(copper.get("plating_thickness_mm", defaults.plating_thickness_mm)),
+                convection_top_w_m2k=float(convection.get("top_w_m2k", defaults.convection_top_w_m2k)),
+                convection_bottom_w_m2k=float(
+                    convection.get("bottom_w_m2k", defaults.convection_bottom_w_m2k)
+                ),
+                ambient_c=float(defaults.ambient_c if ambient is None else ambient),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"invalid material or environment setting: {exc}") from exc
+        settings.validate()
+        return settings
+
+
+def _mapping(value, name: str) -> dict:
+    """Return a config section as a dict, treating a missing section as empty.
+
+    Args:
+        value: The parsed section, or None.
+        name: Section name for error messages.
+
+    Returns:
+        The mapping.
+
+    Raises:
+        ConfigError: If the section isn't a mapping.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError(f"'{name}' must be a mapping")
+    return value
 
 
 def _whole_number(value) -> int:

@@ -27,6 +27,7 @@ import shapely
 from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import spsolve
 
+from ..config import SolveSettings
 from ..ingest.model import Board, is_copper_layer
 from ..mesh.geometry import board_holes, pad_area
 from ..mesh.model import BoardMesh
@@ -52,27 +53,6 @@ _LEAKAGE = 1e-12
 
 class SolveError(ValueError):
     """The problem is ill-posed (e.g. no reference voltage) or an electrode can't be found."""
-
-
-@dataclass
-class SolveSettings:
-    """Material and boundary-condition inputs.
-
-    Attributes:
-        copper_conductivity_s_m: Electrical conductivity of copper and plating.
-        copper_thermal_conductivity_w_mk: Thermal conductivity of copper.
-        dielectric_thermal_conductivity_w_mk: Thermal conductivity of the board material.
-        plating_thickness_mm: Barrel plating thickness of vias and plated holes.
-        convection_w_m2k: Heat transfer coefficient from the top and bottom surfaces.
-        ambient_c: Ambient temperature.
-    """
-
-    copper_conductivity_s_m: float = 5.8e7
-    copper_thermal_conductivity_w_mk: float = 390.0
-    dielectric_thermal_conductivity_w_mk: float = 0.3
-    plating_thickness_mm: float = 0.025
-    convection_w_m2k: float = 10.0
-    ambient_c: float = 25.0
 
 
 @dataclass
@@ -365,8 +345,10 @@ class LayeredModel:
             conductance = np.where(lf.copper, k_cu * self.copper_thickness[lf.layer], 0) + dielectric_share
             sheets.append(sheet_matrix(lf, conductance))
             loads.append(load_vector(lf, dc.sheet_power[lf.layer]))
-            outer = i == 0 or i == len(self.layers) - 1
-            h = np.full(lf.mesh.nelements, s.convection_w_m2k if outer else 0.0)
+            h_layer = (s.convection_top_w_m2k if i == 0 else 0.0) + (
+                s.convection_bottom_w_m2k if i == len(self.layers) - 1 else 0.0
+            )
+            h = np.full(lf.mesh.nelements, h_layer)
             convection.append(mass_matrix(lf, h))
 
         k = block_diag(sheets) + block_diag(convection)

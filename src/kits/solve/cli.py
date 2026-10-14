@@ -25,7 +25,7 @@ from ..mesh.mesher import MeshError, mesh_board
 from ..mesh.model import load_saved_mesh
 from ..project import PROJECT_SUFFIX, load_kits_project
 from .results import LayerResult, SolveResults, inputs_hash
-from .solver import Electrode, LayeredModel, SolveError, SolveSettings
+from .solver import Electrode, LayeredModel, SolveError
 
 _BALANCE_TOLERANCE_A = 1e-9
 
@@ -84,7 +84,7 @@ def solve_project(project_path: str | Path, progress=None) -> tuple[SolveResults
         report("Using the saved mesh", 0.05)
         start = 0.05
 
-    settings = SolveSettings()
+    settings = kits.solve
     span = 1.0 - start
     report("Assembling the model", start)
     model = LayeredModel(board, mesh, settings)

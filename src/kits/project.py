@@ -23,7 +23,7 @@ from pathlib import Path
 
 import yaml
 
-from .config import ConfigError, CurrentSource, MeshSettings, current_sources_from_list
+from .config import ConfigError, CurrentSource, MeshSettings, SolveSettings, current_sources_from_list
 
 PROJECT_SUFFIX = ".kits"
 OUTPUT_DIR = "kits_output"
@@ -50,6 +50,7 @@ class KitsProject:
         board: The linked KiCad ``.kicad_pro``/``.kicad_pcb`` file (absolute), or None.
         mesh: Mesh element size settings.
         current_sources: Currents fed into / drawn from the board at pads.
+        solve: Materials, convection and ambient temperature for the solver.
         extra: Top-level keys KITS doesn't interpret yet, kept so saving doesn't drop them.
     """
 
@@ -57,6 +58,7 @@ class KitsProject:
     board: Path | None = None
     mesh: MeshSettings = field(default_factory=MeshSettings)
     current_sources: list[CurrentSource] = field(default_factory=list)
+    solve: SolveSettings = field(default_factory=SolveSettings)
     extra: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -120,6 +122,7 @@ class KitsProject:
             preserved extra keys.
         """
         data: dict = {"board": self.board_reference(), "mesh": self.mesh.to_dict()}
+        data.update(self.solve.to_sections())
         if self.current_sources:
             data["current_sources"] = [s.to_dict() for s in self.current_sources]
         data.update({k: v for k, v in self.extra.items() if k not in data})
@@ -138,6 +141,7 @@ class KitsProject:
             ConfigError: If the settings are invalid or the file can't be written.
         """
         self.mesh.validate()
+        self.solve.validate()
         for source in self.current_sources:
             source.validate()
         target = _normalise(path) if path is not None else self.path
@@ -192,11 +196,15 @@ def load_kits_project(path: str | Path) -> KitsProject:
         raise ConfigError(f"{path.name}: 'board' must be a file path")
     mesh = MeshSettings.from_dict(data.pop("mesh", None))
     sources = current_sources_from_list(data.pop("current_sources", None))
+    solve = SolveSettings.from_sections(
+        data.pop("ambient_temperature_c", None), data.pop("materials", None), data.pop("convection", None)
+    )
     return KitsProject(
         path=path,
         board=(path.parent / board) if board else None,
         mesh=mesh,
         current_sources=sources,
+        solve=solve,
         extra=data,
     )
 

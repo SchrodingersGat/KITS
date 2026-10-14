@@ -37,7 +37,7 @@ def test_save_as_rewrites_relative_board_path(tmp_path):
 def test_unknown_keys_are_preserved(tmp_path):
     path = tmp_path / "p.kits"
     path.write_text(
-        "board: b.kicad_pro\nambient_temperature_c: 25\nmesh:\n  max_size_mm: 2\n", encoding="utf-8"
+        "board: b.kicad_pro\nheat_sinks: [{name: tab}]\nmesh:\n  max_size_mm: 2\n", encoding="utf-8"
     )
     project = load_kits_project(path)
     assert project.mesh == MeshSettings(2.0, 0.1)
@@ -45,7 +45,7 @@ def test_unknown_keys_are_preserved(tmp_path):
     project.save()
     reloaded = load_kits_project(path)
     assert reloaded.mesh == MeshSettings(0.5, 0.05)
-    assert reloaded.extra == {"ambient_temperature_c": 25}
+    assert reloaded.extra == {"heat_sinks": [{"name": "tab"}]}
 
 
 def test_empty_file_gives_defaults(tmp_path):
@@ -139,3 +139,64 @@ def test_no_current_sources_key_when_empty(tmp_path):
     project = KitsProject(tmp_path / "p.kits")
     project.save()
     assert "current_sources" not in yaml.safe_load(project.path.read_text(encoding="utf-8"))
+
+
+# -- materials, convection and ambient ---------------------------------------------------
+
+
+def test_solve_settings_round_trip(tmp_path):
+    from kits.config import SolveSettings
+
+    path = tmp_path / "p.kits"
+    path.write_text(
+        "ambient_temperature_c: 40\n"
+        "materials:\n  copper: {conductivity_s_m: 5.0e7, plating_thickness_mm: 0.02}\n"
+        "  dielectric: {thermal_conductivity_w_mk: 0.5}\n"
+        "convection: {top_w_m2k: 25, bottom_w_m2k: 0}\n",
+        encoding="utf-8",
+    )
+    project = load_kits_project(path)
+    assert project.solve == SolveSettings(
+        copper_conductivity_s_m=5.0e7,
+        copper_thermal_conductivity_w_mk=390.0,  # default kept
+        dielectric_thermal_conductivity_w_mk=0.5,
+        plating_thickness_mm=0.02,
+        convection_top_w_m2k=25.0,
+        convection_bottom_w_m2k=0.0,
+        ambient_c=40.0,
+    )
+    project.save()
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert data["ambient_temperature_c"] == 40.0
+    assert data["materials"]["copper"]["thermal_conductivity_w_mk"] == 390.0  # always written
+    assert data["convection"] == {"top_w_m2k": 25.0, "bottom_w_m2k": 0.0}
+    assert load_kits_project(path).solve == project.solve
+
+
+def test_solve_settings_default_when_absent(tmp_path):
+    from kits.config import SolveSettings
+
+    path = tmp_path / "p.kits"
+    path.write_text("board: b.kicad_pro\n", encoding="utf-8")
+    assert load_kits_project(path).solve == SolveSettings()
+
+
+@pytest.mark.parametrize(
+    "text, match",
+    [
+        ("convection: {top_w_m2k: 0, bottom_w_m2k: 0}\n", "nowhere to go"),
+        ("convection: {top_w_m2k: -1}\n", "negative"),
+        ("materials: {copper: {conductivity_s_m: 0}}\n", "copper conductivity must be positive"),
+        ("materials: {dielectric: {thermal_conductivity_w_mk: -0.3}}\n", "dielectric"),
+        ("materials: {copper: {plating_thickness_mm: lots}}\n", "invalid material"),
+        ("materials: [1, 2]\n", "'materials' must be a mapping"),
+        ("materials: {copper: 5}\n", "'materials.copper' must be a mapping"),
+        ("ambient_temperature_c: -300\n", "absolute zero"),
+        ("ambient_temperature_c: .inf\n", "finite"),
+    ],
+)
+def test_invalid_solve_settings_are_rejected(tmp_path, text, match):
+    path = tmp_path / "p.kits"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ConfigError, match=match):
+        load_kits_project(path)

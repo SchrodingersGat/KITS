@@ -14,13 +14,12 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
-from ..config import ConfigError, CurrentSource, MeshSettings
+from ..config import ConfigError, CurrentSource, MeshSettings, SolveSettings
 from ..ingest import Board, BoardLoadError, Project, load_project
 from ..mesh.fingerprint import MeshFingerprint, board_hash, settings_hash
 from ..mesh.model import BoardMesh, load_saved_mesh
 from ..project import KitsProject, load_kits_project
 from ..solve.results import SolveResults, inputs_hash, load_saved_results
-from ..solve.solver import SolveSettings
 
 
 class Document(QObject):
@@ -64,7 +63,6 @@ class Document(QObject):
         self._results: SolveResults | None = None
         self._results_notice: str | None = None
         self._results_from_file = False
-        self.solve_settings = SolveSettings()
 
     # -- state -------------------------------------------------------------------
 
@@ -169,7 +167,7 @@ class Document(QObject):
             ``(mesh_fingerprint, inputs_hash)`` to compare saved results against.
         """
         mesh_fp = MeshFingerprint(settings=settings_hash(self._project.mesh), board=self._board_hash)
-        return mesh_fp, inputs_hash(self._project.current_sources, self.solve_settings)
+        return mesh_fp, inputs_hash(self._project.current_sources, self._project.solve)
 
     def _load_saved_results(self) -> tuple[SolveResults | None, str | None]:
         """Load the project's saved results if they match the current inputs.
@@ -412,6 +410,28 @@ class Document(QObject):
         """Mark the project dirty and announce the change."""
         self._set_dirty(True)
         self.sources_changed.emit()
+
+    @property
+    def solve_settings(self) -> SolveSettings:
+        """Materials, convection and ambient temperature of the open project (defaults if none)."""
+        return self._project.solve if self._project else SolveSettings()
+
+    def set_solve_settings(self, settings: SolveSettings) -> None:
+        """Change the project's materials, convection and ambient (in memory; save to persist).
+
+        Args:
+            settings: The new settings.
+
+        Raises:
+            ConfigError: If no project is open or the settings are invalid.
+        """
+        project = self._require_project()
+        settings.validate()
+        if settings == project.solve:
+            return
+        project.solve = settings
+        self._set_dirty(True)
+        self.settings_changed.emit()
 
     def set_mesh_settings(self, settings: MeshSettings) -> None:
         """Change the project's mesh settings (in memory; save to persist).

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QLinearGradient, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -15,12 +19,74 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..config import ConfigError, SolveSettings
 from .document import Document
 from .field_display import CURRENT_DENSITY_PERCENTILE, DisplayMode, colormap, format_value
 
 _BALANCE_TOLERANCE_A = 1e-9
 _WARNING_STYLE = "color: #e0a030;"
 _LEGEND_SIZE = (220, 14)
+_ERROR_STYLE = "color: #e05050;"
+
+# Editable solver settings: (attribute, label, display unit, solver units per display unit, range,
+# decimals, tip). Converting by multiplying keeps round numbers exact (58 MS/m -> 58e6 S/m).
+_SETTING_FIELDS = (
+    ("ambient_c", "Ambient", " °C", 1.0, (-50.0, 200.0), 1, "Ambient air temperature."),
+    (
+        "convection_top_w_m2k",
+        "Convection, top",
+        " W/m²K",
+        1.0,
+        (0.0, 10_000.0),
+        1,
+        "Heat transfer coefficient from the top surface (≈5-15 still air, 25-100 forced air).",
+    ),
+    (
+        "convection_bottom_w_m2k",
+        "Convection, bottom",
+        " W/m²K",
+        1.0,
+        (0.0, 10_000.0),
+        1,
+        "Heat transfer coefficient from the bottom surface; 0 for an insulated face.",
+    ),
+    (
+        "copper_conductivity_s_m",
+        "Copper σ",
+        " MS/m",
+        1e6,
+        (1.0, 100.0),
+        2,
+        "Electrical conductivity of copper and via plating (annealed copper: 58 MS/m at 20 °C).",
+    ),
+    (
+        "copper_thermal_conductivity_w_mk",
+        "Copper k",
+        " W/mK",
+        1.0,
+        (1.0, 1_000.0),
+        1,
+        "Thermal conductivity of copper.",
+    ),
+    (
+        "plating_thickness_mm",
+        "Via plating",
+        " µm",
+        1e-3,
+        (1.0, 200.0),
+        1,
+        "Barrel plating thickness of vias and plated holes.",
+    ),
+    (
+        "dielectric_thermal_conductivity_w_mk",
+        "Dielectric k",
+        " W/mK",
+        1.0,
+        (0.01, 50.0),
+        3,
+        "Thermal conductivity of the board material (FR-4 ≈ 0.3).",
+    ),
+)
 
 
 class SolvePanel(QWidget):
@@ -80,9 +146,26 @@ class SolvePanel(QWidget):
         self.status = QLabel()
         self.status.setWordWrap(True)
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.settings_note = QLabel()
-        self.settings_note.setWordWrap(True)
-        self.settings_note.setEnabled(False)
+        self.setting_boxes: dict[str, QDoubleSpinBox] = {}
+        self._pending = document.solve_settings
+        settings_form = QFormLayout()
+        for name, label, unit, _scale, (low, high), decimals, tip in _SETTING_FIELDS:
+            box = QDoubleSpinBox()
+            box.setRange(low, high)
+            box.setDecimals(decimals)
+            box.setSuffix(unit)
+            box.setKeyboardTracking(False)
+            box.setToolTip(tip)
+            box.valueChanged.connect(lambda value, n=name: self._on_setting_edited(n, value))
+            self.setting_boxes[name] = box
+            settings_form.addRow(f"{label}:", box)
+        self.settings_error = QLabel()
+        self.settings_error.setStyleSheet(_ERROR_STYLE)
+        self.settings_error.setWordWrap(True)
+        self.settings_error.hide()
+        settings_form.addRow(self.settings_error)
+        self.settings_group = QGroupBox("Materials && environment")
+        self.settings_group.setLayout(settings_form)
 
         form = QFormLayout()
         form.addRow("Display:", self.mode)
@@ -94,7 +177,7 @@ class SolvePanel(QWidget):
         layout.addLayout(form)
         layout.addWidget(self.show_results)
         layout.addWidget(self.legend)
-        layout.addWidget(self.settings_note)
+        layout.addWidget(self.settings_group)
         layout.addStretch(1)
 
         for signal in (
@@ -105,12 +188,60 @@ class SolvePanel(QWidget):
             document.results_changed,
         ):
             signal.connect(self.refresh)
+        document.project_changed.connect(self._load_settings)
+        self._load_settings()
         self.refresh()
 
     @property
     def display_mode(self) -> DisplayMode:
         """The quantity selected for display."""
         return self.mode.currentData()
+
+    def settings(self) -> SolveSettings:
+        """Return the material and environment settings entered in the panel.
+
+        Returns:
+            The (possibly invalid) settings, in solver units.
+        """
+        return self._pending
+
+    def _load_settings(self, *_args) -> None:
+        """Show the open project's settings.
+
+        Args:
+            *_args: Ignored signal arguments.
+        """
+        settings = self._document.solve_settings
+        self._pending = settings
+        for name, _label, _unit, factor, _range, _decimals, _tip in _SETTING_FIELDS:
+            box = self.setting_boxes[name]
+            box.blockSignals(True)
+            box.setValue(getattr(settings, name) / factor)
+            box.blockSignals(False)
+        self.settings_error.hide()
+
+    def _on_setting_edited(self, name: str, value: float) -> None:
+        """Validate an edited setting and store it in the project (unsaved until File > Save).
+
+        Only the edited field is converted back to solver units, so the others
+        keep their exact stored values.
+
+        Args:
+            name: The :class:`SolveSettings` attribute that was edited.
+            value: The new value, in display units.
+        """
+        if self._document.project is None:
+            return
+        factor = next(f for n, _l, _u, f, _r, _d, _t in _SETTING_FIELDS if n == name)
+        self._pending = dataclasses.replace(self._pending, **{name: value * factor})
+        try:
+            self._document.set_solve_settings(self._pending)
+        except ConfigError as exc:
+            self.settings_error.setText(str(exc))
+            self.settings_error.show()
+        else:
+            self.settings_error.hide()
+        self.refresh()
 
     def set_busy(self, busy: bool) -> None:
         """Disable solving while a solve runs.
@@ -161,7 +292,15 @@ class SolvePanel(QWidget):
         board = doc.board
         sources = doc.current_sources
         balanced = abs(sum(s.current_a for s in sources)) <= _BALANCE_TOLERANCE_A
-        can_solve = board is not None and board.has_outline and bool(sources) and balanced and not self._busy
+        valid = self.settings_error.isHidden()
+        can_solve = (
+            board is not None
+            and board.has_outline
+            and bool(sources)
+            and balanced
+            and valid
+            and not self._busy
+        )
         self.solve_button.setEnabled(can_solve)
 
         style, lines = "", []
@@ -200,10 +339,4 @@ class SolvePanel(QWidget):
         for widget in (self.mode, self.show_results, self.legend):
             widget.setEnabled(has_results)
         self.legend.setVisible(has_results)
-        s = doc.solve_settings
-        self.settings_note.setText(
-            f"Materials (defaults): copper {s.copper_conductivity_s_m:.3g} S/m, "
-            f"plating {s.plating_thickness_mm * 1000:g} µm; "
-            f"dielectric {s.dielectric_thermal_conductivity_w_mk:g} W/mK; "
-            f"convection {s.convection_w_m2k:g} W/m²K to {s.ambient_c:g} °C ambient."
-        )
+        self.settings_group.setEnabled(doc.project is not None and not self._busy)

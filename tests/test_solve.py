@@ -125,7 +125,7 @@ def test_two_layers_through_vias_match_network_estimate(two_layer_board):
 
 
 def test_heat_balance_and_mean_temperature_rise(strip_board):
-    settings = SolveSettings(convection_w_m2k=10.0, ambient_c=25.0)
+    settings = SolveSettings(convection_top_w_m2k=10.0, convection_bottom_w_m2k=10.0, ambient_c=25.0)
     model = _model(strip_board, settings)
     dc = model.solve_dc([Electrode("P1", "1", current=10.0), Electrode("P2", "1", current=-10.0)])
     thermal = model.solve_thermal(dc)
@@ -169,3 +169,26 @@ def test_electrode_covers_every_pad_with_the_number(tmp_path):
     dc = _model(board).solve_dc([Electrode("P1", "1", voltage=1.0), Electrode("P2", "1", voltage=0.0)])
     # Together the two halves span the full strip width, so the strip result is unchanged.
     assert dc.resistance(("P1", "1"), ("P2", "1")) == pytest.approx(R_SQUARE * 32 / 6, rel=1e-6)
+
+
+def test_one_sided_convection_still_balances(strip_board):
+    # Bottom face insulated: all heat must leave from the top, which then runs hotter.
+    both = _model(strip_board, SolveSettings(convection_top_w_m2k=10, convection_bottom_w_m2k=10))
+    top_only = _model(strip_board, SolveSettings(convection_top_w_m2k=10, convection_bottom_w_m2k=0))
+    electrodes = [Electrode("P1", "1", current=10.0), Electrode("P2", "1", current=-10.0)]
+    t_both = both.solve_thermal(both.solve_dc(electrodes))
+    dc = top_only.solve_dc(electrodes)
+    t_top = top_only.solve_thermal(dc)
+    assert t_top.convected_power == pytest.approx(dc.total_power, rel=1e-9)
+    assert t_top.max_temperature > t_both.max_temperature
+
+
+def test_ambient_shifts_temperature_uniformly(strip_board):
+    # The model is linear in temperature, so ambient is a pure offset. (One model,
+    # so both solves share a mesh: threaded meshing isn't bit-for-bit repeatable.)
+    model = _model(strip_board, SolveSettings(ambient_c=25.0))
+    dc = model.solve_dc([Electrode("P1", "1", current=10.0), Electrode("P2", "1", current=-10.0)])
+    t_cool = model.solve_thermal(dc).temperature["F.Cu"]
+    model.settings = SolveSettings(ambient_c=60.0)
+    t_hot = model.solve_thermal(dc).temperature["F.Cu"]
+    np.testing.assert_allclose(t_hot - t_cool, 35.0, atol=1e-9)

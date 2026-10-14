@@ -464,3 +464,32 @@ def test_sources_table_leaves_no_stale_editors(window, strip_kits):
     table = window.sources_panel.table
     visible = [s for s in table.viewport().findChildren(QDoubleSpinBox) if s.isVisible()]
     assert len(visible) == table.rowCount() == 2
+
+
+def test_solve_panel_edits_materials_and_environment(window, strip_kits):
+    from kits.config import SolveSettings
+
+    assert window.open_path(strip_kits)
+    panel = window.solve_panel
+    boxes = panel.setting_boxes
+    assert boxes["copper_conductivity_s_m"].value() == pytest.approx(58.0)  # MS/m
+    assert boxes["plating_thickness_mm"].value() == pytest.approx(25.0)  # µm
+
+    boxes["ambient_c"].setValue(40.0)
+    assert window.document.solve_settings.ambient_c == 40.0 and window.document.dirty
+    boxes["plating_thickness_mm"].setValue(30.0)
+    assert window.document.solve_settings.plating_thickness_mm == pytest.approx(0.03)
+
+    # Both faces insulated is rejected and blocks solving until fixed.
+    boxes["convection_top_w_m2k"].setValue(0.0)
+    boxes["convection_bottom_w_m2k"].setValue(0.0)
+    assert not panel.settings_error.isHidden() and not panel.solve_button.isEnabled()
+    boxes["convection_bottom_w_m2k"].setValue(5.0)
+    assert panel.settings_error.isHidden() and panel.solve_button.isEnabled()
+
+    assert window.save()
+    saved = load_kits_project(strip_kits).solve
+    assert saved == SolveSettings(
+        ambient_c=40.0, plating_thickness_mm=0.03, convection_top_w_m2k=0.0, convection_bottom_w_m2k=5.0
+    )
+    assert saved.copper_conductivity_s_m == 5.8e7  # untouched fields keep their exact values
