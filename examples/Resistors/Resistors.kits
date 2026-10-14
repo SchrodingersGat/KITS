@@ -27,6 +27,7 @@ heat_loads:
 - ref: J2
   pad: '1'
   power_w: -0.2
+  enabled: false
 resistive_elements:
 - name: R2
   ref: R2

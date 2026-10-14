@@ -118,14 +118,26 @@ class KitsProject:
         return self.output_dir / f"{self.name}.results.npz"
 
     def scaled_current_sources(self) -> list[CurrentSource]:
-        """The current sources as solved: each current times :attr:`current_multiplier`.
+        """The enabled current sources as solved: each current times :attr:`current_multiplier`.
 
         Returns:
             New source objects; the stored ones are unchanged.
         """
         return [
-            CurrentSource(s.ref, s.pad, s.current_a * self.current_multiplier) for s in self.current_sources
+            CurrentSource(s.ref, s.pad, s.current_a * self.current_multiplier)
+            for s in self.current_sources
+            if s.enabled
         ]
+
+    @property
+    def active_heat_loads(self) -> list[HeatLoad]:
+        """The enabled heat loads (those that are solved)."""
+        return [h for h in self.heat_loads if h.enabled]
+
+    @property
+    def active_resistive_elements(self) -> list[ResistiveElement]:
+        """The enabled resistive elements (those that are solved)."""
+        return [e for e in self.resistive_elements if e.enabled]
 
     def board_reference(self) -> str | None:
         """The board path as written to the file: relative to the project if possible.

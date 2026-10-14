@@ -10,6 +10,7 @@ is written until :meth:`Document.save` or :meth:`Document.save_as`.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
@@ -229,7 +230,10 @@ class Document(QObject):
         mesh_fp = MeshFingerprint(settings=settings_hash(self._project.mesh), board=self._board_hash)
         project = self._project
         return mesh_fp, inputs_hash(
-            project.scaled_current_sources(), project.solve, project.heat_loads, project.resistive_elements
+            project.scaled_current_sources(),
+            project.solve,
+            project.active_heat_loads,
+            project.active_resistive_elements,
         )
 
     def _load_saved_results(self) -> tuple[SolveResults | None, str | None]:
@@ -431,10 +435,30 @@ class Document(QObject):
         project = self._require_project()
         for i, source in enumerate(project.current_sources):
             if source.key == (ref, str(pad)):
-                updated = CurrentSource(source.ref, source.pad, float(current_a))
+                updated = dataclasses.replace(source, current_a=float(current_a))
                 updated.validate()
                 if updated != source:
                     project.current_sources[i] = updated
+                    self._sources_edited()
+                return
+        raise ConfigError(f"pad {ref}.{pad} has no current source")
+
+    def set_source_enabled(self, ref: str, pad: str, enabled: bool) -> None:
+        """Include or exclude a source from solves and the board view.
+
+        Args:
+            ref: Footprint reference.
+            pad: Pad number.
+            enabled: False to keep it in the project but ignore it.
+
+        Raises:
+            ConfigError: If there is no such source.
+        """
+        project = self._require_project()
+        for i, item in enumerate(project.current_sources):
+            if item.key == (ref, str(pad)):
+                if item.enabled != enabled:
+                    project.current_sources[i] = dataclasses.replace(item, enabled=enabled)
                     self._sources_edited()
                 return
         raise ConfigError(f"pad {ref}.{pad} has no current source")
@@ -559,13 +583,38 @@ class Document(QObject):
         project = self._require_project()
         for i, load in enumerate(project.heat_loads):
             if load.key == (ref, str(pad)):
-                updated = HeatLoad(load.ref, load.pad, kind, float(value))
+                updated = dataclasses.replace(load, kind=kind, value=float(value))
                 updated.validate()
                 if updated != load:
                     project.heat_loads[i] = updated
                     self._heat_loads_edited()
                 return
         raise ConfigError(f"pad {ref}.{pad} has no heat load")
+
+    def set_heat_load_enabled(self, ref: str, pad: str, enabled: bool) -> None:
+        """Include or exclude a heat load from solves and the board view.
+
+        Args:
+            ref: Footprint reference.
+            pad: Pad number.
+            enabled: False to keep it in the project but ignore it.
+
+        Raises:
+            ConfigError: If there is no such heat load.
+        """
+        project = self._require_project()
+        for i, item in enumerate(project.heat_loads):
+            if item.key == (ref, str(pad)):
+                if item.enabled != enabled:
+                    project.heat_loads[i] = dataclasses.replace(item, enabled=enabled)
+                    self._heat_loads_edited()
+                return
+        raise ConfigError(f"pad {ref}.{pad} has no heat load")
+
+    @property
+    def active_heat_loads(self) -> list[HeatLoad]:
+        """The enabled heat loads (those solved and drawn)."""
+        return self._project.active_heat_loads if self._project else []
 
     def remove_heat_load(self, ref: str, pad: str) -> None:
         """Remove the heat load on a pad.
@@ -644,6 +693,30 @@ class Document(QObject):
                     self._elements_edited()
                 return
         raise ConfigError(f"there is no resistive element named {name!r}")
+
+    def set_element_enabled(self, name: str, enabled: bool) -> None:
+        """Include or exclude a element from solves and the board view.
+
+        Args:
+            name: Element name.
+            enabled: False to keep it in the project but ignore it.
+
+        Raises:
+            ConfigError: If there is no such element.
+        """
+        project = self._require_project()
+        for i, item in enumerate(project.resistive_elements):
+            if item.name == name:
+                if item.enabled != enabled:
+                    project.resistive_elements[i] = dataclasses.replace(item, enabled=enabled)
+                    self._elements_edited()
+                return
+        raise ConfigError(f"there is no resistive element named {name!r}")
+
+    @property
+    def active_resistive_elements(self) -> list[ResistiveElement]:
+        """The enabled resistive elements (those solved and drawn)."""
+        return self._project.active_resistive_elements if self._project else []
 
     def remove_resistive_element(self, name: str) -> None:
         """Remove a resistive element.

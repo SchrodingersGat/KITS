@@ -92,7 +92,7 @@ def test_solve_project_writes_results_and_reuses_the_mesh(strip_project, monkeyp
 @pytest.mark.parametrize(
     "sources, error, match",
     [
-        ([], ConfigError, "no current sources"),
+        ([], ConfigError, "no enabled current sources"),
         ([CurrentSource("P1", "1", 5.0), CurrentSource("P2", "1", -4.0)], ConfigError, "sum to zero"),
         ([CurrentSource("P1", "1", 5.0), CurrentSource("Q9", "1", -5.0)], SolveError, "Q9.1"),
     ],
@@ -246,5 +246,5 @@ def test_heat_only_solve(strip_project, tmp_path):
     # Neither sources nor loads: nothing to solve.
     project.heat_loads = []
     project.save()
-    with pytest.raises(ConfigError, match="no current sources or heat loads"):
+    with pytest.raises(ConfigError, match="no enabled current sources or heat loads"):
         cli.solve_project(strip_project)

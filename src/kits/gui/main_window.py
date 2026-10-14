@@ -778,13 +778,13 @@ class MainWindow(QMainWindow):
         doc = self.document
         if doc.project is None or doc.board is None or self._mesh_job or self._solve_job:
             return
-        sources = doc.current_sources
+        sources = [s for s in doc.current_sources if s.enabled]
         if not doc.board.has_outline:
             QMessageBox.warning(self, "Cannot solve", "The board has no Edge.Cuts outline.")
             return
-        if not sources and not doc.heat_loads:
+        if not sources and not doc.active_heat_loads:
             QMessageBox.warning(
-                self, "Cannot solve", "Add current sources or heat loads to pads before solving."
+                self, "Cannot solve", "Add (or enable) current sources or heat loads before solving."
             )
             return
         if sources and abs(sum(s.current_a for s in sources)) > 1e-9:
@@ -1253,7 +1253,7 @@ class MainWindow(QMainWindow):
         """
         if self.scene is not None:
             self.scene.set_elements_visible(self.show_elements_action.isChecked())
-            self.scene.set_elements(self.document.resistive_elements)
+            self.scene.set_elements(self.document.active_resistive_elements)
 
     def _show_heat_loads(self, *_args) -> None:
         """Redraw the heat load markers on the board.
@@ -1263,7 +1263,7 @@ class MainWindow(QMainWindow):
         """
         if self.scene is not None:
             self.scene.set_heat_loads_visible(self.show_heat_loads_action.isChecked())
-            self.scene.set_heat_loads(self.document.heat_loads)
+            self.scene.set_heat_loads(self.document.active_heat_loads)
 
     def _on_show_markers_toggled(self, checked: bool) -> None:
         """Show or hide the result markers, keeping the panel checkbox in sync.

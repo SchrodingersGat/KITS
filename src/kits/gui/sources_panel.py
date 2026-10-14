@@ -29,6 +29,23 @@ _COLUMNS = ["Pad", "Net", "Current"]
 _KEY_ROLE = Qt.ItemDataRole.UserRole
 
 
+def make_enable_box(item: QTableWidgetItem, enabled: bool, *row: QTableWidgetItem) -> None:
+    """Give a row's first cell an enable checkbox, and grey out the row when disabled.
+
+    Args:
+        item: The first cell.
+        enabled: Whether the row's object is enabled.
+        *row: The row's other cells, greyed out with it.
+    """
+    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+    item.setCheckState(Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
+    if not item.toolTip():
+        item.setToolTip("Untick to leave it out of the solve and the board view (it stays in the project)")
+    if not enabled:
+        for cell in (item, *row):
+            cell.setForeground(Qt.GlobalColor.gray)
+
+
 class SourcesPanel(QWidget):
     """Edits the current fed into (or drawn from) the board at pads.
 
@@ -77,6 +94,7 @@ class SourcesPanel(QWidget):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.table.itemSelectionChanged.connect(self._on_row_selection)
+        self.table.itemChanged.connect(self._on_item_changed)
         QShortcut(QKeySequence.StandardKey.Delete, self.table, self.remove_selected_rows)
 
         self.show_sources = QCheckBox("Show current sources")
@@ -199,6 +217,7 @@ class SourcesPanel(QWidget):
                 for item in (pad_item, net_item):
                     item.setForeground(Qt.GlobalColor.darkYellow)
                     item.setToolTip(f"{source.label} isn't on the board; it is ignored by the solver")
+            make_enable_box(pad_item, source.enabled, net_item)
             self.table.setItem(row, 0, pad_item)
             self.table.setItem(row, 1, net_item)
             self.table.setCellWidget(row, 2, self._current_spinbox(source))
@@ -251,6 +270,16 @@ class SourcesPanel(QWidget):
             self._document.set_current_multiplier(value)
         except ConfigError:
             pass
+
+    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        """Enable or disable a source when its checkbox is toggled.
+
+        Args:
+            item: The changed cell.
+        """
+        if item.column() == 0:
+            on = item.checkState() == Qt.CheckState.Checked
+            self._document.set_source_enabled(*self._row_key(item.row()), on)
 
     def _on_row_selection(self) -> None:
         """Report the selected row's pad so the board can highlight it."""
@@ -324,10 +353,14 @@ class SourcesPanel(QWidget):
 
     def _update_total(self) -> None:
         """Show the net current and warn if sources and sinks don't balance."""
-        sources = self._document.current_sources
+        everything = self._document.current_sources
+        sources = [s for s in everything if s.enabled]
+        disabled = len(everything) - len(sources)
         if not sources:
             self.total_label.setStyleSheet("")
-            self.total_label.setText("No current sources.")
+            self.total_label.setText(
+                f"No enabled current sources ({disabled} disabled)." if disabled else "No current sources."
+            )
             return
         total = sum(s.current_a for s in sources)
         into = sum(s.current_a for s in sources if s.current_a > 0)
@@ -335,6 +368,8 @@ class SourcesPanel(QWidget):
         multiplier = self._document.current_multiplier
         if multiplier != 1.0:
             text += f"\nSolved with × {multiplier:g}: {into * multiplier:g} A in"
+        if disabled:
+            text += f" · {disabled} disabled"
         if abs(total) > _BALANCE_TOLERANCE_A:
             self.total_label.setStyleSheet(_WARNING_STYLE)
             text += "\nSources and sinks must sum to zero to solve."

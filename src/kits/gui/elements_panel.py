@@ -31,6 +31,7 @@ from ..ingest.model import Footprint
 from ..solve.elements import auto_pad_groups, default_ambient_conductance, pad_numbers, parse_resistance
 from .document import Document
 from .field_display import format_resistance
+from .sources_panel import make_enable_box
 
 DEFAULT_RESISTANCE_OHM = 0.01  # when the footprint value isn't a resistance (e.g. a MOSFET)
 DEFAULT_THETA_K_W = 10.0
@@ -103,6 +104,7 @@ class ElementDialog(QDialog):
         self._ref = footprint.reference
         self._taken = taken_names
         self._element: ResistiveElement | None = None
+        self._enabled = element.enabled
         nets: dict[str, set[str]] = {}
         for pad in footprint.pads:
             if pad.number and pad.net:
@@ -237,6 +239,7 @@ class ElementDialog(QDialog):
                 thermal_resistance_ambient_k_w=(
                     None if self.ambient_default.isChecked() else self.ambient_theta.value()
                 ),
+                enabled=self._enabled,
             )
             try:
                 element.validate()
@@ -291,6 +294,7 @@ class ElementsPanel(QWidget):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.itemSelectionChanged.connect(self._update_selection_ui)
+        self.table.itemChanged.connect(self._on_item_changed)
         self.table.cellDoubleClicked.connect(lambda _row, _col: self.edit_selected())
         QShortcut(QKeySequence.StandardKey.Delete, self.table, self.remove_selected_rows)
 
@@ -435,17 +439,31 @@ class ElementsPanel(QWidget):
                 _theta_text(e.thermal_resistance_board_k_w, "ideal"),
                 _theta_text(e.thermal_resistance_ambient_k_w, "convection"),
             ]
-            for column, text in enumerate(cells):
+            items = []
+            for text in cells:
                 item = QTableWidgetItem(text)
                 item.setData(_NAME_ROLE, e.name)
                 if missing:
                     item.setForeground(Qt.GlobalColor.darkYellow)
                     item.setToolTip(f"{e.ref} isn't on the board; the solve will fail until it is removed")
+                items.append(item)
+            make_enable_box(items[0], e.enabled, *items[1:])
+            for column, item in enumerate(items):
                 self.table.setItem(row, column, item)
             if e.name in selected:
                 self.table.selectRow(row)
         self.table.blockSignals(False)
         self._update_selection_ui()
+
+    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        """Enable or disable an element when its checkbox is toggled.
+
+        Args:
+            item: The changed cell.
+        """
+        if item.column() == 0:
+            on = item.checkState() == Qt.CheckState.Checked
+            self._document.set_element_enabled(self._row_name(item.row()), on)
 
     def _row_name(self, row: int) -> str:
         """Element name of a table row.

@@ -108,6 +108,25 @@ class MeshSettings:
         return settings
 
 
+def _enabled_from(data: dict, what: str) -> bool:
+    """Read the optional ``enabled`` flag of a list entry.
+
+    Args:
+        data: The parsed entry.
+        what: Description for error messages, e.g. ``"current source J1.1"``.
+
+    Returns:
+        The flag (True if absent).
+
+    Raises:
+        ConfigError: If it isn't true or false.
+    """
+    value = data.get("enabled", True)
+    if not isinstance(value, bool):
+        raise ConfigError(f"'enabled' of {what} must be true or false")
+    return value
+
+
 @dataclass
 class CurrentSource:
     """A current fed into (or drawn out of) the board at a pad.
@@ -117,11 +136,13 @@ class CurrentSource:
         pad: Pad number, e.g. ``"1"``. Every pad of the footprint with this number
             is included (footprints may repeat a number, e.g. thermal pads).
         current_a: Current into the board in amperes; negative for a sink.
+        enabled: False to leave it out of solves and the board view without deleting it.
     """
 
     ref: str
     pad: str
     current_a: float
+    enabled: bool = True
 
     @property
     def key(self) -> tuple[str, str]:
@@ -148,9 +169,12 @@ class CurrentSource:
         """Return the YAML representation.
 
         Returns:
-            Mapping with ``ref``, ``pad`` and ``current_a``.
+            Mapping with ``ref``, ``pad``, ``current_a`` and ``enabled: false`` if disabled.
         """
-        return {"ref": self.ref, "pad": self.pad, "current_a": self.current_a}
+        data = {"ref": self.ref, "pad": self.pad, "current_a": self.current_a}
+        if not self.enabled:
+            data["enabled"] = False
+        return data
 
     @classmethod
     def from_dict(cls, data) -> CurrentSource:
@@ -172,6 +196,7 @@ class CurrentSource:
                 ref=str(data["ref"]),
                 pad=str(data["pad"]),
                 current_a=float(data["current_a"]),
+                enabled=_enabled_from(data, f"current source {data.get('ref')}.{data.get('pad')}"),
             )
         except KeyError as exc:
             raise ConfigError(f"current source is missing {exc.args[0]!r}") from exc
@@ -273,12 +298,14 @@ class HeatLoad:
         pad: Pad number, e.g. ``"9"``. Every pad of the footprint with this number is included.
         kind: Power source, fixed temperature, or thermal resistance to ambient.
         value: Watts, °C, or K/W (°C/W) according to ``kind``.
+        enabled: False to leave it out of solves and the board view without deleting it.
     """
 
     ref: str
     pad: str
     kind: HeatLoadKind
     value: float
+    enabled: bool = True
 
     @property
     def key(self) -> tuple[str, str]:
@@ -316,9 +343,12 @@ class HeatLoad:
 
         Returns:
             Mapping with ``ref``, ``pad`` and one of ``power_w``, ``temperature_c``
-            or ``thermal_resistance_k_w``.
+            or ``thermal_resistance_k_w``, and ``enabled: false`` if disabled.
         """
-        return {"ref": self.ref, "pad": self.pad, self.kind.value: self.value}
+        data = {"ref": self.ref, "pad": self.pad, self.kind.value: self.value}
+        if not self.enabled:
+            data["enabled"] = False
+        return data
 
     @classmethod
     def from_dict(cls, data) -> HeatLoad:
@@ -341,7 +371,11 @@ class HeatLoad:
             raise ConfigError(f"each heat load needs exactly one of {keys}")
         try:
             load = cls(
-                ref=str(data["ref"]), pad=str(data["pad"]), kind=kinds[0], value=float(data[kinds[0].value])
+                ref=str(data["ref"]),
+                pad=str(data["pad"]),
+                kind=kinds[0],
+                value=float(data[kinds[0].value]),
+                enabled=_enabled_from(data, f"heat load {data.get('ref')}.{data.get('pad')}"),
             )
         except KeyError as exc:
             raise ConfigError(f"heat load is missing {exc.args[0]!r}") from exc
@@ -434,6 +468,7 @@ class ResistiveElement:
         thermal_resistance_ambient_k_w: Body-to-ambient thermal resistance, K/W;
             None for convection from the body (``1 / (h · area)``, see
             :func:`kits.solve.elements.default_ambient_conductance`).
+        enabled: False to leave it out of solves and the board view without deleting it.
     """
 
     name: str
@@ -443,6 +478,7 @@ class ResistiveElement:
     resistance_ohm: float
     thermal_resistance_board_k_w: float | None = None
     thermal_resistance_ambient_k_w: float | None = None
+    enabled: bool = True
 
     @property
     def groups(self) -> tuple[PadGroup, PadGroup]:
@@ -485,7 +521,7 @@ class ResistiveElement:
 
         Returns:
             Mapping with ``name``, ``ref``, ``resistance_ohm``, ``pads_a``, ``pads_b``
-            and the thermal resistances that aren't defaulted.
+            the thermal resistances that aren't defaulted, and ``enabled: false`` if disabled.
         """
         data = {
             "name": self.name,
@@ -498,6 +534,8 @@ class ResistiveElement:
             data["thermal_resistance_board_k_w"] = self.thermal_resistance_board_k_w
         if self.thermal_resistance_ambient_k_w is not None:
             data["thermal_resistance_ambient_k_w"] = self.thermal_resistance_ambient_k_w
+        if not self.enabled:
+            data["enabled"] = False
         return data
 
     @classmethod
@@ -536,6 +574,7 @@ class ResistiveElement:
                 resistance_ohm=float(data["resistance_ohm"]),
                 thermal_resistance_board_k_w=optional("thermal_resistance_board_k_w"),
                 thermal_resistance_ambient_k_w=optional("thermal_resistance_ambient_k_w"),
+                enabled=_enabled_from(data, f"resistive element {data.get('name')}"),
             )
         except KeyError as exc:
             raise ConfigError(f"resistive element is missing {exc.args[0]!r}") from exc

@@ -68,10 +68,12 @@ def solve_project(project_path: str | Path, progress=None) -> tuple[SolveResults
     if kits.board is None:
         raise ConfigError(f"{kits.path.name} doesn't link a KiCad board")
     sources = kits.scaled_current_sources()
-    heat_loads = kits.heat_loads
-    elements = kits.resistive_elements
+    heat_loads = kits.active_heat_loads
+    elements = kits.active_resistive_elements
     if not sources and not heat_loads:
-        raise ConfigError("the project has no current sources or heat loads; add some before solving")
+        raise ConfigError(
+            "the project has no enabled current sources or heat loads; add or enable some before solving"
+        )
     if sources and abs(sum(s.current_a for s in sources)) > _BALANCE_TOLERANCE_A:
         raise ConfigError("current sources and sinks must sum to zero")
     try:

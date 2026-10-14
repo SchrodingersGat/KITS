@@ -391,13 +391,13 @@ class SolvePanel(QWidget):
         """
         doc = self._document
         board = doc.board
-        sources = doc.current_sources
+        sources = [s for s in doc.current_sources if s.enabled]
         balanced = abs(sum(s.current_a for s in sources)) <= _BALANCE_TOLERANCE_A
         valid = self.settings_error.isHidden()
         can_solve = (
             board is not None
             and board.has_outline
-            and bool(sources or doc.heat_loads)
+            and bool(sources or doc.active_heat_loads)
             and balanced
             and valid
             and not self._busy
@@ -412,8 +412,10 @@ class SolvePanel(QWidget):
         elif not board.has_outline:
             style = _WARNING_STYLE
             lines.append("The board has no Edge.Cuts outline, so it can't be solved.")
-        elif not sources and not doc.heat_loads:
-            lines.append("Add current sources or heat loads (Current Sources / Heat Loads tabs) to solve.")
+        elif not sources and not doc.active_heat_loads:
+            lines.append(
+                "Add or enable current sources or heat loads (Current Sources / Heat Loads tabs) to solve."
+            )
         elif not balanced:
             style = _WARNING_STYLE
             lines.append("Current sources and sinks must sum to zero to solve.")

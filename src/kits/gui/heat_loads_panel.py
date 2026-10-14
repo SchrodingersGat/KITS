@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from ..config import ABSOLUTE_ZERO_C, ConfigError, HeatLoad, HeatLoadKind
 from .document import Document
+from .sources_panel import make_enable_box
 
 DEFAULT_POWER_W = 1.0
 DEFAULT_RESISTANCE_K_W = 10.0
@@ -86,6 +87,7 @@ class HeatLoadsPanel(QWidget):
         header.setSectionResizeMode(_TYPE_COLUMN, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(_VALUE_COLUMN, QHeaderView.ResizeMode.ResizeToContents)
         self.table.itemSelectionChanged.connect(self._on_row_selection)
+        self.table.itemChanged.connect(self._on_item_changed)
         QShortcut(QKeySequence.StandardKey.Delete, self.table, self.remove_selected_rows)
 
         self.show_heat_loads = QCheckBox("Show heat loads")
@@ -190,6 +192,7 @@ class HeatLoadsPanel(QWidget):
                     item.setToolTip(
                         f"{load.label} isn't on the board; the solve will fail until it is removed"
                     )
+            make_enable_box(pad_item, load.enabled, net_item)
             self.table.setItem(row, 0, pad_item)
             self.table.setItem(row, 1, net_item)
             self.table.setCellWidget(row, _TYPE_COLUMN, self._kind_combo(load))
@@ -287,6 +290,16 @@ class HeatLoadsPanel(QWidget):
         finally:
             self._editing = False
 
+    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        """Enable or disable a heat load when its checkbox is toggled.
+
+        Args:
+            item: The changed cell.
+        """
+        if item.column() == 0:
+            on = item.checkState() == Qt.CheckState.Checked
+            self._document.set_heat_load_enabled(*self._row_key(item.row()), on)
+
     def _on_row_selection(self) -> None:
         """Report the selected row's pad so the board can highlight it."""
         rows = self.table.selectionModel().selectedRows()
@@ -359,7 +372,9 @@ class HeatLoadsPanel(QWidget):
 
     def _update_total(self) -> None:
         """Summarise the heat loads: injected power and number of sinks."""
-        loads = self._document.heat_loads
+        everything = self._document.heat_loads
+        loads = [h for h in everything if h.enabled]
+        disabled = len(everything) - len(loads)
         if not loads:
             self.total_label.setText(
                 "No heat loads. Joule heating from the current sources is always included."
@@ -367,4 +382,5 @@ class HeatLoadsPanel(QWidget):
             return
         power = sum(h.value for h in loads if h.kind is HeatLoadKind.POWER)
         sinks = sum(h.kind.is_sink for h in loads)
-        self.total_label.setText(f"Power in: {power:g} W · sinks: {sinks}")
+        note = f" · {disabled} disabled" if disabled else ""
+        self.total_label.setText(f"Power in: {power:g} W · sinks: {sinks}{note}")
