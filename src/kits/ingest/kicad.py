@@ -58,6 +58,17 @@ def load_project(path: str | Path) -> Project:
     """Load a ``.kicad_pro`` project and the ``.kicad_pcb`` board next to it.
 
     A ``.kicad_pcb`` path is also accepted; its project file is read if present.
+
+    Args:
+        path: Path to a ``.kicad_pro`` or ``.kicad_pcb`` file.
+
+    Returns:
+        The project, with ``settings`` holding the raw project JSON (empty if
+        a board was given and no project file exists).
+
+    Raises:
+        BoardLoadError: If the path has the wrong suffix, the project file is
+            missing or unreadable, or the board is missing or cannot be loaded.
     """
     path = Path(path)
     if path.suffix == BOARD_SUFFIX:
@@ -83,6 +94,18 @@ def load_project(path: str | Path) -> Project:
 
 
 def load_board(path: str | Path) -> Board:
+    """Load a ``.kicad_pcb`` board file.
+
+    Args:
+        path: Path to the ``.kicad_pcb`` file.
+
+    Returns:
+        The parsed board.
+
+    Raises:
+        BoardLoadError: If the file cannot be read, is not a well-formed
+            S-expression, is not a KiCad board, or has unexpected content.
+    """
     path = Path(path)
     try:
         text = path.read_text(encoding="utf-8")
@@ -104,6 +127,16 @@ def load_board(path: str | Path) -> Board:
 
 
 def _xy(node: Node, keyword: str, default: Point | None = None) -> Point | None:
+    """Read a coordinate pair child such as ``(start x y)``.
+
+    Args:
+        node: Parent node.
+        keyword: Keyword of the child holding the pair, e.g. ``"start"``.
+        default: Value returned if the child is missing or has fewer than two arguments.
+
+    Returns:
+        ``(x, y)`` in mm, or ``default``.
+    """
     child = find(node, keyword)
     if child is None or len(child) < 3:
         return default
@@ -111,6 +144,15 @@ def _xy(node: Node, keyword: str, default: Point | None = None) -> Point | None:
 
 
 def _at(node: Node) -> tuple[Point, float]:
+    """Read an ``(at x y [angle])`` child.
+
+    Args:
+        node: Node with an optional ``at`` child.
+
+    Returns:
+        ``((x, y), angle_deg)``; ``((0, 0), 0)`` if there is no ``at`` child and
+        an angle of 0 if it is omitted.
+    """
     at = find(node, "at")
     if at is None:
         return (0.0, 0.0), 0.0
@@ -119,12 +161,32 @@ def _at(node: Node) -> tuple[Point, float]:
 
 
 def _float(node: Node, keyword: str, default: float | None = None) -> float | None:
+    """Read the first argument of child ``keyword`` as a float.
+
+    Args:
+        node: Parent node.
+        keyword: Keyword of the child, e.g. ``"width"``.
+        default: Value returned if the child or its argument is missing.
+
+    Returns:
+        The parsed value, or ``default``.
+    """
     v = value(node, keyword)
     return default if v is None else float(v)
 
 
 def _pts(node: Node) -> Polygon:
-    """Read a ``(pts (xy ..) (arc (start ..) (mid ..) (end ..)) ...)`` list."""
+    """Read a ``(pts (xy ..) (arc (start ..) (mid ..) (end ..)) ...)`` list.
+
+    Arc entries are flattened with :func:`arc_points`, dropping a first vertex
+    that duplicates the previous point.
+
+    Args:
+        node: Node with a ``pts`` child (e.g. a polygon, filled_polygon or gr_poly).
+
+    Returns:
+        The vertices in mm; empty if there is no ``pts`` child.
+    """
     pts_node = find(node, "pts")
     out: Polygon = []
     if pts_node is None:
@@ -141,6 +203,14 @@ def _pts(node: Node) -> Polygon:
 
 
 def _stroke_width(node: Node) -> float:
+    """Line width of a graphic, from ``(stroke (width ..))`` or legacy ``(width ..)``.
+
+    Args:
+        node: Graphic node.
+
+    Returns:
+        The stroke width in mm, 0 if not specified.
+    """
     stroke = find(node, "stroke")
     if stroke is not None:
         return _float(stroke, "width", 0.0)
@@ -148,6 +218,17 @@ def _stroke_width(node: Node) -> float:
 
 
 def _is_filled(node: Node) -> bool:
+    """Whether a graphic is filled.
+
+    Accepts both ``(fill yes)`` / ``(fill solid)`` and the older
+    ``(fill (type solid))`` form.
+
+    Args:
+        node: Graphic node.
+
+    Returns:
+        True for a solid fill.
+    """
     fill = find(node, "fill")
     if fill is None or len(fill) < 2:
         return False
@@ -158,7 +239,19 @@ def _is_filled(node: Node) -> bool:
 
 
 class _BoardReader:
+    """Converts a parsed ``kicad_pcb`` tree into a :class:`Board`.
+
+    Holds the state needed while reading: the KiCad <= 9 net-number table, the
+    ordered set of net names seen, and the board's copper layers.
+    """
+
     def __init__(self, path: Path, root: Node):
+        """Create a reader for one parsed board.
+
+        Args:
+            path: Board file path, stored on the resulting :class:`Board`.
+            root: Root ``kicad_pcb`` node from :func:`sexpr.parse`.
+        """
         self.path = path
         self.root = root
         self.net_table: dict[int, str] = {}
@@ -166,6 +259,12 @@ class _BoardReader:
         self.copper: list[str] = []
 
     def read(self) -> Board:
+        """Read the whole board.
+
+        Returns:
+            The board with layers, stackup, nets and all supported copper and
+            Edge.Cuts items.
+        """
         root = self.root
         layers = self._layers()
         self.copper = sorted((lay.name for lay in layers if lay.is_copper), key=copper_sort_key)
@@ -197,13 +296,24 @@ class _BoardReader:
             kw = item[0]
             if kw == "segment":
                 board.tracks.append(
-                    Track(_xy(item, "start"), _xy(item, "end"), _float(item, "width", 0.0),
-                          str(value(item, "layer")), self._net(item))
+                    Track(
+                        _xy(item, "start"),
+                        _xy(item, "end"),
+                        _float(item, "width", 0.0),
+                        str(value(item, "layer")),
+                        self._net(item),
+                    )
                 )
             elif kw == "arc":
                 board.arcs.append(
-                    ArcTrack(_xy(item, "start"), _xy(item, "mid"), _xy(item, "end"),
-                             _float(item, "width", 0.0), str(value(item, "layer")), self._net(item))
+                    ArcTrack(
+                        _xy(item, "start"),
+                        _xy(item, "mid"),
+                        _xy(item, "end"),
+                        _float(item, "width", 0.0),
+                        str(value(item, "layer")),
+                        self._net(item),
+                    )
                 )
             elif kw == "via":
                 board.vias.append(self._via(item))
@@ -222,6 +332,7 @@ class _BoardReader:
     # -- layers ------------------------------------------------------------
 
     def _layers(self) -> list[Layer]:
+        """Return the layers declared in the board's ``(layers ...)`` section."""
         node = find(self.root, "layers")
         out = []
         if node is None:
@@ -232,6 +343,7 @@ class _BoardReader:
         return out
 
     def _stackup(self) -> list[StackupLayer]:
+        """Return the ``(setup (stackup ...))`` layers top to bottom, or [] if absent."""
         setup = find(self.root, "setup")
         stackup = find(setup, "stackup") if setup else None
         if stackup is None:
@@ -249,7 +361,15 @@ class _BoardReader:
         ]
 
     def _expand_layers(self, names) -> list[str]:
-        """Copper layers named by ``names``, expanding ``*.Cu`` / ``F&B.Cu``."""
+        """Copper layers named by ``names``, expanding ``*.Cu`` / ``F&B.Cu``.
+
+        Args:
+            names: Layer name atoms, e.g. the arguments of a ``(layers ...)`` node.
+
+        Returns:
+            De-duplicated copper layer names that exist on this board;
+            non-copper names are dropped.
+        """
         out: list[str] = []
         for name in names:
             name = str(name)
@@ -264,6 +384,17 @@ class _BoardReader:
     # -- nets --------------------------------------------------------------
 
     def _net(self, node: Node) -> str | None:
+        """Resolve the net name of an item and record it as seen.
+
+        Handles KiCad 10 ``(net "GND")``, KiCad <= 9 pads ``(net 3 "GND")``,
+        tracks/vias ``(net 3)`` (via the net table) and zones ``(net_name ..)``.
+
+        Args:
+            node: Item node (track, via, pad, zone or graphic).
+
+        Returns:
+            The net name, or None if the item has no net or the unnamed net.
+        """
         name = value(node, "net_name")  # zones in KiCad <= 9
         if name is None:
             net = find(node, "net")
@@ -285,6 +416,14 @@ class _BoardReader:
     # -- items -------------------------------------------------------------
 
     def _via(self, node: Node) -> Via:
+        """Build a :class:`Via` from a ``via`` node.
+
+        Args:
+            node: The ``via`` node.
+
+        Returns:
+            The via; layers default to F.Cu/B.Cu and type to ``through``.
+        """
         pos, _ = _at(node)
         layers_node = find(node, "layers")
         layers = [str(x) for x in layers_node[1:3]] if layers_node else ["F.Cu", "B.Cu"]
@@ -304,6 +443,14 @@ class _BoardReader:
         )
 
     def _zone(self, node: Node) -> Zone:
+        """Build a :class:`Zone` (copper pour or rule area) from a ``zone`` node.
+
+        Args:
+            node: The ``zone`` node, at board level or inside a footprint.
+
+        Returns:
+            The zone with its outline and per-layer filled polygons.
+        """
         if (layer := value(node, "layer")) is not None:
             layer_names = [layer]
         else:
@@ -329,6 +476,18 @@ class _BoardReader:
         )
 
     def _footprint(self, node: Node, board: Board) -> Footprint:
+        """Build a :class:`Footprint` with its pads from a ``footprint`` node.
+
+        Footprint graphics and zones are transformed to board coordinates and
+        appended to ``board.graphics`` / ``board.zones`` rather than the footprint.
+
+        Args:
+            node: The ``footprint`` node.
+            board: Board being built; receives the footprint's graphics and zones.
+
+        Returns:
+            The footprint.
+        """
         pos, rot = _at(node)
         reference, value_text = "", ""
         for prop in children(node, "property"):
@@ -363,6 +522,16 @@ class _BoardReader:
         return fp
 
     def _pad(self, node: Node, fp: Footprint) -> Pad:
+        """Build a :class:`Pad` from a ``pad`` node inside a footprint.
+
+        Args:
+            node: The ``pad`` node.
+            fp: Owning footprint; its position and rotation place the pad on the board.
+
+        Returns:
+            The pad in board coordinates. Custom-pad primitives stay in the
+            pad's local frame.
+        """
         local, angle = _at(node)
         size = _xy(node, "size", (0.0, 0.0))
         layers_node = find(node, "layers")
@@ -407,7 +576,19 @@ class _BoardReader:
         angle: float = 0.0,
         any_layer: bool = False,
     ) -> Graphic | None:
-        """Parse a gr_*/fp_* shape; returns None for layers/kinds we don't use."""
+        """Parse a gr_*/fp_* shape; returns None for layers/kinds we don't use.
+
+        Rectangles are converted to four-vertex polys.
+
+        Args:
+            node: The ``gr_*``, ``fp_*`` or pad-primitive node.
+            origin: Footprint position used to transform the points to board coordinates.
+            angle: Footprint rotation in degrees, counter-clockwise as displayed.
+            any_layer: Accept the shape regardless of its layer (for custom pad primitives).
+
+        Returns:
+            The graphic, or None if its kind or layer is not used or a point is missing.
+        """
         kind = _GRAPHIC_KINDS.get(node[0].partition("_")[2])
         if kind is None:
             return None

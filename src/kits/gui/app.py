@@ -13,6 +13,14 @@ from .main_window import MainWindow
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse arguments, show the main window and run the Qt event loop.
+
+    Args:
+        argv: Command-line arguments excluding the program name; ``None`` uses ``sys.argv``.
+
+    Returns:
+        The Qt application's exit code.
+    """
     parser = argparse.ArgumentParser(prog="kits-gui", description="KITS board viewer")
     parser.add_argument("project", nargs="?", help=".kicad_pro (or .kicad_pcb) file to open")
     args = parser.parse_args(argv)

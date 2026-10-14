@@ -21,15 +21,39 @@ _WARNING_COLOR = "#e0a030"
 
 
 def _size(bbox) -> str:
+    """Format a bounding box as ``"W × H mm"``.
+
+    Args:
+        bbox: ``(min_x, min_y, max_x, max_y)`` in millimetres.
+
+    Returns:
+        Width and height to two decimal places.
+    """
     return f"{bbox[2] - bbox[0]:.2f} × {bbox[3] - bbox[1]:.2f} mm"
 
 
 def _fmt(value, spec: str = "g") -> str:
+    """Format an optional value for a table cell.
+
+    Args:
+        value: Value to format, or ``None``.
+        spec: Format specification passed to :func:`format`.
+
+    Returns:
+        The formatted value, or an empty string for ``None``.
+    """
     return "" if value is None else format(value, spec)
 
 
 class BoardInfoPanel(QWidget):
+    """Read-only summary of the board: file, size, object counts and stackup table."""
+
     def __init__(self, parent=None):
+        """Build the summary form and empty stackup table.
+
+        Args:
+            parent: Optional Qt parent widget.
+        """
         super().__init__(parent)
         self._labels: dict[str, QLabel] = {}
         form = QFormLayout()
@@ -64,6 +88,11 @@ class BoardInfoPanel(QWidget):
         layout.addWidget(self._stackup, 1)
 
     def set_project(self, project: Project | None) -> None:
+        """Show the summary for ``project``, flagging a missing board outline.
+
+        Args:
+            project: The loaded project, or ``None`` to clear the panel.
+        """
         if project is None:
             for label in self._labels.values():
                 label.setText("—")

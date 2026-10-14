@@ -20,9 +20,19 @@ _CURSOR_STRIP_PX = 2  # half-height of the strip repainted around each crosshair
 
 
 class BoardView(QGraphicsView):
+    """Graphics view with cursor-anchored zoom, drag panning and a crosshair cursor.
+
+    Emits :attr:`cursor_moved` with the scene (board) position under the mouse.
+    """
+
     cursor_moved = Signal(float, float)  # board coordinates, mm
 
     def __init__(self, parent=None):
+        """Configure rendering, anchors and mouse tracking.
+
+        Args:
+            parent: Optional Qt parent widget.
+        """
         super().__init__(parent)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         # Colour for when no board is open. Deliberately not setBackgroundBrush():
@@ -43,21 +53,36 @@ class BoardView(QGraphicsView):
     # -- crosshair cursor ----------------------------------------------------
 
     def set_cursor_visible(self, visible: bool) -> None:
+        """Show or hide the crosshair cursor.
+
+        Args:
+            visible: Whether to draw the crosshair.
+        """
         self._cursor_visible = visible
         self._update_cursor_lines(self._cursor_pos)
 
     @property
     def cursor_visible(self) -> bool:
+        """Whether the crosshair cursor is drawn."""
         return self._cursor_visible
 
     def _move_cursor(self, pos: QPoint | None) -> None:
+        """Move the crosshair, repainting the strips under its old and new positions.
+
+        Args:
+            pos: New cursor position in viewport pixels, or ``None`` to remove it.
+        """
         old, self._cursor_pos = self._cursor_pos, pos
         if old != pos:
             self._update_cursor_lines(old)
             self._update_cursor_lines(pos)
 
     def _update_cursor_lines(self, pos: QPoint | None) -> None:
-        """Repaint only the thin strips under the crosshair lines at ``pos``."""
+        """Repaint only the thin strips under the crosshair lines at ``pos``.
+
+        Args:
+            pos: Crosshair position in viewport pixels; ``None`` does nothing.
+        """
         if pos is None:
             return
         vp = self.viewport()
@@ -66,6 +91,12 @@ class BoardView(QGraphicsView):
         vp.update(QRect(pos.x() - m, 0, 2 * m + 1, vp.height()))
 
     def drawForeground(self, painter: QPainter, rect: QRectF) -> None:
+        """Draw the crosshair cursor over the scene's own foreground.
+
+        Args:
+            painter: Painter in scene coordinates.
+            rect: Exposed area in scene coordinates.
+        """
         super().drawForeground(painter, rect)
         if not self._cursor_visible or self._cursor_pos is None or self.scene() is None:
             return
@@ -80,6 +111,12 @@ class BoardView(QGraphicsView):
         painter.restore()
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:
+        """Scroll the view and repair the crosshair lines the scroll blit moved.
+
+        Args:
+            dx: Horizontal scroll distance in viewport pixels.
+            dy: Vertical scroll distance in viewport pixels.
+        """
         # Scrolling blits the viewport, carrying the old lines along with the
         # board; clear them where they landed and redraw at the mouse.
         super().scrollContentsBy(dx, dy)
@@ -88,12 +125,22 @@ class BoardView(QGraphicsView):
             self._update_cursor_lines(self._cursor_pos)
 
     def leaveEvent(self, event) -> None:
+        """Hide the crosshair when the mouse leaves the view.
+
+        Args:
+            event: The leave event.
+        """
         self._move_cursor(None)
         super().leaveEvent(event)
 
     # -- zoom ----------------------------------------------------------------
 
     def fit_to_rect(self, rect: QRectF) -> None:
+        """Zoom to show ``rect`` with a small margin and remember it for :meth:`zoom_to_fit`.
+
+        Args:
+            rect: Area to fit, in scene coordinates (mm); an empty rect is stored but not fitted.
+        """
         self._fit_rect = rect
         if not rect.isEmpty():
             margin = max(rect.width(), rect.height()) * 0.03
@@ -102,27 +149,46 @@ class BoardView(QGraphicsView):
             )
 
     def zoom_to_fit(self) -> None:
+        """Re-fit the rect last passed to :meth:`fit_to_rect`, if any."""
         if self._fit_rect is not None:
             self.fit_to_rect(self._fit_rect)
 
     def zoom(self, factor: float) -> None:
+        """Scale the view about the current transformation anchor, within the zoom limits.
+
+        Args:
+            factor: Relative scale change (>1 zooms in); clamped so the scale stays between
+                ``_MIN_SCALE`` and ``_MAX_SCALE`` pixels per mm.
+        """
         current = self.transform().m11()
         factor = max(_MIN_SCALE / current, min(_MAX_SCALE / current, factor))
         self.scale(factor, factor)
 
     def zoom_in(self) -> None:
+        """Zoom in one step about the view centre."""
         self._zoom_about_center(_ZOOM_STEP)
 
     def zoom_out(self) -> None:
+        """Zoom out one step about the view centre."""
         self._zoom_about_center(1 / _ZOOM_STEP)
 
     def _zoom_about_center(self, factor: float) -> None:
+        """Zoom about the view centre rather than the mouse position.
+
+        Args:
+            factor: Relative scale change passed to :meth:`zoom`.
+        """
         anchor = self.transformationAnchor()
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.zoom(factor)
         self.setTransformationAnchor(anchor)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
+        """Zoom about the cursor on wheel scroll instead of scrolling.
+
+        Args:
+            event: The wheel event.
+        """
         delta = event.angleDelta().y()
         if delta:
             self.zoom(_ZOOM_STEP ** (delta / 120))
@@ -131,6 +197,11 @@ class BoardView(QGraphicsView):
     # -- pan / cursor tracking ---------------------------------------------
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        """Start a pan on middle/right press; pass other buttons to the base class.
+
+        Args:
+            event: The mouse press event.
+        """
         if event.button() in _PAN_BUTTONS:
             self._pan_origin = event.position().toPoint()
             self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
@@ -139,6 +210,11 @@ class BoardView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        """Pan while dragging, move the crosshair and emit :attr:`cursor_moved`.
+
+        Args:
+            event: The mouse move event.
+        """
         pos = event.position().toPoint()
         if self._pan_origin is not None:
             delta = pos - self._pan_origin
@@ -153,6 +229,11 @@ class BoardView(QGraphicsView):
         self.cursor_moved.emit(scene_pos.x(), scene_pos.y())
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        """End a pan on release of the pan button; pass other releases to the base class.
+
+        Args:
+            event: The mouse release event.
+        """
         if event.button() in _PAN_BUTTONS and self._pan_origin is not None:
             self._pan_origin = None
             self.viewport().unsetCursor()
@@ -161,4 +242,9 @@ class BoardView(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def contextMenuEvent(self, event) -> None:
+        """Suppress the context menu so right-drag can pan.
+
+        Args:
+            event: The context menu event.
+        """
         event.accept()  # right button is used for panning

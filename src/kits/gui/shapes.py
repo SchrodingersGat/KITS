@@ -12,6 +12,14 @@ from ..ingest.model import Drill, Graphic, Pad, Point
 
 
 def polygon_path(points: list[Point]) -> QPainterPath:
+    """Closed polygon path through ``points``.
+
+    Args:
+        points: Polygon vertices in millimetres.
+
+    Returns:
+        The closed path.
+    """
     path = QPainterPath()
     path.addPolygon(QPolygonF([QPointF(x, y) for x, y in points]))
     path.closeSubpath()
@@ -19,6 +27,14 @@ def polygon_path(points: list[Point]) -> QPainterPath:
 
 
 def polyline_path(points: list[Point]) -> QPainterPath:
+    """Open path joining ``points`` with straight segments.
+
+    Args:
+        points: Vertices in millimetres; must contain at least one point.
+
+    Returns:
+        The open (unfilled) path.
+    """
     path = QPainterPath(QPointF(*points[0]))
     for x, y in points[1:]:
         path.lineTo(x, y)
@@ -26,7 +42,15 @@ def polyline_path(points: list[Point]) -> QPainterPath:
 
 
 def stroke(path: QPainterPath, width: float) -> QPainterPath:
-    """Outline of ``path`` drawn with a round-capped pen of ``width``."""
+    """Outline of ``path`` drawn with a round-capped pen of ``width``.
+
+    Args:
+        path: Centre-line path to stroke.
+        width: Pen width in millimetres; clamped to a tiny positive minimum.
+
+    Returns:
+        A fillable path covering the stroked area.
+    """
     stroker = QPainterPathStroker()
     stroker.setWidth(max(width, 1e-3))
     stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -35,13 +59,29 @@ def stroke(path: QPainterPath, width: float) -> QPainterPath:
 
 
 def circle_path(center: Point, radius: float) -> QPainterPath:
+    """Closed circular path.
+
+    Args:
+        center: Circle centre in millimetres.
+        radius: Circle radius in millimetres.
+
+    Returns:
+        The circle path.
+    """
     path = QPainterPath()
     path.addEllipse(QPointF(*center), radius, radius)
     return path
 
 
 def graphic_outline(g: Graphic) -> tuple[QPainterPath, bool]:
-    """Path for a graphic, and whether it is a closed (fillable) shape."""
+    """Path for a graphic, and whether it is a closed (fillable) shape.
+
+    Args:
+        g: Board graphic (line, arc, circle, bezier or polygon/rect).
+
+    Returns:
+        The geometric outline (unstroked) and ``True`` if the shape is closed.
+    """
     if g.kind == "line":
         return polyline_path(g.points), False
     if g.kind == "arc":
@@ -58,7 +98,14 @@ def graphic_outline(g: Graphic) -> tuple[QPainterPath, bool]:
 
 
 def graphic_copper(g: Graphic) -> QPainterPath:
-    """Area covered by a graphic drawn on a copper layer (fill plus stroke)."""
+    """Area covered by a graphic drawn on a copper layer (fill plus stroke).
+
+    Args:
+        g: Board graphic on a copper layer.
+
+    Returns:
+        A fillable path of the copper area.
+    """
     path, closed = graphic_outline(g)
     if closed and g.filled:
         if g.width > 0:
@@ -68,13 +115,30 @@ def graphic_copper(g: Graphic) -> QPainterPath:
 
 
 def _rounded_rect(w: float, h: float, radius: float) -> QPainterPath:
+    """Rounded rectangle centred on the origin.
+
+    Args:
+        w: Width in millimetres.
+        h: Height in millimetres.
+        radius: Corner radius in millimetres; 0 gives square corners.
+
+    Returns:
+        The rectangle path.
+    """
     path = QPainterPath()
     path.addRoundedRect(QRectF(-w / 2, -h / 2, w, h), radius, radius)
     return path
 
 
 def pad_path(pad: Pad) -> QPainterPath:
-    """Pad copper in the pad's local frame (centred on the anchor, unrotated)."""
+    """Pad copper in the pad's local frame (centred on the anchor, unrotated).
+
+    Args:
+        pad: Pad to draw; its shape, size and (for custom pads) primitives are used.
+
+    Returns:
+        A fillable path; the caller positions and rotates it.
+    """
     w, h = pad.size
     shape = pad.shape
     if shape == "circle":
@@ -110,7 +174,14 @@ def pad_path(pad: Pad) -> QPainterPath:
 
 
 def drill_path(drill: Drill) -> QPainterPath:
-    """Hole outline in the pad's local frame."""
+    """Hole outline in the pad's local frame.
+
+    Args:
+        drill: Pad drill; round or oval, with an optional offset from the pad anchor.
+
+    Returns:
+        A fillable path of the hole.
+    """
     ox, oy = drill.offset
     if not drill.is_oval:
         return circle_path((ox, oy), drill.width / 2)

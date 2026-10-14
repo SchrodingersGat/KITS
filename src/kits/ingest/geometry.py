@@ -11,6 +11,13 @@ def rotate(point: Point, angle_deg: float) -> Point:
     """Rotate ``point`` about the origin the way KiCad does.
 
     KiCad angles are counter-clockwise *as displayed*, with Y pointing down.
+
+    Args:
+        point: Point to rotate, in mm.
+        angle_deg: Rotation in degrees, counter-clockwise as displayed.
+
+    Returns:
+        The rotated point (``point`` itself if the angle is zero).
     """
     if not angle_deg:
         return point
@@ -21,13 +28,31 @@ def rotate(point: Point, angle_deg: float) -> Point:
 
 
 def transform(point: Point, origin: Point, angle_deg: float) -> Point:
-    """Map a footprint-local point to board coordinates."""
+    """Map a footprint-local point to board coordinates.
+
+    Args:
+        point: Point in the footprint's local frame, in mm.
+        origin: Footprint position in board coordinates, in mm.
+        angle_deg: Footprint rotation in degrees, counter-clockwise as displayed.
+
+    Returns:
+        The point in board coordinates: rotated by ``angle_deg``, then offset by ``origin``.
+    """
     x, y = rotate(point, angle_deg)
     return (x + origin[0], y + origin[1])
 
 
 def arc_center(start: Point, mid: Point, end: Point) -> Point | None:
-    """Centre of the circle through three points, or None if collinear."""
+    """Centre of the circle through three points, or None if collinear.
+
+    Args:
+        start: First point on the circle.
+        mid: Second point on the circle.
+        end: Third point on the circle.
+
+    Returns:
+        The circle centre, or None if the points are (numerically) collinear.
+    """
     (ax, ay), (bx, by), (cx, cy) = start, mid, end
     d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
     if abs(d) < 1e-12:
@@ -39,7 +64,20 @@ def arc_center(start: Point, mid: Point, end: Point) -> Point | None:
 
 
 def _arc_sweep(start: Point, mid: Point, end: Point, center: Point) -> tuple[float, float, float]:
-    """(radius, start angle, signed sweep) in radians of a three-point arc."""
+    """(radius, start angle, signed sweep) in radians of a three-point arc.
+
+    Angles are measured with ``atan2`` in the raw (Y-down) coordinate frame.
+
+    Args:
+        start: Arc start point.
+        mid: Any point on the arc between ``start`` and ``end``; selects the sweep direction.
+        end: Arc end point. If equal to ``start`` the arc is a full circle.
+        center: Circle centre, as returned by :func:`arc_center`.
+
+    Returns:
+        ``(radius, start_angle, sweep)``; ``sweep`` is signed so that sweeping from
+        ``start_angle`` passes through ``mid``.
+    """
     cx, cy = center
     r = math.hypot(start[0] - cx, start[1] - cy)
     a0 = math.atan2(start[1] - cy, start[0] - cx)
@@ -61,6 +99,15 @@ def arc_extent(start: Point, mid: Point, end: Point) -> list[Point]:
     The endpoints plus every axis-extreme point (0/90/180/270 deg) the arc
     passes through — the bulge of an arc can lie well outside its three
     defining points.
+
+    Args:
+        start: Arc start point.
+        mid: Any point on the arc between ``start`` and ``end``.
+        end: Arc end point.
+
+    Returns:
+        Points to include in a bounding-box calculation; just ``[start, end]``
+        if the three points are collinear.
     """
     center = arc_center(start, mid, end)
     if center is None:
@@ -76,7 +123,18 @@ def arc_extent(start: Point, mid: Point, end: Point) -> list[Point]:
 
 
 def bezier_points(p0: Point, c1: Point, c2: Point, p3: Point, steps: int = 32) -> list[Point]:
-    """Sample a cubic Bézier curve."""
+    """Sample a cubic Bézier curve.
+
+    Args:
+        p0: Start point.
+        c1: First control point.
+        c2: Second control point.
+        p3: End point.
+        steps: Number of segments; ``steps + 1`` points are returned.
+
+    Returns:
+        Points at uniform parameter steps from ``p0`` to ``p3`` inclusive.
+    """
     pts = []
     for i in range(steps + 1):
         t = i / steps
@@ -89,7 +147,18 @@ def bezier_points(p0: Point, c1: Point, c2: Point, p3: Point, steps: int = 32) -
 
 
 def arc_points(start: Point, mid: Point, end: Point, max_step_deg: float = 5.0) -> list[Point]:
-    """Approximate a three-point arc as a polyline from ``start`` to ``end``."""
+    """Approximate a three-point arc as a polyline from ``start`` to ``end``.
+
+    Args:
+        start: Arc start point; returned exactly as the first vertex.
+        mid: Any point on the arc between ``start`` and ``end``.
+        end: Arc end point; returned exactly as the last vertex.
+        max_step_deg: Maximum angle subtended by each segment, in degrees.
+
+    Returns:
+        Polyline vertices (at least three); just ``[start, end]`` if the points
+        are collinear.
+    """
     center = arc_center(start, mid, end)
     if center is None:
         return [start, end]

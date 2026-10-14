@@ -53,6 +53,8 @@ _GRID_ORIGIN_PX = 8  # half-size of the origin marker
 
 @dataclass
 class DisplayLayer:
+    """A toggleable display layer and the scene container holding its items."""
+
     name: str
     color: QColor
     is_copper: bool
@@ -63,21 +65,48 @@ class LayerItem(QGraphicsItem):
     """Paint-less container whose children are one display layer's items."""
 
     def __init__(self):
+        """Create an empty container flagged as having no contents of its own."""
         super().__init__()
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemHasNoContents)
 
     def boundingRect(self) -> QRectF:
+        """Return an empty rect; the container itself draws nothing.
+
+        Returns:
+            An empty rectangle.
+        """
         return QRectF()
 
     def paint(self, painter, option, widget=None):
+        """Draw nothing; only the children are painted.
+
+        Args:
+            painter: Painter in item coordinates (unused).
+            option: Style options for the item (unused).
+            widget: Widget being painted on, if any (unused).
+        """
         pass
 
 
 def _no_pen() -> QPen:
+    """Pen that draws nothing, for fill-only items.
+
+    Returns:
+        A ``NoPen`` pen.
+    """
     return QPen(Qt.PenStyle.NoPen)
 
 
 def _round_pen(color: QColor, width: float) -> QPen:
+    """Round-capped, round-joined pen for copper tracks.
+
+    Args:
+        color: Pen colour.
+        width: Pen width in millimetres; zero or negative gives a 1 px cosmetic pen.
+
+    Returns:
+        The configured pen.
+    """
     pen = QPen(color, width)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -88,6 +117,15 @@ def _round_pen(color: QColor, width: float) -> QPen:
 
 
 def _cosmetic_pen(color: QColor, pixels: float) -> QPen:
+    """Round-capped cosmetic pen whose width is fixed in screen pixels at any zoom.
+
+    Args:
+        color: Pen colour.
+        pixels: Pen width in screen pixels.
+
+    Returns:
+        The configured pen.
+    """
     pen = QPen(color, pixels)
     pen.setCosmetic(True)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -96,11 +134,30 @@ def _cosmetic_pen(color: QColor, pixels: float) -> QPen:
 
 
 def _net_tip(net: str | None) -> str:
+    """Tooltip line describing an item's net.
+
+    Args:
+        net: Net name, or ``None``/empty for unconnected items.
+
+    Returns:
+        ``"Net: <name>"`` or ``"No net"``.
+    """
     return f"Net: {net}" if net else "No net"
 
 
 class BoardScene(QGraphicsScene):
+    """Scene holding a board's copper, pads, vias, holes and outline, grouped by display layer.
+
+    Also draws the configurable background grid and its origin marker.
+    """
+
     def __init__(self, board: Board, parent=None):
+        """Build the scene items for ``board``.
+
+        Args:
+            board: Parsed board to display.
+            parent: Optional Qt parent object.
+        """
         super().__init__(parent)
         self.board = board
         self.layers: dict[str, DisplayLayer] = {}
@@ -116,10 +173,21 @@ class BoardScene(QGraphicsScene):
         return list(self.layers)
 
     def set_layer_visible(self, name: str, visible: bool) -> None:
+        """Show or hide a display layer.
+
+        Args:
+            name: Display layer name, as returned by :meth:`layer_names`.
+            visible: Whether the layer is shown.
+        """
         self.layers[name].item.setVisible(visible)
 
     def set_active_layer(self, name: str | None) -> None:
-        """Draw ``name`` above the other copper layers (like KiCad's active layer)."""
+        """Draw ``name`` above the other copper layers (like KiCad's active layer).
+
+        Args:
+            name: Copper layer to raise, or ``None`` (or a non-copper name) for the default
+                stacking with F.Cu on top.
+        """
         copper = [n for n, lay in self.layers.items() if lay.is_copper]
         # Stack copper so that F.Cu ends up on top and B.Cu at the bottom.
         for z, layer_name in enumerate(reversed(copper)):
@@ -128,6 +196,11 @@ class BoardScene(QGraphicsScene):
             self.layers[name].item.setZValue(len(copper))
 
     def board_rect(self) -> QRectF:
+        """Board bounding box in scene coordinates (mm).
+
+        Returns:
+            The board's bounding box, or the bounding rect of all items if the board has none.
+        """
         bbox = self.board.bounding_box()
         if bbox is None:
             return self.itemsBoundingRect()
@@ -137,6 +210,15 @@ class BoardScene(QGraphicsScene):
     # -- grid ----------------------------------------------------------------
 
     def set_grid(self, spacing_mm: float, visible: bool) -> None:
+        """Configure the background grid and repaint.
+
+        Args:
+            spacing_mm: Configured grid pitch in millimetres.
+            visible: Whether the grid and origin marker are drawn.
+
+        Raises:
+            ValueError: If ``spacing_mm`` is not positive.
+        """
         if spacing_mm <= 0:
             raise ValueError("grid spacing must be positive")
         self._grid_spacing = spacing_mm
@@ -145,10 +227,12 @@ class BoardScene(QGraphicsScene):
 
     @property
     def grid_spacing(self) -> float:
+        """Configured grid pitch in millimetres."""
         return self._grid_spacing
 
     @property
     def grid_visible(self) -> bool:
+        """Whether the grid and origin marker are drawn."""
         return self._grid_visible
 
     def grid_origin(self) -> QPointF:
@@ -156,8 +240,18 @@ class BoardScene(QGraphicsScene):
         return self.board_rect().bottomLeft()
 
     def to_grid_coords(self, x: float, y: float) -> tuple[float, float]:
-        """Scene (KiCad) coordinates -> grid coordinates: relative to the grid
-        origin, with Y pointing *up* so the board sits in the positive quadrant."""
+        """Convert scene (KiCad) coordinates to grid coordinates.
+
+        Grid coordinates are relative to the grid origin, with Y pointing *up* so
+        the board sits in the positive quadrant.
+
+        Args:
+            x: Scene X coordinate in millimetres.
+            y: Scene Y coordinate in millimetres (Y down).
+
+        Returns:
+            ``(x, y)`` in millimetres relative to :meth:`grid_origin`, Y up.
+        """
         origin = self.grid_origin()
         return x - origin.x(), origin.y() - y
 
@@ -167,6 +261,12 @@ class BoardScene(QGraphicsScene):
         When the configured pitch would put lines closer than ``_GRID_MIN_PX``
         on screen, only every 2nd/5th/10th/20th/... line is drawn, so lines
         stay on the configured grid but never smear into a solid fill.
+
+        Args:
+            pixels_per_mm: Current view scale in screen pixels per millimetre.
+
+        Returns:
+            The drawn grid pitch in millimetres (a multiple of the configured pitch).
         """
         spacing = self._grid_spacing
         steps = itertools.cycle((2, 2.5, 2))  # x1, x2, x5, x10, x20, x50, ...
@@ -175,6 +275,12 @@ class BoardScene(QGraphicsScene):
         return spacing
 
     def drawBackground(self, painter: QPainter, rect: QRectF) -> None:
+        """Draw the grid lines (1 px cosmetic) over the background brush.
+
+        Args:
+            painter: Painter in scene coordinates.
+            rect: Exposed area in scene coordinates.
+        """
         super().drawBackground(painter, rect)
         if not self._grid_visible:
             return
@@ -200,6 +306,12 @@ class BoardScene(QGraphicsScene):
         painter.restore()
 
     def drawForeground(self, painter: QPainter, rect: QRectF) -> None:
+        """Draw the grid origin marker, a fixed screen-size cross, above all items.
+
+        Args:
+            painter: Painter in scene coordinates.
+            rect: Exposed area in scene coordinates.
+        """
         super().drawForeground(painter, rect)
         if not self._grid_visible:
             return
@@ -221,6 +333,17 @@ class BoardScene(QGraphicsScene):
     # -- construction ----------------------------------------------------------
 
     def _add_layer(self, name: str, color: QColor, is_copper: bool, z: float) -> LayerItem:
+        """Create a display layer container, add it to the scene and register it.
+
+        Args:
+            name: Display layer name.
+            color: Base colour for the layer's items.
+            is_copper: Whether this is a copper layer (affects active-layer stacking).
+            z: Z value of the container relative to other layers.
+
+        Returns:
+            The new container item to parent the layer's items to.
+        """
         item = LayerItem()
         item.setZValue(z)
         self.addItem(item)
@@ -228,6 +351,7 @@ class BoardScene(QGraphicsScene):
         return item
 
     def _build(self) -> None:
+        """Create all layers and items for the board and set a padded scene rect."""
         board = self.board
         copper = board.copper_layers
         for name in copper:
@@ -314,6 +438,17 @@ class BoardScene(QGraphicsScene):
         self.setSceneRect(rect.adjusted(-margin, -margin, margin, margin))
 
     def _path_item(self, path: QPainterPath, layer: str, z: float, brush: QColor) -> QGraphicsPathItem:
+        """Add a filled, unstroked path item to a display layer.
+
+        Args:
+            path: Geometry in scene coordinates (mm).
+            layer: Name of the display layer to parent the item to.
+            z: Z value within the layer.
+            brush: Fill colour.
+
+        Returns:
+            The new item.
+        """
         item = QGraphicsPathItem(path, self.layers[layer].item)
         item.setPen(_no_pen())
         item.setBrush(QBrush(brush))
@@ -321,6 +456,16 @@ class BoardScene(QGraphicsScene):
         return item
 
     def _add_pad(self, pad: Pad, th_layer: LayerItem, hole_layer: LayerItem) -> None:
+        """Add a pad's copper and drill hole items, positioned and rotated on the board.
+
+        Through-hole pads go on ``th_layer``, SMD pads on their first copper layer;
+        non-plated holes get only a hole item.
+
+        Args:
+            pad: Pad to add.
+            th_layer: Container for through-hole pad copper.
+            hole_layer: Container for drill holes.
+        """
         tip = f"{pad.footprint_ref} pad {pad.number}\n{_net_tip(pad.net)}"
 
         if pad.kind == "thru_hole":

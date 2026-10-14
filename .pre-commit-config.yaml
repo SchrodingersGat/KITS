@@ -5,3 +5,11 @@ repos:
       - id: ruff-check
         args: [--fix]
       - id: ruff-format
+  - repo: local
+    hooks:
+      - id: check-docstrings
+        name: check docstrings (all functions, all arguments)
+        entry: python tools/check_docstrings.py
+        language: python
+        types: [python]
+        files: ^(src|tools)/

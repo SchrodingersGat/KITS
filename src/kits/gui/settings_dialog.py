@@ -16,7 +16,15 @@ from .settings import MAX_GRID_SPACING_MM, MIN_GRID_SPACING_MM, AppSettings
 
 
 class SettingsDialog(QDialog):
+    """Modal dialog for editing grid and cursor preferences; changes apply on OK."""
+
     def __init__(self, settings: AppSettings, parent=None):
+        """Build the dialog, initialising its controls from ``settings``.
+
+        Args:
+            settings: The settings object to read from and write back to on accept.
+            parent: Optional Qt parent widget.
+        """
         super().__init__(parent)
         self.setWindowTitle("Preferences")
         self._settings = settings
@@ -54,6 +62,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(buttons)
 
     def accept(self) -> None:
+        """Write the edited values back to the settings and close the dialog."""
         self._settings.grid_spacing_mm = self.grid_spacing.value()
         self._settings.grid_visible = self.grid_visible.isChecked()
         self._settings.cursor_visible = self.cursor_visible.isChecked()

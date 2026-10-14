@@ -20,11 +20,26 @@ EDGE_CUTS = "Edge.Cuts"
 
 
 def is_copper_layer(name: str) -> bool:
+    """True if ``name`` is a copper layer name (ends with ``.Cu``).
+
+    Args:
+        name: KiCad canonical layer name, e.g. ``"In1.Cu"``.
+
+    Returns:
+        Whether the layer is copper.
+    """
     return name.endswith(".Cu")
 
 
 def copper_sort_key(name: str) -> tuple[int, int]:
-    """Physical stack order: F.Cu, In1.Cu, In2.Cu, ..., B.Cu."""
+    """Physical stack order: F.Cu, In1.Cu, In2.Cu, ..., B.Cu.
+
+    Args:
+        name: Copper layer name.
+
+    Returns:
+        A sort key placing F.Cu first, inner layers by number, then B.Cu.
+    """
     if name == "F.Cu":
         return (0, 0)
     if name == "B.Cu":
@@ -44,6 +59,7 @@ class Layer:
 
     @property
     def is_copper(self) -> bool:
+        """Whether this is a copper layer."""
         return is_copper_layer(self.name)
 
 
@@ -81,6 +97,8 @@ class Graphic:
 
 @dataclass
 class Track:
+    """A straight copper track segment; ``width`` in mm."""
+
     start: Point
     end: Point
     width: float
@@ -90,6 +108,8 @@ class Track:
 
 @dataclass
 class ArcTrack:
+    """A circular-arc copper track through ``start``, ``mid`` and ``end``; ``width`` in mm."""
+
     start: Point
     mid: Point
     end: Point
@@ -100,6 +120,8 @@ class ArcTrack:
 
 @dataclass
 class Via:
+    """A plated via; ``diameter`` (pad) and ``drill`` (hole) in mm."""
+
     position: Point
     diameter: float
     drill: float
@@ -110,17 +132,26 @@ class Via:
 
 @dataclass
 class Drill:
+    """A pad's drill hole, in mm; ``offset`` is relative to the pad centre."""
+
     width: float
     height: float  # == width for round holes
     offset: Point = (0.0, 0.0)
 
     @property
     def is_oval(self) -> bool:
+        """Whether the hole is a slot (width differs from height)."""
         return self.width != self.height
 
 
 @dataclass
 class Pad:
+    """A footprint pad, already placed in absolute board coordinates.
+
+    ``size`` and ``rect_delta`` are in mm in the pad's local frame (before
+    ``rotation`` is applied).
+    """
+
     number: str
     kind: str  # smd, thru_hole, np_thru_hole, connect
     shape: str  # circle, rect, oval, roundrect, trapezoid, custom
@@ -138,11 +169,14 @@ class Pad:
 
     @property
     def is_through_hole(self) -> bool:
+        """Whether this is a plated through-hole pad."""
         return self.kind == "thru_hole"
 
 
 @dataclass
 class Footprint:
+    """A placed footprint and its pads; ``rotation`` in degrees CCW as displayed."""
+
     reference: str
     value: str
     lib_id: str
@@ -171,6 +205,13 @@ class Zone:
 
 @dataclass
 class Board:
+    """A loaded ``.kicad_pcb`` board: layers, stackup, copper items and outline.
+
+    ``nets`` lists the net names actually used, in first-seen order.
+    ``thickness_mm`` is the board thickness from the ``(general ...)`` section,
+    if present.
+    """
+
     path: Path
     version: int
     generator: str
@@ -192,14 +233,21 @@ class Board:
         return sorted(names, key=copper_sort_key)
 
     def pads(self):
+        """Iterate over the pads of every footprint.
+
+        Yields:
+            Each :class:`Pad`, footprint by footprint.
+        """
         for fp in self.footprints:
             yield from fp.pads
 
     def outline_graphics(self) -> list[Graphic]:
+        """Return the graphics on the Edge.Cuts layer (the board outline)."""
         return [g for g in self.graphics if g.layer == EDGE_CUTS]
 
     @property
     def has_outline(self) -> bool:
+        """Whether the board has any Edge.Cuts graphics."""
         return any(g.layer == EDGE_CUTS for g in self.graphics)
 
     def outline_bounding_box(self) -> BBox | None:
@@ -241,6 +289,14 @@ class Project:
 
 
 def _bbox(pts: list[Point]) -> BBox | None:
+    """Axis-aligned bounding box of ``pts``.
+
+    Args:
+        pts: Points to enclose.
+
+    Returns:
+        ``(min_x, min_y, max_x, max_y)``, or None if ``pts`` is empty.
+    """
     if not pts:
         return None
     xs = [p[0] for p in pts]
@@ -249,11 +305,28 @@ def _bbox(pts: list[Point]) -> BBox | None:
 
 
 def _grow(pts: list[Point], r: float) -> list[Point]:
-    """Corners of the boxes of half-size ``r`` around each point."""
+    """Corners of the boxes of half-size ``r`` around each point.
+
+    Args:
+        pts: Centre points.
+        r: Half-size of each box, in mm.
+
+    Returns:
+        Two opposite corners (min and max) per input point.
+    """
     return [q for x, y in pts for q in ((x - r, y - r), (x + r, y + r))]
 
 
 def _graphic_extent(g: Graphic) -> list[Point]:
+    """Points whose bounding box covers the graphic's geometry (stroke width ignored).
+
+    Args:
+        g: Graphic to measure.
+
+    Returns:
+        Box corners for circles, axis extremes for arcs, sampled points for
+        Béziers, and the raw points otherwise.
+    """
     if g.kind == "circle":
         (cx, cy), (px, py) = g.points
         r = ((px - cx) ** 2 + (py - cy) ** 2) ** 0.5

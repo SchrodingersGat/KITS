@@ -33,6 +33,17 @@ _INNER = [
 
 
 def copper_color(name: str) -> QColor:
+    """Display colour for a copper layer.
+
+    F.Cu and B.Cu get fixed colours; inner layers (``In1.Cu``, ``In2.Cu``, ...) cycle
+    through a palette indexed by the layer number in the name.
+
+    Args:
+        name: KiCad copper layer name, e.g. ``"F.Cu"`` or ``"In3.Cu"``.
+
+    Returns:
+        A new colour instance, safe for the caller to modify.
+    """
     if name == "F.Cu":
         return QColor(_FRONT)
     if name == "B.Cu":
