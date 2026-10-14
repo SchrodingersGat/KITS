@@ -18,6 +18,7 @@ from shapely.geometry import Point
 
 from ..config import MeshSettings
 from ..ingest.model import Board, is_copper_layer
+from .fingerprint import MeshFingerprint
 from .geometry import LayerGeometry, extract_layers
 from .model import BoardMesh, LayerMesh
 
@@ -255,8 +256,12 @@ def mesh_board(
     Raises:
         GeometryError: If the board has no usable outline.
         MeshError: If gmsh fails.
+        OSError: If the board file can't be read for fingerprinting.
     """
     settings.validate()
+    # Fingerprint before meshing: if the file changes mid-run, the saved mesh
+    # will then (correctly) look stale rather than current.
+    fingerprint = MeshFingerprint.of(board.path, settings)
     report = progress or (lambda message, fraction: None)
     n = len(board.copper_layers)
     # Progress budget: geometry 30%, meshing 65%, writing 5%.
@@ -270,7 +275,7 @@ def mesh_board(
         for i, geom in enumerate(geometry):
             report(f"Meshing {geom.layer} ({i + 1}/{n})", 0.30 + 0.65 * i / n)
             layers.append(mesh_layer(geom, settings, heights[geom.layer]))
-        mesh = BoardMesh(layers, settings, Path(msh_path) if msh_path else None)
+        mesh = BoardMesh(layers, settings, Path(msh_path) if msh_path else None, fingerprint)
         if msh_path:
             report("Writing mesh file", 0.95)
             write_msh(mesh, msh_path)

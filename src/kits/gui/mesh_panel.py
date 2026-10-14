@@ -176,12 +176,17 @@ class MeshPanel(QWidget):
         elif not board.has_outline:
             style = _WARNING_STYLE
             lines.append("The board has no Edge.Cuts outline, so it can't be meshed.")
+        elif doc.mesh is None and doc.mesh_notice:
+            style = _WARNING_STYLE
+            lines.append(f"{doc.mesh_notice}, so it wasn't loaded. Rebuild the mesh.")
         elif doc.mesh is None:
             lines.append("No mesh built yet.")
         else:
             m = doc.mesh
             lines.append(f"{m.num_triangles:,} triangles, {m.num_nodes:,} nodes on {len(m.layers)} layers.")
             lines += [f"  {lm.layer}: {lm.num_triangles:,} triangles" for lm in m.layers]
+            if doc.mesh_from_file:
+                lines.append("Reloaded from the project's saved mesh.")
             if m.msh_path:
                 lines.append(f"Saved to {m.msh_path}")
             if doc.mesh_is_stale:

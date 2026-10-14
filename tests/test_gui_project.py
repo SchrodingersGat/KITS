@@ -221,3 +221,44 @@ def test_build_mesh_saves_the_project_first(window, kits_v9_path, monkeypatch):
     assert started and not window.document.dirty
     assert load_kits_project(kits_v9_path).mesh.max_size_mm == 2.5
     window._finish_mesh_job()
+
+
+def test_saved_mesh_is_reloaded_only_while_current(window, kits_v9_path, board_v9_path):
+    from kits.mesh import cli
+
+    assert cli.main([str(kits_v9_path)]) == 0  # build and save a mesh
+
+    # Current: reloaded on open and shown.
+    assert window.open_path(kits_v9_path)
+    assert window.document.mesh is not None and window.document.mesh_from_file
+    assert window.scene.mesh_layers == ["F.Cu", "In1.Cu", "B.Cu"]
+    assert "Reloaded" in window.mesh_panel.status.text()
+    assert window.mesh_panel.build_button.text() == "Rebuild mesh"
+    window.close_project()
+
+    # Settings changed in the project file: not loaded, user told to rebuild.
+    project = load_kits_project(kits_v9_path)
+    project.mesh = MeshSettings(0.5, 0.1)
+    project.save()
+    assert window.open_path(kits_v9_path)
+    assert window.document.mesh is None
+    assert "mesh settings changed" in window.document.mesh_notice
+    assert "Rebuild the mesh" in window.mesh_panel.status.text()
+    assert "rebuild the mesh" in window.statusBar().currentMessage()
+    assert window.scene.mesh_layers == []
+    window.close_project()
+
+    # Settings restored but the board edited: still not loaded.
+    project.mesh = MeshSettings()
+    project.save()
+    with open(board_v9_path, "a", encoding="utf-8") as f:
+        f.write("\n")
+    assert window.open_path(kits_v9_path)
+    assert window.document.mesh is None
+    assert "board changed" in window.document.mesh_notice
+
+    # Rebuilding clears the notice.
+    from kits.mesh.mesher import mesh_board
+
+    window.document.set_mesh(mesh_board(window.document.board, MeshSettings()))
+    assert window.document.mesh_notice is None and not window.document.mesh_from_file

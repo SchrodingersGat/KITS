@@ -709,6 +709,10 @@ class MainWindow(QMainWindow):
         if self.scene is not None:
             self.scene.set_mesh(mesh)
             self.scene.set_mesh_visible(self.show_mesh_action.isChecked())
+        if self.document.mesh_notice:
+            self.statusBar().showMessage(f"{self.document.mesh_notice}: rebuild the mesh", 10000)
+        elif self.document.mesh_from_file:
+            self.statusBar().showMessage(f"Loaded the saved mesh ({mesh.num_triangles:,} triangles)", 5000)
 
     def _on_show_mesh_toggled(self, checked: bool) -> None:
         """Show or hide the mesh overlay, keeping the panel checkbox in sync.

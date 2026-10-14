@@ -16,7 +16,7 @@ from PySide6.QtCore import QObject, Signal
 
 from ..config import ConfigError, MeshSettings
 from ..ingest import Board, BoardLoadError, Project, load_project
-from ..mesh.model import BoardMesh
+from ..mesh.model import BoardMesh, load_saved_mesh
 from ..project import KitsProject, load_kits_project
 
 
@@ -51,6 +51,8 @@ class Document(QObject):
         self._board_mtime: float | None = None
         self._mesh: BoardMesh | None = None
         self._dirty = False
+        self._mesh_notice: str | None = None
+        self._mesh_from_file = False
 
     # -- state -------------------------------------------------------------------
 
@@ -93,6 +95,16 @@ class Document(QObject):
     def mesh(self) -> BoardMesh | None:
         """The most recently built mesh for the loaded board, if any."""
         return self._mesh
+
+    @property
+    def mesh_notice(self) -> str | None:
+        """Why the project's saved mesh wasn't loaded (out of date or unreadable), if it wasn't."""
+        return self._mesh_notice
+
+    @property
+    def mesh_from_file(self) -> bool:
+        """True if the current mesh was reloaded from the project's saved mesh file."""
+        return self._mesh is not None and self._mesh_from_file
 
     @property
     def mesh_is_stale(self) -> bool:
@@ -253,6 +265,8 @@ class Document(QObject):
             mesh: The newly built mesh, or None to clear it.
         """
         self._mesh = mesh
+        self._mesh_from_file = False
+        self._mesh_notice = None
         self.mesh_changed.emit(mesh)
 
     # -- internals ---------------------------------------------------------------------
@@ -268,7 +282,7 @@ class Document(QObject):
         self.project_changed.emit(project)
 
     def _set_kicad(self, kicad: Project | None, error: str | None) -> None:
-        """Replace the loaded board, clearing any mesh of the previous one.
+        """Replace the loaded board, then reload its saved mesh if that is still current.
 
         Args:
             kicad: The loaded KiCad project, or None.
@@ -280,9 +294,21 @@ class Document(QObject):
             self._board_mtime = kicad.board.path.stat().st_mtime if kicad else None
         except OSError:
             self._board_mtime = None
-        self._mesh = None
         self.board_changed.emit(kicad)
-        self.mesh_changed.emit(None)
+        self._mesh, self._mesh_notice = self._load_saved_mesh()
+        self._mesh_from_file = self._mesh is not None
+        self.mesh_changed.emit(self._mesh)
+
+    def _load_saved_mesh(self) -> tuple[BoardMesh | None, str | None]:
+        """Load the project's saved mesh if it matches the loaded board and current settings.
+
+        Returns:
+            ``(mesh, None)`` if a current saved mesh was loaded, ``(None, reason)`` if
+            one exists but is out of date or unreadable, else ``(None, None)``.
+        """
+        if self._project is None or self._kicad is None:
+            return None, None
+        return load_saved_mesh(self._project.saved_mesh_path, self._kicad.board.path, self._project.mesh)
 
     def _set_dirty(self, dirty: bool) -> None:
         """Update the unsaved-changes flag, emitting ``dirty_changed`` if it changed.

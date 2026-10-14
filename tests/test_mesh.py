@@ -10,6 +10,7 @@ from kits.ingest import load_board
 from kits.ingest.geometry import rotate
 from kits.ingest.model import Graphic, Pad
 from kits.mesh import cli
+from kits.mesh.fingerprint import MeshFingerprint
 from kits.mesh.geometry import (
     GeometryError,
     board_outline,
@@ -18,7 +19,7 @@ from kits.mesh.geometry import (
     pad_area,
 )
 from kits.mesh.mesher import layer_heights, mesh_board
-from kits.mesh.model import BoardMesh
+from kits.mesh.model import BoardMesh, load_saved_mesh
 
 # -- geometry --------------------------------------------------------------------
 
@@ -167,14 +168,86 @@ def test_cli_meshes_project_with_its_settings(kits_v9_path, capsys):
     project = load_kits_project(kits_v9_path)
     project.mesh = MeshSettings(3.0, 0.2)
     project.save()
-    npz = kits_v9_path.parent / "m.npz"
-    assert cli.main([str(kits_v9_path), "--progress", "--npz", str(npz)]) == 0
+    assert cli.main([str(kits_v9_path), "--progress"]) == 0
 
     records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert all("progress" in r for r in records[:-1])
-    assert records[-1]["done"] and records[-1]["triangles"] > 0
+    done = records[-1]
+    assert done["done"] and done["triangles"] > 0
     assert (kits_v9_path.parent / "kits_output" / "demo.msh").is_file()
-    assert BoardMesh.load_npz(npz).settings == MeshSettings(3.0, 0.2)
+    assert done["mesh"] == str(project.saved_mesh_path)
+    saved = BoardMesh.load_npz(project.saved_mesh_path)
+    assert saved.settings == MeshSettings(3.0, 0.2)
+    assert saved.fingerprint == MeshFingerprint.of(project.board.with_suffix(".kicad_pcb"), project.mesh)
+
+
+# -- saved meshes ------------------------------------------------------------------
+
+
+def test_settings_hash_tracks_settings_and_mesher_version(monkeypatch):
+    from kits.mesh import fingerprint
+
+    a = fingerprint.settings_hash(MeshSettings(1.0, 0.1))
+    assert a == fingerprint.settings_hash(MeshSettings(1.0, 0.1))
+    assert a != fingerprint.settings_hash(MeshSettings(1.0, 0.2))
+    monkeypatch.setattr(fingerprint, "MESHER_VERSION", fingerprint.MESHER_VERSION + 1)
+    assert a != fingerprint.settings_hash(MeshSettings(1.0, 0.1))
+
+
+def test_staleness_reasons():
+    built = MeshFingerprint(settings="s1", board="b1")
+    assert built.staleness(MeshFingerprint("s1", "b1")) is None
+    assert (
+        built.staleness(MeshFingerprint("s2", "b1"))
+        == "The mesh settings changed since the saved mesh was built"
+    )
+    assert built.staleness(MeshFingerprint("s1", "b2")) == "The board changed since the saved mesh was built"
+    assert "board and the mesh settings" in built.staleness(MeshFingerprint("s2", "b2"))
+
+
+@pytest.fixture
+def saved_mesh(board_v9_path, tmp_path):
+    settings = MeshSettings(2.0, 0.1)
+    mesh = mesh_board(load_board(board_v9_path), settings, tmp_path / "out" / "demo.msh")
+    path = tmp_path / "out" / "demo.mesh.npz"
+    mesh.save_npz(path)
+    return path, settings
+
+
+def test_load_saved_mesh_when_current(saved_mesh, board_v9_path):
+    path, settings = saved_mesh
+    mesh, notice = load_saved_mesh(path, board_v9_path, settings)
+    assert notice is None and mesh.num_triangles > 0
+
+
+def test_load_saved_mesh_rejects_changed_settings(saved_mesh, board_v9_path):
+    path, _ = saved_mesh
+    mesh, notice = load_saved_mesh(path, board_v9_path, MeshSettings(1.0, 0.1))
+    assert mesh is None and "mesh settings changed" in notice
+
+
+def test_load_saved_mesh_rejects_changed_board(saved_mesh, board_v9_path):
+    path, settings = saved_mesh
+    with open(board_v9_path, "a", encoding="utf-8") as f:
+        f.write("\n")  # any byte change counts
+    mesh, notice = load_saved_mesh(path, board_v9_path, settings)
+    assert mesh is None and "board changed" in notice
+
+
+def test_load_saved_mesh_missing_or_corrupt(saved_mesh, board_v9_path, tmp_path):
+    path, settings = saved_mesh
+    assert load_saved_mesh(tmp_path / "none.mesh.npz", board_v9_path, settings) == (None, None)
+    path.write_bytes(b"not a zip")
+    mesh, notice = load_saved_mesh(path, board_v9_path, settings)
+    assert mesh is None and "couldn't be read" in notice
+
+
+def test_mesh_saved_without_fingerprint_is_stale(saved_mesh, board_v9_path):
+    path, settings = saved_mesh
+    mesh = BoardMesh.load_npz(path)
+    mesh.fingerprint = MeshFingerprint()  # as written before fingerprints existed
+    mesh.save_npz(path)
+    assert load_saved_mesh(path, board_v9_path, settings)[0] is None
 
 
 def test_cli_reports_errors_as_json(kits_v10_path, capsys):

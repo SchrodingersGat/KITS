@@ -7,9 +7,7 @@ mid-layer (the process is killed), and means a gmsh crash only fails the job.
 from __future__ import annotations
 
 import json
-import shutil
 import sys
-import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, Signal
@@ -44,7 +42,7 @@ class MeshJob(QObject):
         """
         super().__init__(parent)
         self._project_path = Path(project_path)
-        self._tmpdir: Path | None = None
+        self._result_path: Path | None = None
         self._buffer = ""
         self._error: str | None = None
         self._done = False
@@ -61,20 +59,13 @@ class MeshJob(QObject):
 
     def start(self) -> None:
         """Launch the mesher process."""
-        self._tmpdir = Path(tempfile.mkdtemp(prefix="kits-mesh-"))
-        args = ["-m", "kits.mesh.cli", str(self._project_path), "--progress", "--npz", str(self._npz_path)]
-        self._process.start(sys.executable, args)
+        self._process.start(sys.executable, ["-m", "kits.mesh.cli", str(self._project_path), "--progress"])
 
     def cancel(self) -> None:
         """Kill the mesher process; :attr:`cancelled` is emitted once it has exited."""
         if self.running:
             self._cancelled = True
             self._process.kill()
-
-    @property
-    def _npz_path(self) -> Path:
-        """Temporary file the child writes the mesh arrays to."""
-        return self._tmpdir / "mesh.npz"
 
     def _read_stdout(self) -> None:
         """Parse complete JSON lines from the child's stdout."""
@@ -91,6 +82,7 @@ class MeshJob(QObject):
                 self._error = str(record["error"])
             elif record.get("done"):
                 self._done = True
+                self._result_path = Path(record["mesh"]) if record.get("mesh") else None
 
     def _on_error(self, error: QProcess.ProcessError) -> None:
         """Report a process that couldn't be started.
@@ -100,7 +92,6 @@ class MeshJob(QObject):
                 surface through :meth:`_on_finished`.
         """
         if error == QProcess.ProcessError.FailedToStart:
-            self._cleanup()
             self.failed.emit(f"Could not start the mesher ({sys.executable}): {self._process.errorString()}")
 
     def _on_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
@@ -111,29 +102,20 @@ class MeshJob(QObject):
             exit_status: Whether the child exited normally or crashed.
         """
         self._read_stdout()
-        try:
-            if self._cancelled:
-                self.cancelled.emit()
-            elif self._done and exit_code == 0 and self._npz_path.is_file():
-                try:
-                    mesh = BoardMesh.load_npz(self._npz_path)
-                except (OSError, ValueError, KeyError) as exc:
-                    self.failed.emit(f"Could not read the mesh result: {exc}")
-                else:
-                    self.succeeded.emit(mesh)
-            elif self._error:
-                self.failed.emit(self._error)
+        if self._cancelled:
+            self.cancelled.emit()
+        elif self._done and exit_code == 0 and self._result_path is not None:
+            try:
+                mesh = BoardMesh.load_npz(self._result_path)
+            except (OSError, ValueError, KeyError) as exc:
+                self.failed.emit(f"Could not read the mesh result: {exc}")
             else:
-                stderr = bytes(self._process.readAllStandardError()).decode("utf-8", "replace").strip()
-                crashed = exit_status == QProcess.ExitStatus.CrashExit
-                how = "crashed" if crashed else f"exited with code {exit_code}"
-                detail = f"\n\n{stderr[-_STDERR_TAIL:]}" if stderr else ""
-                self.failed.emit(f"The mesher {how}.{detail}")
-        finally:
-            self._cleanup()
-
-    def _cleanup(self) -> None:
-        """Remove the temporary directory."""
-        if self._tmpdir is not None:
-            shutil.rmtree(self._tmpdir, ignore_errors=True)
-            self._tmpdir = None
+                self.succeeded.emit(mesh)
+        elif self._error:
+            self.failed.emit(self._error)
+        else:
+            stderr = bytes(self._process.readAllStandardError()).decode("utf-8", "replace").strip()
+            crashed = exit_status == QProcess.ExitStatus.CrashExit
+            how = "crashed" if crashed else f"exited with code {exit_code}"
+            detail = f"\n\n{stderr[-_STDERR_TAIL:]}" if stderr else ""
+            self.failed.emit(f"The mesher {how}.{detail}")

@@ -2,14 +2,15 @@
 
 Reads a KITS project file, loads the KiCad board it links, meshes every copper
 layer with the project's mesh settings and writes ``kits_output/<project>.msh``
-next to the project file. The GUI runs this
+(for the solver) plus ``kits_output/<project>.mesh.npz`` (arrays and input
+fingerprints, reloaded by the GUI) next to the project file. The GUI runs this
 same entry point in a child process with ``--progress`` so a gmsh crash can't
 take the GUI down and meshing can be cancelled.
 
 With ``--progress``, stdout carries one JSON object per line:
 
 * ``{"progress": 0.42, "message": "Meshing F.Cu (1/2)"}`` while running;
-* ``{"done": true, "msh": "...", "nodes": N, "triangles": M}`` on success;
+* ``{"done": true, "msh": "...", "mesh": "<.mesh.npz>", "nodes": N, "triangles": M}`` on success;
 * ``{"error": "..."}`` on failure (exit status 1).
 """
 
@@ -22,7 +23,7 @@ from pathlib import Path
 
 from ..config import ConfigError
 from ..ingest import BoardLoadError, load_project
-from ..project import PROJECT_SUFFIX, load_kits_project
+from ..project import PROJECT_SUFFIX, load_kits_project, saved_mesh_path_for
 from .geometry import GeometryError
 from .mesher import MeshError, mesh_board
 
@@ -48,7 +49,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="kits-mesh", description="Mesh a KiCad board for KITS")
     parser.add_argument("project", help="KITS project file (.kits)")
     parser.add_argument("-o", "--output", help="output .msh path (default: kits_output/<project>.msh)")
-    parser.add_argument("--npz", help="also save the mesh arrays to this .npz file")
     parser.add_argument("--progress", action="store_true", help="report progress as JSON lines on stdout")
     args = parser.parse_args(argv)
 
@@ -82,8 +82,8 @@ def main(argv: list[str] | None = None) -> int:
         except OSError as exc:
             raise MeshError(f"cannot create output folder {msh_path.parent}: {exc.strerror or exc}") from exc
         mesh = mesh_board(board, kits.mesh, msh_path, progress)
-        if args.npz:
-            mesh.save_npz(args.npz)
+        saved_path = saved_mesh_path_for(msh_path)
+        mesh.save_npz(saved_path)
     except (BoardLoadError, ConfigError, GeometryError, MeshError, OSError) as exc:
         if args.progress:
             _emit({"error": str(exc)})
@@ -92,7 +92,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.progress:
-        _emit({"done": True, "msh": str(msh_path), "nodes": mesh.num_nodes, "triangles": mesh.num_triangles})
+        _emit(
+            {
+                "done": True,
+                "msh": str(msh_path),
+                "mesh": str(saved_path),
+                "nodes": mesh.num_nodes,
+                "triangles": mesh.num_triangles,
+            }
+        )
     else:
         print(f"Wrote {msh_path}: {mesh.num_nodes} nodes, {mesh.num_triangles} triangles")
     return 0

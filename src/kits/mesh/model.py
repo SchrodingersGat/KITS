@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from ..config import MeshSettings
+from .fingerprint import MeshFingerprint
 
 
 @dataclass
@@ -73,11 +74,13 @@ class BoardMesh:
         layers: Layer meshes, top to bottom.
         settings: Mesh settings used.
         msh_path: The gmsh ``.msh`` file written alongside, if any.
+        fingerprint: Fingerprints of the board and settings the mesh was built from.
     """
 
     layers: list[LayerMesh]
     settings: MeshSettings = field(default_factory=MeshSettings)
     msh_path: Path | None = None
+    fingerprint: MeshFingerprint = field(default_factory=MeshFingerprint)
 
     def layer(self, name: str) -> LayerMesh | None:
         """Return the mesh for a copper layer.
@@ -111,6 +114,8 @@ class BoardMesh:
             "z_mm": np.array([m.z_mm for m in self.layers]),
             "sizes_mm": np.array([self.settings.max_size_mm, self.settings.min_size_mm]),
             "msh_path": np.array(str(self.msh_path) if self.msh_path else ""),
+            "settings_hash": np.array(self.fingerprint.settings),
+            "board_hash": np.array(self.fingerprint.board),
         }
         for i, m in enumerate(self.layers):
             arrays[f"nodes_{i}"] = m.nodes
@@ -141,4 +146,42 @@ class BoardMesh:
             ]
             max_size, min_size = (float(v) for v in data["sizes_mm"])
             msh_path = str(data["msh_path"])
-        return cls(layers, MeshSettings(max_size, min_size), Path(msh_path) if msh_path else None)
+            fingerprint = MeshFingerprint(
+                settings=str(data["settings_hash"]) if "settings_hash" in data else "",
+                board=str(data["board_hash"]) if "board_hash" in data else "",
+            )
+        return cls(
+            layers=layers,
+            settings=MeshSettings(max_size, min_size),
+            msh_path=Path(msh_path) if msh_path else None,
+            fingerprint=fingerprint,
+        )
+
+
+def load_saved_mesh(
+    path: str | Path, board_file: str | Path, settings: MeshSettings
+) -> tuple[BoardMesh | None, str | None]:
+    """Load a saved mesh if it was built from the current board and settings.
+
+    Args:
+        path: The saved mesh (``.mesh.npz``).
+        board_file: The current ``.kicad_pcb`` file.
+        settings: The current mesh settings.
+
+    Returns:
+        ``(mesh, None)`` if the saved mesh is current; ``(None, reason)`` if it
+        exists but is out of date or unreadable; ``(None, None)`` if there is no
+        saved mesh.
+    """
+    path = Path(path)
+    if not path.is_file():
+        return None, None
+    try:
+        current = MeshFingerprint.of(board_file, settings)
+        mesh = BoardMesh.load_npz(path)
+    except (OSError, ValueError, KeyError) as exc:
+        return None, f"The saved mesh couldn't be read ({exc})"
+    reason = mesh.fingerprint.staleness(current)
+    if reason is not None:
+        return None, reason
+    return mesh, None

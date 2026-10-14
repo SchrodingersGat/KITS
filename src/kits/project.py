@@ -83,8 +83,13 @@ class KitsProject:
 
     @property
     def msh_path(self) -> Path:
-        """Where the board mesh is written."""
+        """Where the board mesh is written (gmsh format, for the solver)."""
         return self.output_dir / f"{self.name}.msh"
+
+    @property
+    def saved_mesh_path(self) -> Path:
+        """Where the mesh arrays and their input fingerprints are saved for reloading."""
+        return saved_mesh_path_for(self.msh_path)
 
     def board_reference(self) -> str | None:
         """The board path as written to the file: relative to the project if possible.
@@ -180,6 +185,19 @@ def load_kits_project(path: str | Path) -> KitsProject:
         mesh=mesh,
         extra=data,
     )
+
+
+def saved_mesh_path_for(msh_path: str | Path) -> Path:
+    """Return the reloadable mesh file stored beside a ``.msh`` file.
+
+    Args:
+        msh_path: The gmsh mesh path, e.g. ``kits_output/board.msh``.
+
+    Returns:
+        e.g. ``kits_output/board.mesh.npz``.
+    """
+    msh_path = Path(msh_path)
+    return msh_path.with_name(f"{msh_path.stem}.mesh.npz")
 
 
 def default_project_path(board_path: str | Path) -> Path:
