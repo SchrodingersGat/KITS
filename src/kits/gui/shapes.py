@@ -85,12 +85,14 @@ def pad_path(pad: Pad) -> QPainterPath:
         return _rounded_rect(w, h, pad.roundrect_ratio * min(w, h))
     if shape == "trapezoid":
         dx, dy = pad.rect_delta
-        return polygon_path([
-            (-w / 2 - dy / 2, h / 2 + dx / 2),
-            (w / 2 + dy / 2, h / 2 - dx / 2),
-            (w / 2 - dy / 2, -h / 2 + dx / 2),
-            (-w / 2 + dy / 2, -h / 2 - dx / 2),
-        ])
+        return polygon_path(
+            [
+                (-w / 2 - dy / 2, h / 2 + dx / 2),
+                (w / 2 + dy / 2, h / 2 - dx / 2),
+                (w / 2 - dy / 2, -h / 2 + dx / 2),
+                (-w / 2 + dy / 2, -h / 2 - dx / 2),
+            ]
+        )
     if shape == "custom":
         path = circle_path((0.0, 0.0), w / 2) if w == h else _rounded_rect(w, h, 0)
         path.setFillRule(Qt.FillRule.WindingFill)

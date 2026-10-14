@@ -69,8 +69,7 @@ class LayerPanel(QWidget):
             self._list.item(row).setCheckState(state)
 
     def _on_item_changed(self, item: QListWidgetItem) -> None:
-        self.visibility_changed.emit(item.data(_NAME_ROLE),
-                                     item.checkState() == Qt.CheckState.Checked)
+        self.visibility_changed.emit(item.data(_NAME_ROLE), item.checkState() == Qt.CheckState.Checked)
 
     def _on_current_changed(self, current: QListWidgetItem | None, _previous) -> None:
         if current is not None and current.data(_NAME_ROLE) in self._copper:

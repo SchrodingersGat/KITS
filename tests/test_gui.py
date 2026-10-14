@@ -2,7 +2,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QRectF, QSettings  # noqa: E402
+from PySide6.QtCore import QRectF, QSettings, Qt  # noqa: E402
 from PySide6.QtGui import QImage, QPainter  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -151,3 +151,68 @@ def test_statusbar_coords_are_grid_relative(app, board_v9_path):
 
     window.view.cursor_moved.emit(10.0, 25.0)
     assert window._cursor_label.text() == f"X {10:9.3f} mm   Y {5:9.3f} mm"
+
+
+# -- crosshair cursor ----------------------------------------------------------
+
+
+def _grab_after_move(window, pos):
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    vp = window.view.viewport()
+    event = QMouseEvent(
+        QMouseEvent.Type.MouseMove,
+        QPointF(pos),
+        QPointF(vp.mapToGlobal(pos)),
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    window.view.mouseMoveEvent(event)
+    image = vp.grab().toImage()
+    return image, QPoint(int(pos.x() * image.devicePixelRatio()), int(pos.y() * image.devicePixelRatio()))
+
+
+def test_cursor_setting_defaults_on(app, tmp_path):
+    settings = AppSettings(QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat))
+    assert settings.cursor_visible
+    settings.cursor_visible = False
+    assert not AppSettings(QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat)).cursor_visible
+
+
+def test_crosshair_follows_mouse_and_toggles(app, board_v9_path):
+    from PySide6.QtCore import QPoint
+
+    window = MainWindow()
+    window._layer_dock.hide()
+    window._info_dock.hide()
+    window.resize(800, 600)
+    window.show()
+    assert window.open_path(board_v9_path)
+    window.settings.grid_visible = False  # keep grid lines out of the pixel checks
+    app.processEvents()
+
+    view = window.view
+    # A spot in the empty margin left of the board, so only the crosshair is drawn there.
+    board_left = view.mapFromScene(window.scene.board_rect().topLeft()).x()
+    assert board_left > 40
+    target = QPoint(board_left // 2, view.viewport().height() // 2)
+    image, p = _grab_after_move(window, target)
+    background = image.pixelColor(p + QPoint(-15, -15))
+    assert image.pixelColor(p + QPoint(-10, 0)) != background  # horizontal line
+    assert image.pixelColor(p + QPoint(0, -10)) != background  # vertical line
+
+    # Toggling via the View menu hides it and persists the setting.
+    window.cursor_action.trigger()
+    assert not view.cursor_visible
+    assert not window.settings.cursor_visible
+    image, p = _grab_after_move(window, target)
+    assert image.pixelColor(p + QPoint(-10, 0)) == background
+
+    # The Preferences dialog turns it back on.
+    dialog = SettingsDialog(window.settings, window)
+    dialog.cursor_visible.setChecked(True)
+    dialog.accept()
+    assert view.cursor_visible and window.cursor_action.isChecked()
+    window.close()

@@ -10,6 +10,7 @@ MAX_GRID_SPACING_MM = 1000.0
 
 _GRID_SPACING_KEY = "grid/spacing_mm"
 _GRID_VISIBLE_KEY = "grid/visible"
+_CURSOR_VISIBLE_KEY = "cursor/visible"
 
 
 def _to_bool(value) -> bool:
@@ -47,10 +48,25 @@ class AppSettings(QObject):
 
     @property
     def grid_visible(self) -> bool:
-        return _to_bool(self._store.value(_GRID_VISIBLE_KEY, True))
+        return self._get_bool(_GRID_VISIBLE_KEY, True)
 
     @grid_visible.setter
     def grid_visible(self, value: bool) -> None:
-        if bool(value) != self.grid_visible:
-            self._store.setValue(_GRID_VISIBLE_KEY, bool(value))
+        self._set_bool(_GRID_VISIBLE_KEY, value, True)
+
+    @property
+    def cursor_visible(self) -> bool:
+        """Whether the full-view crosshair follows the mouse."""
+        return self._get_bool(_CURSOR_VISIBLE_KEY, True)
+
+    @cursor_visible.setter
+    def cursor_visible(self, value: bool) -> None:
+        self._set_bool(_CURSOR_VISIBLE_KEY, value, True)
+
+    def _get_bool(self, key: str, default: bool) -> bool:
+        return _to_bool(self._store.value(key, default))
+
+    def _set_bool(self, key: str, value: bool, default: bool) -> None:
+        if bool(value) != self._get_bool(key, default):
+            self._store.setValue(key, bool(value))
             self.changed.emit()

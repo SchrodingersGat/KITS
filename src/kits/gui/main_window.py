@@ -59,6 +59,7 @@ class MainWindow(QMainWindow):
         self.layer_panel.active_layer_changed.connect(self._on_active_layer)
         self.view.cursor_moved.connect(self._on_cursor_moved)
         self.settings.changed.connect(self._apply_settings)
+        self.view.set_cursor_visible(self.settings.cursor_visible)
 
         self.setAcceptDrops(True)
         self.resize(1400, 900)
@@ -94,6 +95,10 @@ class MainWindow(QMainWindow):
         self.grid_action.setChecked(self.settings.grid_visible)
         self.grid_action.setShortcut(Qt.Key.Key_G)
         self.grid_action.toggled.connect(self._on_grid_toggled)
+        self.cursor_action = QAction("Show &crosshair cursor", self)
+        self.cursor_action.setCheckable(True)
+        self.cursor_action.setChecked(self.settings.cursor_visible)
+        self.cursor_action.toggled.connect(self._on_cursor_toggled)
         self.preferences_action = action("&Preferences…", self.open_preferences, "Ctrl+,")
         self._board_actions = [self.reload_action, self.fit_action, self.zoom_in_action, self.zoom_out_action]
 
@@ -113,6 +118,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.zoom_out_action)
         view_menu.addSeparator()
         view_menu.addAction(self.grid_action)
+        view_menu.addAction(self.cursor_action)
         view_menu.addSeparator()
         view_menu.addAction(self._layer_dock.toggleViewAction())
         view_menu.addAction(self._info_dock.toggleViewAction())
@@ -125,8 +131,13 @@ class MainWindow(QMainWindow):
     def _on_grid_toggled(self, checked: bool) -> None:
         self.settings.grid_visible = checked
 
+    def _on_cursor_toggled(self, checked: bool) -> None:
+        self.settings.cursor_visible = checked
+
     def _apply_settings(self) -> None:
         self.grid_action.setChecked(self.settings.grid_visible)
+        self.cursor_action.setChecked(self.settings.cursor_visible)
+        self.view.set_cursor_visible(self.settings.cursor_visible)
         if self.scene is not None:
             self.scene.set_grid(self.settings.grid_spacing_mm, self.settings.grid_visible)
 

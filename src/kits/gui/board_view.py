@@ -6,8 +6,8 @@ left free for selection / click-to-edit tools.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, QRectF, Qt, Signal
-from PySide6.QtGui import QMouseEvent, QPainter, QPalette, QWheelEvent
+from PySide6.QtCore import QLineF, QPoint, QRect, QRectF, Qt, Signal
+from PySide6.QtGui import QMouseEvent, QPainter, QPalette, QPen, QWheelEvent
 from PySide6.QtWidgets import QGraphicsView
 
 from . import colors
@@ -16,6 +16,7 @@ _ZOOM_STEP = 1.25
 _MIN_SCALE = 0.5  # pixels per mm
 _MAX_SCALE = 5000.0
 _PAN_BUTTONS = (Qt.MouseButton.MiddleButton, Qt.MouseButton.RightButton)
+_CURSOR_STRIP_PX = 2  # half-height of the strip repainted around each crosshair line
 
 
 class BoardView(QGraphicsView):
@@ -36,6 +37,59 @@ class BoardView(QGraphicsView):
         self.setMouseTracking(True)
         self._pan_origin: QPoint | None = None
         self._fit_rect: QRectF | None = None
+        self._cursor_visible = True
+        self._cursor_pos: QPoint | None = None  # viewport pixels; None when mouse is outside
+
+    # -- crosshair cursor ----------------------------------------------------
+
+    def set_cursor_visible(self, visible: bool) -> None:
+        self._cursor_visible = visible
+        self._update_cursor_lines(self._cursor_pos)
+
+    @property
+    def cursor_visible(self) -> bool:
+        return self._cursor_visible
+
+    def _move_cursor(self, pos: QPoint | None) -> None:
+        old, self._cursor_pos = self._cursor_pos, pos
+        if old != pos:
+            self._update_cursor_lines(old)
+            self._update_cursor_lines(pos)
+
+    def _update_cursor_lines(self, pos: QPoint | None) -> None:
+        """Repaint only the thin strips under the crosshair lines at ``pos``."""
+        if pos is None:
+            return
+        vp = self.viewport()
+        m = _CURSOR_STRIP_PX
+        vp.update(QRect(0, pos.y() - m, vp.width(), 2 * m + 1))
+        vp.update(QRect(pos.x() - m, 0, 2 * m + 1, vp.height()))
+
+    def drawForeground(self, painter: QPainter, rect: QRectF) -> None:
+        super().drawForeground(painter, rect)
+        if not self._cursor_visible or self._cursor_pos is None or self.scene() is None:
+            return
+        center = self.mapToScene(self._cursor_pos)
+        painter.save()
+        pen = QPen(colors.CURSOR, 1)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.drawLine(QLineF(rect.left(), center.y(), rect.right(), center.y()))
+        painter.drawLine(QLineF(center.x(), rect.top(), center.x(), rect.bottom()))
+        painter.restore()
+
+    def scrollContentsBy(self, dx: int, dy: int) -> None:
+        # Scrolling blits the viewport, carrying the old lines along with the
+        # board; clear them where they landed and redraw at the mouse.
+        super().scrollContentsBy(dx, dy)
+        if self._cursor_pos is not None:
+            self._update_cursor_lines(self._cursor_pos + QPoint(dx, dy))
+            self._update_cursor_lines(self._cursor_pos)
+
+    def leaveEvent(self, event) -> None:
+        self._move_cursor(None)
+        super().leaveEvent(event)
 
     # -- zoom ----------------------------------------------------------------
 
@@ -94,6 +148,7 @@ class BoardView(QGraphicsView):
             event.accept()
         else:
             super().mouseMoveEvent(event)
+        self._move_cursor(pos)
         scene_pos = self.mapToScene(pos)
         self.cursor_moved.emit(scene_pos.x(), scene_pos.y())
 
