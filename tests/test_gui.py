@@ -141,3 +141,13 @@ def test_grid_toggle_and_preferences(app, board_v9_path):
     # A newly opened board picks up the stored settings.
     assert window.open_path(board_v9_path)
     assert window.scene.grid_spacing == 2.5
+
+
+def test_statusbar_coords_are_grid_relative(app, board_v9_path):
+    window = MainWindow()
+    assert window.open_path(board_v9_path)  # outline (0, 0)-(40, 30): grid origin at KiCad (0, 30)
+    assert window.scene.to_grid_coords(0, 30) == (0, 0)
+    assert window.scene.to_grid_coords(40, 0) == (40, 30)  # top-right; Y up
+
+    window.view.cursor_moved.emit(10.0, 25.0)
+    assert window._cursor_label.text() == f"X {10:9.3f} mm   Y {5:9.3f} mm"

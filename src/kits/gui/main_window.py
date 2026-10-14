@@ -231,7 +231,9 @@ class MainWindow(QMainWindow):
 
     def _on_cursor_moved(self, x: float, y: float) -> None:
         if self.scene is not None:
-            self._cursor_label.setText(f"X {x:9.3f} mm   Y {y:9.3f} mm")
+            gx, gy = self.scene.to_grid_coords(x, y)
+            self._cursor_label.setText(f"X {gx:9.3f} mm   Y {gy:9.3f} mm")
+            self._cursor_label.setToolTip(f"Relative to grid origin\nKiCad: X {x:.3f}  Y {y:.3f} mm")
 
     def _update_title(self) -> None:
         project = self.document.project

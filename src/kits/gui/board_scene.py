@@ -155,6 +155,12 @@ class BoardScene(QGraphicsScene):
         """Bottom-left corner of the board bounding box (Y points down)."""
         return self.board_rect().bottomLeft()
 
+    def to_grid_coords(self, x: float, y: float) -> tuple[float, float]:
+        """Scene (KiCad) coordinates -> grid coordinates: relative to the grid
+        origin, with Y pointing *up* so the board sits in the positive quadrant."""
+        origin = self.grid_origin()
+        return x - origin.x(), origin.y() - y
+
     def displayed_grid_spacing(self, pixels_per_mm: float) -> float:
         """Grid pitch actually drawn at a zoom level.
 
