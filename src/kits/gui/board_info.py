@@ -1,0 +1,82 @@
+"""Dock panel summarising the loaded board and its stackup."""
+
+from __future__ import annotations
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QFormLayout,
+    QHeaderView,
+    QLabel,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ..ingest import Project
+
+_STACKUP_COLUMNS = ["Layer", "Type", "Thickness (mm)", "Material", "εr"]
+
+
+def _fmt(value, spec: str = "g") -> str:
+    return "" if value is None else format(value, spec)
+
+
+class BoardInfoPanel(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._labels: dict[str, QLabel] = {}
+        form = QFormLayout()
+        for key in ("File", "Format version", "Size", "Thickness", "Copper layers",
+                    "Footprints", "Pads", "Tracks", "Vias", "Zones", "Nets"):
+            label = QLabel("—")
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            self._labels[key] = label
+            form.addRow(key + ":", label)
+
+        self._stackup = QTableWidget(0, len(_STACKUP_COLUMNS))
+        self._stackup.setHorizontalHeaderLabels(_STACKUP_COLUMNS)
+        self._stackup.verticalHeader().setVisible(False)
+        self._stackup.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._stackup.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.addLayout(form)
+        layout.addWidget(QLabel("Stackup:"))
+        layout.addWidget(self._stackup, 1)
+
+    def set_project(self, project: Project | None) -> None:
+        if project is None:
+            for label in self._labels.values():
+                label.setText("—")
+            self._stackup.setRowCount(0)
+            return
+
+        b = project.board
+        bbox = b.bounding_box()
+        size = f"{bbox[2] - bbox[0]:.2f} × {bbox[3] - bbox[1]:.2f} mm" if bbox else "—"
+        values = {
+            "File": b.path.name,
+            "Format version": str(b.version),
+            "Size": size,
+            "Thickness": f"{b.thickness_mm:g} mm" if b.thickness_mm else "—",
+            "Copper layers": str(len(b.copper_layers)),
+            "Footprints": str(len(b.footprints)),
+            "Pads": str(sum(1 for _ in b.pads())),
+            "Tracks": f"{len(b.tracks)} segments, {len(b.arcs)} arcs",
+            "Vias": str(len(b.vias)),
+            "Zones": str(sum(1 for z in b.zones if not z.is_rule_area)),
+            "Nets": str(len(b.nets)),
+        }
+        for key, text in values.items():
+            self._labels[key].setText(text)
+        self._labels["File"].setToolTip(str(b.path))
+
+        self._stackup.setRowCount(len(b.stackup))
+        for row, layer in enumerate(b.stackup):
+            cells = [layer.name, layer.type, _fmt(layer.thickness_mm),
+                     layer.material or "", _fmt(layer.epsilon_r)]
+            for col, text in enumerate(cells):
+                self._stackup.setItem(row, col, QTableWidgetItem(text))

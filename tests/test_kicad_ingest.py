@@ -1,0 +1,120 @@
+import math
+
+import pytest
+
+from kits.ingest import BoardLoadError, load_board, load_project
+from kits.ingest.geometry import arc_points, rotate
+
+from .conftest import kicad_demo_projects
+
+
+def test_project_loads_board(board_v9_path):
+    project = load_project(board_v9_path.with_suffix(".kicad_pro"))
+    assert project.name == "demo"
+    assert project.settings == {"meta": {"version": 3}}
+    assert project.board.path == board_v9_path
+
+
+def test_layers_and_stackup(board_v9_path):
+    b = load_board(board_v9_path)
+    assert b.version == 20241229
+    assert b.thickness_mm == pytest.approx(1.6)
+    assert b.copper_layers == ["F.Cu", "In1.Cu", "B.Cu"]
+    assert [s.name for s in b.stackup][:2] == ["F.Cu", "dielectric 1"]
+    assert b.stackup[1].material == "FR4"
+    assert b.stackup[1].epsilon_r == pytest.approx(4.5)
+    assert b.stackup[3].thickness_mm == pytest.approx(1.2)
+
+
+def test_nets_v9(board_v9_path):
+    b = load_board(board_v9_path)
+    assert b.tracks[0].net == "+5V"  # resolved via the net table
+    assert b.arcs[0].net == "GND"
+    pads = {p.number: p for p in b.pads()}
+    assert pads["1"].net == "GND"
+    assert pads["2"].net == "+5V"
+    assert set(b.nets) == {"GND", "+5V"}
+
+
+def test_nets_v10(board_v10_path):
+    b = load_board(board_v10_path)
+    assert b.tracks[0].net == "/VPP{slash}MCLR"
+    assert next(b.pads()).net == "VCC"
+    assert b.zones[0].net == "GND"
+    assert b.zones[0].layers == ["B.Cu"]
+
+
+def test_footprint_and_pad_transform(board_v9_path):
+    b = load_board(board_v9_path)
+    fp = b.footprints[0]
+    assert (fp.reference, fp.value, fp.rotation) == ("R1", "10k", 90)
+    pads = {p.number: p for p in fp.pads}
+    # Local (-1, 0) rotated 90 deg CCW (as displayed, Y down) -> (0, +1).
+    assert pads["1"].position == pytest.approx((10, 21))
+    assert pads["2"].position == pytest.approx((10, 19))
+    assert pads["1"].layers == ["F.Cu"]
+    assert pads["1"].shape == "roundrect"
+    assert pads["2"].layers == ["F.Cu", "In1.Cu", "B.Cu"]  # *.Cu expanded
+    assert pads["2"].drill.width == pytest.approx(0.8)
+    assert pads["2"].footprint_ref == "R1"
+
+
+def test_vias(board_v9_path):
+    through, blind = load_board(board_v9_path).vias
+    assert through.via_type == "through" and through.layers == ("F.Cu", "B.Cu")
+    assert blind.via_type == "blind" and blind.layers == ("F.Cu", "In1.Cu")
+
+
+def test_zones(board_v9_path):
+    pour, keepout = load_board(board_v9_path).zones
+    assert pour.name == "gnd pour"
+    assert pour.layers == ["F.Cu", "B.Cu"]
+    assert set(pour.fills) == {"F.Cu", "B.Cu"}
+    assert len(pour.outline) == 4
+    assert keepout.is_rule_area
+
+
+def test_graphics_and_outline(board_v9_path):
+    b = load_board(board_v9_path)
+    # Silkscreen and text are dropped; the outline rect becomes a polygon.
+    assert {g.layer for g in b.graphics} == {"Edge.Cuts", "B.Cu"}
+    (outline,) = b.outline_graphics()
+    assert outline.kind == "poly" and len(outline.points) == 4
+    copper = next(g for g in b.graphics if g.layer == "B.Cu")
+    assert copper.filled and copper.net == "GND"
+    assert b.bounding_box() == (0, 0, 40, 30)
+
+
+def test_errors(tmp_path):
+    with pytest.raises(BoardLoadError):
+        load_project(tmp_path / "missing.kicad_pro")
+    (tmp_path / "x.kicad_pro").write_text("{}")
+    with pytest.raises(BoardLoadError, match="No board file"):
+        load_project(tmp_path / "x.kicad_pro")
+    bad = tmp_path / "bad.kicad_pcb"
+    bad.write_text("(kicad_pcb (version 1)")
+    with pytest.raises(BoardLoadError, match="Malformed"):
+        load_board(bad)
+    sch = tmp_path / "s.kicad_pcb"
+    sch.write_text("(kicad_sch (version 1))")
+    with pytest.raises(BoardLoadError, match="Not a KiCad board"):
+        load_board(sch)
+
+
+def test_rotate_matches_kicad_convention():
+    assert rotate((1, 0), 90) == pytest.approx((0, -1))  # CCW on a Y-down screen
+
+
+def test_arc_points_pass_through_mid():
+    pts = arc_points((0, 0), (1, 1), (2, 0))
+    assert pts[0] == (0, 0) and pts[-1] == (2, 0)
+    assert all(math.hypot(x - 1, y) == pytest.approx(1) for x, y in pts)
+    assert max(y for _, y in pts) == pytest.approx(1, abs=1e-3)
+
+
+@pytest.mark.parametrize("project", kicad_demo_projects(), ids=lambda p: p.stem)
+def test_kicad_demo_projects_load(project):
+    b = load_project(project).board
+    assert b.copper_layers
+    assert b.footprints
+    assert b.bounding_box() is not None

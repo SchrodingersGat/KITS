@@ -1,0 +1,39 @@
+"""Layer colours, loosely following KiCad's default theme."""
+
+from __future__ import annotations
+
+from PySide6.QtGui import QColor
+
+BACKGROUND = QColor(0, 16, 35)
+EDGE_CUTS = QColor(208, 210, 205)
+VIAS = QColor(194, 194, 194)
+TH_PADS = QColor(227, 183, 46)
+HOLES = QColor(BACKGROUND).lighter(130)
+ZONE_DARKEN = 160  # zones drawn this much darker than tracks on the same layer
+
+_FRONT = QColor(200, 52, 52)
+_BACK = QColor(77, 127, 196)
+_INNER = [
+    QColor(127, 200, 127),
+    QColor(206, 125, 44),
+    QColor(79, 203, 203),
+    QColor(219, 98, 139),
+    QColor(167, 165, 198),
+    QColor(40, 204, 217),
+    QColor(232, 178, 167),
+    QColor(242, 237, 161),
+    QColor(141, 203, 129),
+    QColor(237, 124, 51),
+    QColor(91, 195, 235),
+    QColor(247, 111, 142),
+]
+
+
+def copper_color(name: str) -> QColor:
+    if name == "F.Cu":
+        return QColor(_FRONT)
+    if name == "B.Cu":
+        return QColor(_BACK)
+    digits = "".join(ch for ch in name if ch.isdigit())
+    index = int(digits) - 1 if digits else 0
+    return QColor(_INNER[index % len(_INNER)])
