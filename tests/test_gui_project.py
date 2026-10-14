@@ -594,3 +594,27 @@ def test_mesh_panel_corner_size(window, kits_v9_path):
     assert window.document.project.mesh.corner_size_mm == 0.0 and window.document.dirty
     assert window.save()
     assert load_kits_project(kits_v9_path).mesh.corner_size_mm == 0.0
+
+
+def test_log_scale_option(app, window, strip_kits):
+    from kits.gui.field_display import DisplayMode
+
+    assert window.open_path(strip_kits)
+    panel = window.solve_panel
+    assert not panel.log_scale.isEnabled()  # no results yet
+    window.solve()
+    _wait(app, lambda: not window.solve_job_running)
+
+    assert panel.log_scale.isChecked() and panel.log_scale.isEnabled()  # on by default for current density
+    assert window.scene.results_log
+    low, high = window.scene.results_range
+    assert 0 < low < high and panel.legend_low.text().startswith("≤")
+    assert "Log scale" in panel.legend_note.text()
+
+    panel.log_scale.setChecked(False)
+    assert not window.scene.results_log and window.scene.results_range[0] == 0.0
+    assert not panel.legend_low.text().startswith("≤")
+
+    panel.log_scale.setChecked(True)
+    panel.mode.setCurrentIndex(panel.mode.findData(DisplayMode.TEMPERATURE))
+    assert not panel.log_scale.isEnabled() and not window.scene.results_log  # temperature stays linear

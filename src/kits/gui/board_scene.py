@@ -37,6 +37,7 @@ from .field_display import (
     FieldProbe,
     color_indices,
     colormap,
+    supports_log,
     triangle_values,
     value_range,
 )
@@ -193,6 +194,7 @@ class BoardScene(QGraphicsScene):
         self._selection: LayerItem | None = None
         self._results: SolveResults | None = None
         self._results_mode = DisplayMode.CURRENT_DENSITY
+        self._results_log = False
         self._results_range = (0.0, 1.0)
         self._results_visible = True
         self._results_overlays: dict[str, LayerItem] = {}
@@ -419,7 +421,9 @@ class BoardScene(QGraphicsScene):
 
     # -- results overlay --------------------------------------------------------------
 
-    def set_results(self, results: SolveResults | None, mode: DisplayMode | None = None) -> None:
+    def set_results(
+        self, results: SolveResults | None, mode: DisplayMode | None = None, log: bool | None = None
+    ) -> None:
         """Show solve results, coloured by one quantity.
 
         As with the mesh, only the active layer's overlay is drawn. Overlays are
@@ -428,6 +432,7 @@ class BoardScene(QGraphicsScene):
         Args:
             results: The results, or None to remove the overlay.
             mode: Quantity to colour by; keeps the current mode if omitted.
+            log: Log colour scale (current density only); keeps the current choice if omitted.
         """
         for overlay in self._results_overlays.values():
             self.removeItem(overlay)
@@ -436,8 +441,10 @@ class BoardScene(QGraphicsScene):
         self._results = results
         if mode is not None:
             self._results_mode = mode
+        if log is not None:
+            self._results_log = log
         if results is not None:
-            self._results_range = value_range(results, self._results_mode)
+            self._results_range = value_range(results, self._results_mode, self.results_log)
         self._update_results_visibility()
 
     def set_results_visible(self, visible: bool) -> None:
@@ -448,6 +455,11 @@ class BoardScene(QGraphicsScene):
         """
         self._results_visible = visible
         self._update_results_visibility()
+
+    @property
+    def results_log(self) -> bool:
+        """Whether the results overlay uses a log colour scale (only ever for current density)."""
+        return self._results_log and supports_log(self._results_mode)
 
     @property
     def results_range(self) -> tuple[float, float]:
@@ -517,7 +529,7 @@ class BoardScene(QGraphicsScene):
         if not len(tris):
             return container
         colors_ = colormap(self._results_mode)
-        index = color_indices(values[shown], *self._results_range, steps=len(colors_))
+        index = color_indices(values[shown], *self._results_range, steps=len(colors_), log=self.results_log)
         corners = layer.nodes[tris]  # (M, 3, 2)
         centroid = corners.mean(axis=1)
         lo, hi = centroid.min(axis=0), centroid.max(axis=0)

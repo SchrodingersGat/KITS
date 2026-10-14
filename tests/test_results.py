@@ -167,3 +167,33 @@ def test_field_probe_interpolates_and_respects_copper(app_or_skip):
     layer.copper[:] = False  # bare board: only temperature is shown
     assert probe.value_at(0.25, 0.25, DisplayMode.VOLTAGE) is None
     assert probe.value_at(0.25, 0.25, DisplayMode.TEMPERATURE) == pytest.approx(25.75)
+
+
+def test_log_colour_scale(app_or_skip):
+    from kits.gui.field_display import (
+        DisplayMode,
+        color_indices,
+        scale_midpoint,
+        supports_log,
+        value_range,
+    )
+
+    assert supports_log(DisplayMode.CURRENT_DENSITY)
+    assert not supports_log(DisplayMode.VOLTAGE) and not supports_log(DisplayMode.TEMPERATURE)
+
+    # One colour per decade over 1..1000, regardless of the huge linear spread.
+    values = np.array([0.0, 1.0, 10.0, 100.0, 1000.0, 5000.0])
+    assert list(color_indices(values, 1.0, 1000.0, steps=3, log=True)) == [0, 0, 1, 2, 2, 2]
+    assert scale_midpoint(1.0, 100.0, log=True) == pytest.approx(10.0)
+    assert scale_midpoint(0.0, 100.0, log=False) == pytest.approx(50.0)
+
+    # Log range: positive low limit, never more than 3 decades below the top.
+    results = _results()
+    layer = results.layer("F.Cu")
+    layer.triangles = np.array([[0, 1, 2]] * 400)
+    layer.copper = np.ones(400, bool)
+    layer.current_density = np.geomspace(1e3, 1e9, 400)  # A/m²: 1e-3 .. 1e3 A/mm²
+    low, high = value_range(results, DisplayMode.CURRENT_DENSITY, log=True)
+    assert high == pytest.approx(np.percentile(layer.current_density / 1e6, 99.5))
+    assert low == pytest.approx(high / 1e3)
+    assert value_range(results, DisplayMode.CURRENT_DENSITY)[0] == 0.0  # linear starts at zero

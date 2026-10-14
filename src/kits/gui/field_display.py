@@ -38,6 +38,10 @@ COLOR_STEPS = 64  # distinct colours in the overlay
 # Current density spikes at sharp inside corners (mesh-dependent), so its scale
 # tops out at this percentile instead of the maximum.
 CURRENT_DENSITY_PERCENTILE = 99.5
+# Log scale: the bottom of the scale is this percentile of the copper values...
+LOG_LOW_PERCENTILE = 1.0
+# ...but never more than this many decades below the top.
+LOG_MAX_DECADES = 3.0
 
 
 @dataclass(frozen=True)
@@ -113,15 +117,34 @@ def triangle_values(layer: LayerResult, mode: DisplayMode) -> tuple[np.ndarray, 
     return values, shown
 
 
-def value_range(results: SolveResults, mode: DisplayMode) -> tuple[float, float]:
+def supports_log(mode: DisplayMode) -> bool:
+    """Whether a log colour scale is offered for a quantity.
+
+    Only current density: it spans decades (a hot track next to a lightly loaded
+    pour) and is never negative. Voltage is zero at the reference pad and
+    temperature varies little relative to its level, so log scales don't help.
+
+    Args:
+        mode: The displayed quantity.
+
+    Returns:
+        True for current density.
+    """
+    return mode is DisplayMode.CURRENT_DENSITY
+
+
+def value_range(results: SolveResults, mode: DisplayMode, log: bool = False) -> tuple[float, float]:
     """Colour scale limits shared by all layers, so layers can be compared.
 
     Args:
         results: The solve results.
         mode: Quantity shown.
+        log: Log scale (current density only, see :func:`supports_log`): the low
+            limit is then positive, at :data:`LOG_LOW_PERCENTILE` of the values but
+            no more than :data:`LOG_MAX_DECADES` below the high limit.
 
     Returns:
-        ``(low, high)`` in display units; ``high > low``.
+        ``(low, high)`` in display units; ``high > low`` (and ``low > 0`` for log).
     """
     parts = [values[shown] for values, shown in (triangle_values(r, mode) for r in results.layers)]
     values = np.concatenate(parts) if parts else np.zeros(1)
@@ -129,6 +152,14 @@ def value_range(results: SolveResults, mode: DisplayMode) -> tuple[float, float]
         values = np.zeros(1)
     if mode is DisplayMode.CURRENT_DENSITY:
         low, high = 0.0, float(np.percentile(values, CURRENT_DENSITY_PERCENTILE))
+        if log and supports_log(mode):
+            high = max(high, 1e-12)
+            positive = values[values > 0]
+            floor = high * 10**-LOG_MAX_DECADES
+            low = max(float(np.percentile(positive, LOG_LOW_PERCENTILE)) if positive.size else floor, floor)
+            if not high > low:
+                low = high / 10
+            return low, high
     else:
         low, high = float(values.min()), float(values.max())
     if not high > low:
@@ -136,20 +167,43 @@ def value_range(results: SolveResults, mode: DisplayMode) -> tuple[float, float]
     return low, high
 
 
-def color_indices(values: np.ndarray, low: float, high: float, steps: int = COLOR_STEPS) -> np.ndarray:
+def color_indices(
+    values: np.ndarray, low: float, high: float, steps: int = COLOR_STEPS, log: bool = False
+) -> np.ndarray:
     """Map values to colour map indices, clamping outside the range.
 
     Args:
         values: Values in display units.
-        low: Value mapped to the first colour.
+        low: Value mapped to the first colour (positive for a log scale).
         high: Value mapped to the last colour.
         steps: Number of colours.
+        log: Space colours evenly in ``log10(value)``; values at or below zero get
+            the first colour.
 
     Returns:
         Integer indices in ``[0, steps)``.
     """
-    t = np.clip((values - low) / (high - low), 0.0, 1.0)
+    if log:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            logs = np.log10(np.maximum(values, low))
+        t = np.clip((logs - np.log10(low)) / (np.log10(high) - np.log10(low)), 0.0, 1.0)
+    else:
+        t = np.clip((values - low) / (high - low), 0.0, 1.0)
     return np.minimum((t * steps).astype(int), steps - 1)
+
+
+def scale_midpoint(low: float, high: float, log: bool) -> float:
+    """The value at the middle of a colour scale.
+
+    Args:
+        low: Bottom of the scale.
+        high: Top of the scale.
+        log: Whether the scale is logarithmic (then the geometric mean).
+
+    Returns:
+        The midpoint value.
+    """
+    return float(np.sqrt(low * high)) if log else (low + high) / 2
 
 
 def format_value(value: float, mode: DisplayMode) -> str:

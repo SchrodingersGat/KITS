@@ -4,7 +4,7 @@ mesh:
   min_size_mm: 0.01
   min_circle_points: 36
   corner_size_mm: 0.02
-ambient_temperature_c: 25.0
+ambient_temperature_c: 24.0
 materials:
   copper:
     conductivity_s_m: 58000000.0

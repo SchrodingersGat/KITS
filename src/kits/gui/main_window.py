@@ -127,6 +127,7 @@ class MainWindow(QMainWindow):
         self.document.results_changed.connect(self._on_results_changed)
         self.solve_panel.solve_requested.connect(self.solve)
         self.solve_panel.mode_changed.connect(self._on_display_mode_changed)
+        self.solve_panel.log_scale_toggled.connect(lambda _on: self._on_display_mode_changed())
         self.solve_panel.show_results_toggled.connect(self.show_results_action.setChecked)
         self.sources_panel.show_sources_toggled.connect(self.show_sources_action.setChecked)
         self.mesh_panel.build_requested.connect(self.build_mesh)
@@ -836,21 +837,27 @@ class MainWindow(QMainWindow):
             results: The new results, or None.
         """
         if self.scene is not None:
-            self.scene.set_results(results, self.solve_panel.display_mode)
+            self.scene.set_results(
+                results, self.solve_panel.display_mode, self.solve_panel.log_scale_selected
+            )
             self.scene.set_results_visible(self.show_results_action.isChecked())
             if results is not None:
-                self.solve_panel.set_legend(self.solve_panel.display_mode, *self.scene.results_range)
+                self.solve_panel.set_legend(
+                    self.solve_panel.display_mode, *self.scene.results_range, self.scene.results_log
+                )
         self._update_probe()
 
-    def _on_display_mode_changed(self, mode) -> None:
-        """Recolour the results overlay for a different quantity.
+    def _on_display_mode_changed(self, mode=None) -> None:
+        """Recolour the results overlay for a different quantity or colour scale.
 
         Args:
-            mode: The :class:`~kits.gui.field_display.DisplayMode` to show.
+            mode: The :class:`~kits.gui.field_display.DisplayMode` to show; the
+                panel's current selection if omitted (e.g. the log scale changed).
         """
+        mode = mode or self.solve_panel.display_mode
         if self.scene is not None and self.document.results is not None:
-            self.scene.set_results(self.document.results, mode)
-            self.solve_panel.set_legend(mode, *self.scene.results_range)
+            self.scene.set_results(self.document.results, mode, self.solve_panel.log_scale_selected)
+            self.solve_panel.set_legend(mode, *self.scene.results_range, self.scene.results_log)
         self._update_probe()
 
     def _on_show_results_toggled(self, checked: bool) -> None:

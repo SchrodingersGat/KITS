@@ -21,7 +21,14 @@ from PySide6.QtWidgets import (
 
 from ..config import ConfigError, SolveSettings
 from .document import Document
-from .field_display import CURRENT_DENSITY_PERCENTILE, DisplayMode, colormap, format_value
+from .field_display import (
+    CURRENT_DENSITY_PERCENTILE,
+    DisplayMode,
+    colormap,
+    format_value,
+    scale_midpoint,
+    supports_log,
+)
 
 _BALANCE_TOLERANCE_A = 1e-9
 _WARNING_STYLE = "color: #e0a030;"
@@ -95,11 +102,13 @@ class SolvePanel(QWidget):
     Signals:
         solve_requested(): The user asked to solve the board.
         mode_changed(DisplayMode): The displayed quantity changed.
+        log_scale_toggled(bool): The log colour scale option changed.
         show_results_toggled(bool): The results overlay was toggled.
     """
 
     solve_requested = Signal()
     mode_changed = Signal(object)
+    log_scale_toggled = Signal(bool)
     show_results_toggled = Signal(bool)
 
     def __init__(self, document: Document, parent=None):
@@ -121,12 +130,22 @@ class SolvePanel(QWidget):
         for mode in DisplayMode:
             self.mode.addItem(mode.label, mode)
         self.mode.currentIndexChanged.connect(lambda _i: self.mode_changed.emit(self.display_mode))
+        self.log_scale = QCheckBox("Log scale")
+        self.log_scale.setChecked(True)
+        self.log_scale.setToolTip(
+            "Spread current density over decades so moderate values (e.g. around vias) stay\n"
+            "visible next to a heavily loaded track. Current density only."
+        )
+        self.log_scale.toggled.connect(self.log_scale_toggled)
+        self.mode.currentIndexChanged.connect(lambda _i: self._update_log_enabled())
         self.show_results = QCheckBox("Show results")
         self.show_results.setChecked(True)
         self.show_results.toggled.connect(self.show_results_toggled)
 
         self.legend_bar = QLabel()
         self.legend_low = QLabel()
+        self.legend_mid = QLabel()
+        self.legend_mid.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.legend_high = QLabel()
         self.legend_high.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.legend_note = QLabel()
@@ -134,6 +153,8 @@ class SolvePanel(QWidget):
         self.legend_note.setEnabled(False)
         limits = QHBoxLayout()
         limits.addWidget(self.legend_low)
+        limits.addStretch(1)
+        limits.addWidget(self.legend_mid)
         limits.addStretch(1)
         limits.addWidget(self.legend_high)
         self.legend = QWidget()
@@ -175,6 +196,7 @@ class SolvePanel(QWidget):
         layout.addWidget(self.solve_button)
         layout.addWidget(self.status)
         layout.addLayout(form)
+        layout.addWidget(self.log_scale)
         layout.addWidget(self.show_results)
         layout.addWidget(self.legend)
         layout.addWidget(self.settings_group)
@@ -252,13 +274,23 @@ class SolvePanel(QWidget):
         self._busy = busy
         self.refresh()
 
-    def set_legend(self, mode: DisplayMode, low: float, high: float) -> None:
+    @property
+    def log_scale_selected(self) -> bool:
+        """Whether a log colour scale is requested (applies to current density only)."""
+        return self.log_scale.isChecked()
+
+    def _update_log_enabled(self) -> None:
+        """Enable the log-scale option only for quantities that support it."""
+        self.log_scale.setEnabled(self._document.results is not None and supports_log(self.display_mode))
+
+    def set_legend(self, mode: DisplayMode, low: float, high: float, log: bool = False) -> None:
         """Draw the colour scale for the displayed quantity.
 
         Args:
             mode: The displayed quantity.
             low: Value at the bottom of the scale, in display units.
             high: Value at the top of the scale, in display units.
+            log: Whether the scale is logarithmic (the middle label is then the geometric mean).
         """
         width, height = _LEGEND_SIZE
         pixmap = QPixmap(width, height)
@@ -270,12 +302,14 @@ class SolvePanel(QWidget):
         painter.fillRect(0, 0, width, height, gradient)
         painter.end()
         self.legend_bar.setPixmap(pixmap)
-        self.legend_low.setText(format_value(low, mode))
+        self.legend_low.setText(("≤ " if log else "") + format_value(low, mode))
+        self.legend_mid.setText(format_value(scale_midpoint(low, high, log), mode))
         high_text = format_value(high, mode)
         if mode is DisplayMode.CURRENT_DENSITY:
             high_text = f"≥ {high_text}"
             self.legend_note.setText(
-                f"Scale tops out at the {CURRENT_DENSITY_PERCENTILE:g}th percentile: sharp inside "
+                ("Log scale. " if log else "")
+                + f"Scale tops out at the {CURRENT_DENSITY_PERCENTILE:g}th percentile: sharp inside "
                 "corners have mesh-dependent spikes."
             )
         else:
@@ -338,5 +372,6 @@ class SolvePanel(QWidget):
         has_results = results is not None
         for widget in (self.mode, self.show_results, self.legend):
             widget.setEnabled(has_results)
+        self._update_log_enabled()
         self.legend.setVisible(has_results)
         self.settings_group.setEnabled(doc.project is not None and not self._busy)
