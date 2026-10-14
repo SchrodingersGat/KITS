@@ -520,7 +520,7 @@ class Board3DView(QWidget):
             mesh_settings: Hole outline resolution.
             solve_settings: Barrel plating thickness.
         """
-        if board is not self._board:
+        if board is None or self._board is None or board.path != self._board.path:
             self._hidden_layers.clear()  # the Layers panel starts with every layer shown
             self._fresh_camera = True
         self._board = board

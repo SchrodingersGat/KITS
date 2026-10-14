@@ -217,6 +217,7 @@ class SolvePanel(QWidget):
             document.sources_changed,
             document.heat_loads_changed,
             document.elements_changed,
+            document.stackup_changed,
             document.settings_changed,
             document.results_changed,
         ):

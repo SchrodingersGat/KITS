@@ -30,6 +30,7 @@ from .config import (
     MeshSettings,
     ResistiveElement,
     SolveSettings,
+    StackupEdits,
     current_multiplier_from_value,
     current_sources_from_list,
     heat_loads_from_list,
@@ -64,6 +65,7 @@ class KitsProject:
         current_multiplier: Scale applied to every source's current when solving.
         heat_loads: Heat sources and sinks applied to pads.
         resistive_elements: Lumped resistors between pad groups (resistors, MOSFETs...).
+        stackup_edits: Layer thicknesses changed from the board file, or None.
         solve: Materials, convection and ambient temperature for the solver.
         extra: Top-level keys KITS doesn't interpret yet, kept so saving doesn't drop them.
     """
@@ -75,6 +77,7 @@ class KitsProject:
     current_multiplier: float = 1.0
     heat_loads: list[HeatLoad] = field(default_factory=list)
     resistive_elements: list[ResistiveElement] = field(default_factory=list)
+    stackup_edits: StackupEdits | None = None
     solve: SolveSettings = field(default_factory=SolveSettings)
     extra: dict = field(default_factory=dict)
 
@@ -139,6 +142,21 @@ class KitsProject:
         """The enabled resistive elements (those that are solved)."""
         return [e for e in self.resistive_elements if e.enabled]
 
+    def stackup_edits_for(self, board_hash: str | None) -> dict[str, float]:
+        """The layer thickness edits that apply to a board version.
+
+        Args:
+            board_hash: Fingerprint of the board file as loaded now.
+
+        Returns:
+            ``{layer: thickness_mm}``; empty if there are no edits or they were made
+            on a different version of the board.
+        """
+        edits = self.stackup_edits
+        if edits is None or not board_hash or edits.board_hash != board_hash:
+            return {}
+        return dict(edits.thickness_mm)
+
     def board_reference(self) -> str | None:
         """The board path as written to the file: relative to the project if possible.
 
@@ -169,6 +187,8 @@ class KitsProject:
             data["current_sources"] = [s.to_dict() for s in self.current_sources]
         if self.heat_loads:
             data["heat_loads"] = [h.to_dict() for h in self.heat_loads]
+        if self.stackup_edits is not None and self.stackup_edits.thickness_mm:
+            data["stackup_edits"] = self.stackup_edits.to_dict()
         if self.resistive_elements:
             data["resistive_elements"] = [e.to_dict() for e in self.resistive_elements]
         data.update({k: v for k, v in self.extra.items() if k not in data})
@@ -194,6 +214,8 @@ class KitsProject:
         for load in self.heat_loads:
             load.validate()
         resistive_elements_from_list([e.to_dict() for e in self.resistive_elements])
+        if self.stackup_edits is not None:
+            self.stackup_edits.validate()
         target = _normalise(path) if path is not None else self.path
         try:
             target.write_text(yaml.safe_dump(self._dict_for(target), sort_keys=False), encoding="utf-8")
@@ -249,6 +271,7 @@ def load_kits_project(path: str | Path) -> KitsProject:
     multiplier = current_multiplier_from_value(data.pop("current_multiplier", None))
     heat_loads = heat_loads_from_list(data.pop("heat_loads", None))
     elements = resistive_elements_from_list(data.pop("resistive_elements", None))
+    stackup_edits = StackupEdits.from_dict(data.pop("stackup_edits", None))
     solve = SolveSettings.from_sections(
         data.pop("ambient_temperature_c", None), data.pop("materials", None), data.pop("convection", None)
     )
@@ -260,6 +283,7 @@ def load_kits_project(path: str | Path) -> KitsProject:
         current_multiplier=multiplier,
         heat_loads=heat_loads,
         resistive_elements=elements,
+        stackup_edits=stackup_edits,
         solve=solve,
         extra=data,
     )

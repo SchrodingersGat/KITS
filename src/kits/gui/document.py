@@ -23,6 +23,7 @@ from ..config import (
     MeshSettings,
     ResistiveElement,
     SolveSettings,
+    StackupEdits,
     current_multiplier_from_value,
 )
 from ..ingest import Board, BoardLoadError, Project, load_project
@@ -43,6 +44,7 @@ class Document(QObject):
         sources_changed(): Current sources (or the current multiplier) were edited.
         heat_loads_changed(): Heat loads were added, edited or removed.
         elements_changed(): Resistive elements were added, edited or removed.
+        stackup_changed(): A layer thickness was edited or the edits were reset.
         dirty_changed(bool): The project gained or lost unsaved changes.
         mesh_changed(BoardMesh | None): A mesh was built, or cleared.
         results_changed(SolveResults | None): A solve finished, or results were cleared.
@@ -55,6 +57,7 @@ class Document(QObject):
     sources_changed = Signal()
     heat_loads_changed = Signal()
     elements_changed = Signal()
+    stackup_changed = Signal()
     dirty_changed = Signal(bool)
     mesh_changed = Signal(object)
     results_changed = Signal(object)
@@ -77,6 +80,8 @@ class Document(QObject):
         self._mesh_from_file = False
         self._markers: list[tuple[float, float]] = []
         self._board_hash: str | None = None
+        self._board: Board | None = None  # the loaded board with any layer thickness edits
+        self._stackup_notice: str | None = None
         self._results: SolveResults | None = None
         self._results_notice: str | None = None
         self._results_from_file = False
@@ -95,7 +100,12 @@ class Document(QObject):
 
     @property
     def board(self) -> Board | None:
-        """The loaded board, or ``None`` if no board is linked or it failed to load."""
+        """The loaded board with any layer thickness edits applied, or ``None`` if none is loaded."""
+        return self._board
+
+    @property
+    def file_board(self) -> Board | None:
+        """The loaded board exactly as its file describes it (no thickness edits)."""
         return self._kicad.board if self._kicad else None
 
     @property
@@ -234,6 +244,7 @@ class Document(QObject):
             project.solve,
             project.active_heat_loads,
             project.active_resistive_elements,
+            self.layer_thickness_edits,
         )
 
     def _load_saved_results(self) -> tuple[SolveResults | None, str | None]:
@@ -353,7 +364,7 @@ class Document(QObject):
         kicad = load_project(board_path)
         self._project.set_board(board_path)
         self._set_dirty(True)
-        self._set_kicad(kicad, None)
+        self._set_kicad(kicad, None, reset_edits=True)
 
     def reload_board(self) -> None:
         """Re-read the linked board from disk.
@@ -364,7 +375,7 @@ class Document(QObject):
         """
         if self._project is None or self._project.board is None:
             return
-        self._set_kicad(load_project(self._project.board), None)
+        self._set_kicad(load_project(self._project.board), None, reset_edits=True)
 
     def _load_linked_board(self) -> None:
         """Load the open project's board, recording (not raising) any failure."""
@@ -803,12 +814,16 @@ class Document(QObject):
         self._set_dirty(False)
         self.project_changed.emit(project)
 
-    def _set_kicad(self, kicad: Project | None, error: str | None) -> None:
+    def _set_kicad(self, kicad: Project | None, error: str | None, reset_edits: bool = False) -> None:
         """Replace the loaded board, then reload its saved mesh if that is still current.
+
+        Layer thickness edits are kept only for the same version of the same
+        board, and are reset when the board is explicitly re-loaded.
 
         Args:
             kicad: The loaded KiCad project, or None.
             error: Why no board is loaded, if ``kicad`` is None.
+            reset_edits: Drop layer thickness edits even if the board is unchanged.
         """
         self._kicad = kicad
         self._board_error = error
@@ -820,6 +835,15 @@ class Document(QObject):
             self._board_hash = board_hash(kicad.board.path) if kicad else None
         except OSError:
             self._board_hash = None
+        self._stackup_notice = None
+        edits = self._project.stackup_edits if self._project else None
+        if kicad is not None and edits is not None and (reset_edits or edits.board_hash != self._board_hash):
+            self._project.stackup_edits = None
+            self._stackup_notice = (
+                "The board was re-loaded, so the edited layer thicknesses were reset to the board's values."
+            )
+            self._set_dirty(True)
+        self._update_board()
         self.clear_markers()
         self.board_changed.emit(kicad)
         self._mesh, self._mesh_notice = self._load_saved_mesh()
@@ -828,6 +852,82 @@ class Document(QObject):
         self._results, self._results_notice = self._load_saved_results()
         self._results_from_file = self._results is not None
         self.results_changed.emit(self._results)
+
+    # -- layer thickness edits --------------------------------------------------------
+
+    @property
+    def layer_thickness_edits(self) -> dict[str, float]:
+        """Layer thicknesses changed from the board file, ``{layer: mm}`` (empty if none)."""
+        return self._project.stackup_edits_for(self._board_hash) if self._project else {}
+
+    @property
+    def stackup_notice(self) -> str | None:
+        """Why the layer thickness edits were reset when the board was loaded, if they were."""
+        return self._stackup_notice
+
+    def file_layer_thickness(self, layer: str) -> float | None:
+        """A layer's thickness as the board file gives it (copper without one gets the default).
+
+        Args:
+            layer: Stackup or copper layer name.
+
+        Returns:
+            Millimetres, or None if the board has no such layer or no thickness for it.
+        """
+        board = self.file_board
+        if board is None:
+            return None
+        copper = board.copper_thicknesses()
+        if layer in copper:
+            return copper[layer][0]
+        return next((s.thickness_mm for s in board.stackup if s.name == layer), None)
+
+    def set_layer_thickness(self, layer: str, thickness_mm: float) -> None:
+        """Change a layer's thickness (copper weight or dielectric) from the board file's value.
+
+        Setting it back to the file's value removes the edit. Edits are saved with
+        the project and need a new solve (not a new mesh).
+
+        Args:
+            layer: Copper layer or stackup layer name.
+            thickness_mm: New thickness in millimetres.
+
+        Raises:
+            ConfigError: If no board is loaded, the layer isn't on it, or the thickness is invalid.
+        """
+        project = self._require_project()
+        original = self.file_layer_thickness(layer)
+        if self._kicad is None or self._board_hash is None or original is None:
+            raise ConfigError(f"the board has no layer {layer!r} with a thickness")
+        edits = self.layer_thickness_edits
+        if abs(thickness_mm - original) <= 1e-9 * max(original, 1e-9):
+            edits.pop(layer, None)
+        else:
+            edits[layer] = float(thickness_mm)
+        updated = StackupEdits(self._board_hash, edits)
+        updated.validate()
+        if edits == project.stackup_edits_for(self._board_hash):
+            return
+        project.stackup_edits = updated if edits else None
+        self._stackup_edited()
+
+    def reset_layer_thicknesses(self) -> None:
+        """Drop all layer thickness edits, going back to the board file's stackup."""
+        if self._project is not None and self._project.stackup_edits is not None:
+            self._project.stackup_edits = None
+            self._stackup_edited()
+
+    def _stackup_edited(self) -> None:
+        """Apply edited thicknesses to the board, mark the project dirty and announce it."""
+        self._stackup_notice = None
+        self._update_board()
+        self._set_dirty(True)
+        self.stackup_changed.emit()
+
+    def _update_board(self) -> None:
+        """Recompute :attr:`board` from the file's board and the thickness edits."""
+        board = self.file_board
+        self._board = board.with_thickness_overrides(self.layer_thickness_edits) if board else None
 
     def _load_saved_mesh(self) -> tuple[BoardMesh | None, str | None]:
         """Load the project's saved mesh if it matches the loaded board and current settings.

@@ -90,7 +90,7 @@ class MainWindow(QMainWindow):
         self._gl_primer = prime_window_for_3d(self)
 
         self.layer_panel = LayerPanel()
-        self.info_panel = BoardInfoPanel()
+        self.info_panel = BoardInfoPanel(self.document)
         self.mesh_panel = MeshPanel(self.document)
         self.sources_panel = SourcesPanel(self.document)
         self.heat_panel = HeatLoadsPanel(self.document)
@@ -150,6 +150,7 @@ class MainWindow(QMainWindow):
 
         self.document.project_changed.connect(self._on_project_changed)
         self.document.settings_changed.connect(self._refresh_3d)
+        self.document.stackup_changed.connect(self._refresh_3d)
         for signal in (
             self.document.mesh_changed,
             self.document.results_changed,

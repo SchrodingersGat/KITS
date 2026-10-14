@@ -15,7 +15,7 @@ materials:
 convection:
   top_w_m2k: 14.0
   bottom_w_m2k: 10.0
-current_multiplier: 5.0
+current_multiplier: 2.0
 current_sources:
 - ref: J1
   pad: '1'
@@ -23,3 +23,15 @@ current_sources:
 - ref: J2
   pad: '1'
   current_a: -10.0
+resistive_elements:
+- name: R1
+  ref: R1
+  resistance_ohm: 0.001
+  pads_a:
+    name: /IN
+    pads:
+    - '1'
+  pads_b:
+    name: /OUT
+    pads:
+    - '2'

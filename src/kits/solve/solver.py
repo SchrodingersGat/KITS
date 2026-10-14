@@ -20,6 +20,7 @@ Temperature dependence of copper resistivity is not modelled yet.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
@@ -32,6 +33,7 @@ from scipy.sparse.linalg import spsolve
 from ..config import HeatLoad, HeatLoadKind, ResistiveElement, SolveSettings
 from ..ingest.model import Board
 from ..mesh.geometry import board_holes, pad_area
+from ..mesh.mesher import layer_heights
 from ..mesh.model import BoardMesh
 from .elements import default_ambient_conductance
 from .fem import (
@@ -162,8 +164,12 @@ class LayeredModel:
         self.settings = settings or SolveSettings()
         self.layers: list[LayerFEM] = []
         offset = 0
+        heights = layer_heights(board)
         for lm in mesh.layers:
-            self.layers.append(layer_fem(lm, offset))
+            # Heights from the board's stackup (which may have been edited since
+            # meshing), so thickness changes need a new solve but not a new mesh.
+            lf = layer_fem(lm, offset)
+            self.layers.append(dataclasses.replace(lf, z=heights.get(lm.layer, lm.z_mm) * MM))
             offset += lm.num_nodes
         self.size = offset
         self.by_name = {lf.layer: lf for lf in self.layers}

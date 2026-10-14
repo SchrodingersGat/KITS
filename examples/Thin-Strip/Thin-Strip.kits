@@ -23,3 +23,8 @@ current_sources:
 - ref: J2
   pad: '1'
   current_a: -25.0
+stackup_edits:
+  board_hash: 2c674ff70e84c4358327eebac94ac8084dfbed1e91cce5859214981b2e3361c6
+  thickness_mm:
+    F.Cu: 0.10500000000000001
+    B.Cu: 0.10500000000000001

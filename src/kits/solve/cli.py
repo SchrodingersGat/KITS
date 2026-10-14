@@ -23,6 +23,7 @@ import numpy as np
 
 from ..config import ConfigError
 from ..ingest import BoardLoadError, load_project
+from ..mesh.fingerprint import board_hash
 from ..mesh.geometry import GeometryError
 from ..mesh.mesher import MeshError, mesh_board
 from ..mesh.model import load_saved_mesh
@@ -83,6 +84,9 @@ def solve_project(project_path: str | Path, progress=None) -> tuple[SolveResults
 
     report("Loading board", 0.0)
     board = load_project(kits.board).board
+    # Layer thickness edits made in the GUI, if they were made on this version of the board.
+    stackup = kits.stackup_edits_for(board_hash(board.path))
+    board = board.with_thickness_overrides(stackup)
     mesh, _ = load_saved_mesh(kits.saved_mesh_path, board.path, kits.mesh)
     if mesh is None:
         mesh = mesh_board(board, kits.mesh, kits.msh_path, lambda m, f: report(m, 0.6 * f))
@@ -121,7 +125,7 @@ def solve_project(project_path: str | Path, progress=None) -> tuple[SolveResults
         electrode_voltages={f"{r}.{p}": v for (r, p), v in dc.electrode_voltages.items()} if dc else {},
         electrode_currents={f"{r}.{p}": i for (r, p), i in dc.electrode_currents.items()} if dc else {},
         mesh_fingerprint=mesh.fingerprint,
-        inputs=inputs_hash(sources, settings, heat_loads, elements),
+        inputs=inputs_hash(sources, settings, heat_loads, elements, stackup),
         load_heat={f"{r}.{p}": q for (r, p), q in thermal.load_heat.items()},
         load_temperatures={f"{r}.{p}": t for (r, p), t in thermal.load_temperatures.items()},
         element_currents=dict(dc.element_currents) if dc else {},

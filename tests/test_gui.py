@@ -342,8 +342,10 @@ def test_board_panel_shows_copper_weights(app, kits_v9_path, kits_v10_path):
     panel = window.info_panel
     table = panel._stackup
     rows = {table.item(r, 0).text(): r for r in range(table.rowCount())}
-    assert table.item(rows["F.Cu"], 3).text() == "1 oz"
-    assert table.item(rows["dielectric 1"], 3).text() == ""
+    assert table.cellWidget(rows["F.Cu"], 3).value() == pytest.approx(1.0)  # editable weight, in oz
+    assert (
+        table.cellWidget(rows["dielectric 1"], 3) is None and table.item(rows["dielectric 1"], 3).text() == ""
+    )
     assert panel._labels["Copper layers"].text() == "3 (1 oz)"
     assert panel._stackup_note.isHidden()
 

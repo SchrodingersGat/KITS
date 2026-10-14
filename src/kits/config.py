@@ -18,6 +18,7 @@ DEFAULT_CORNER_SIZE_MM = 0.1
 # Global scale applied to every current source at solve time.
 MAX_CURRENT_MULTIPLIER = 1000.0
 ABSOLUTE_ZERO_C = -273.15
+MAX_LAYER_THICKNESS_MM = 10.0
 MIN_CIRCLE_POINTS_RANGE = (8, 1000)
 
 
@@ -606,6 +607,72 @@ def resistive_elements_from_list(data) -> list[ResistiveElement]:
         if names.count(name) > 1:
             raise ConfigError(f"more than one resistive element is named {name!r}")
     return elements
+
+
+@dataclass
+class StackupEdits:
+    """Layer thicknesses changed from what the board file says (copper weight, dielectric).
+
+    They only apply to the board version they were made for: if the board file
+    changes (its fingerprint no longer matches), they are dropped.
+
+    Attributes:
+        board_hash: :func:`kits.mesh.fingerprint.board_hash` of the board they were made on.
+        thickness_mm: ``{layer name: thickness in mm}``.
+    """
+
+    board_hash: str = ""
+    thickness_mm: dict[str, float] = dataclasses.field(default_factory=dict)
+
+    def validate(self) -> None:
+        """Check the thicknesses.
+
+        Raises:
+            ConfigError: If a layer name is empty or a thickness isn't positive and plausible.
+        """
+        for name, mm in self.thickness_mm.items():
+            if not name:
+                raise ConfigError("stackup edits: layer names can't be empty")
+            if not (math.isfinite(mm) and 0 < mm <= MAX_LAYER_THICKNESS_MM):
+                raise ConfigError(
+                    f"stackup edits: thickness of {name} must be above 0 and at most "
+                    f"{MAX_LAYER_THICKNESS_MM:g} mm"
+                )
+
+    def to_dict(self) -> dict:
+        """Return the YAML representation.
+
+        Returns:
+            Mapping with ``board_hash`` and ``thickness_mm``.
+        """
+        return {"board_hash": self.board_hash, "thickness_mm": dict(self.thickness_mm)}
+
+    @classmethod
+    def from_dict(cls, data) -> StackupEdits | None:
+        """Read the ``stackup_edits:`` section.
+
+        Args:
+            data: The parsed mapping, or None if absent.
+
+        Returns:
+            The validated edits, or None if there are none.
+
+        Raises:
+            ConfigError: If the section is malformed.
+        """
+        if data is None:
+            return None
+        if not isinstance(data, dict) or not isinstance(data.get("thickness_mm", {}), dict):
+            raise ConfigError("'stackup_edits' must be a mapping with board_hash and thickness_mm")
+        try:
+            edits = cls(
+                board_hash=str(data.get("board_hash", "")),
+                thickness_mm={str(k): float(v) for k, v in data.get("thickness_mm", {}).items()},
+            )
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"invalid stackup edit: {exc}") from exc
+        edits.validate()
+        return edits if edits.thickness_mm else None
 
 
 @dataclass

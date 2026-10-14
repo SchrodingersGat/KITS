@@ -7,6 +7,7 @@ Nothing in this module depends on KiCad file syntax or on Qt.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -273,6 +274,9 @@ class Board:
     vias: list[Via]
     zones: list[Zone]
     graphics: list[Graphic]  # board-level and footprint graphics on copper/Edge.Cuts
+    # Thickness of copper layers the stackup doesn't list, set by the user
+    # (see with_thickness_overrides); empty for a board as read from its file.
+    copper_thickness_overrides: dict[str, float] = field(default_factory=dict)
 
     @property
     def copper_layers(self) -> list[str]:
@@ -289,10 +293,37 @@ class Board:
             ``from_stackup=False``.
         """
         stack = {s.name: s.thickness_mm for s in self.stackup if is_copper_layer(s.name) and s.thickness_mm}
+        stack.update(self.copper_thickness_overrides)
         return {
             name: (stack[name], True) if name in stack else (DEFAULT_COPPER_THICKNESS_MM, False)
             for name in self.copper_layers
         }
+
+    def with_thickness_overrides(self, overrides: dict[str, float]) -> Board:
+        """A copy of the board with some layer thicknesses replaced.
+
+        Stackup entries (copper or dielectric) named in ``overrides`` get the new
+        thickness; copper layers the stackup doesn't list are recorded in
+        :attr:`copper_thickness_overrides`. Everything else is shared with this
+        board, which is left unchanged.
+
+        Args:
+            overrides: ``{layer name: thickness in mm}``.
+
+        Returns:
+            The edited board (``self`` if there are no overrides).
+        """
+        if not overrides:
+            return self
+        listed = {s.name for s in self.stackup}
+        stackup = [
+            dataclasses.replace(s, thickness_mm=overrides[s.name]) if s.name in overrides else s
+            for s in self.stackup
+        ]
+        extra = {
+            name: mm for name, mm in overrides.items() if name in self.copper_layers and name not in listed
+        }
+        return dataclasses.replace(self, stackup=stackup, copper_thickness_overrides=extra)
 
     def pads(self):
         """Iterate over the pads of every footprint.

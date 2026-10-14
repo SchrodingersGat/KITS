@@ -24,6 +24,7 @@ def inputs_hash(
     settings: SolveSettings,
     heat_loads: Sequence[HeatLoad] = (),
     elements: Sequence[ResistiveElement] = (),
+    stackup: dict[str, float] | None = None,
 ) -> str:
     """Fingerprint the solve inputs that aren't part of the mesh.
 
@@ -33,6 +34,7 @@ def inputs_hash(
         heat_loads: Pad heat sources and sinks (order doesn't matter). Left out of
             the digest when there are none, so older results stay valid.
         elements: Resistive elements (order doesn't matter); likewise left out when none.
+        stackup: Layer thickness edits applied to the board; likewise left out when none.
 
     Returns:
         A hex SHA-256 digest.
@@ -44,6 +46,8 @@ def inputs_hash(
     }
     if heat_loads:
         payload["heat_loads"] = sorted((h.ref, h.pad, h.kind.value, h.value) for h in heat_loads)
+    if stackup:
+        payload["stackup"] = sorted(stackup.items())
     if elements:
         payload["elements"] = sorted(json.dumps(e.to_dict(), sort_keys=True) for e in elements)
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
@@ -198,7 +202,8 @@ class SolveResults:
             return reason.replace("saved mesh", "results")
         if self.inputs != inputs:
             return (
-                "The current sources, heat loads, resistive elements or solver settings changed since the "
+                "The current sources, heat loads, resistive elements, layer thicknesses or solver settings "
+                "changed since the "
                 "results were computed"
             )
         return None
