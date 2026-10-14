@@ -20,3 +20,9 @@ htmlcov/
 .idea/
 Thumbs.db
 .DS_Store
+
+# Kicad Files
+*.lck
+*.kicad_pcb-bak
+*.kicad_pro-bak
+*.kicad_sch-bak
