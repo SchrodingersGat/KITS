@@ -32,7 +32,14 @@ from ..ingest.model import EDGE_CUTS, Board, Pad
 from ..mesh.model import BoardMesh, LayerMesh
 from ..solve.results import LayerResult, SolveResults
 from . import colors
-from .field_display import DisplayMode, color_indices, colormap, triangle_values, value_range
+from .field_display import (
+    DisplayMode,
+    FieldProbe,
+    color_indices,
+    colormap,
+    triangle_values,
+    value_range,
+)
 from .settings import DEFAULT_GRID_SPACING_MM
 from .shapes import (
     circle_path,
@@ -189,6 +196,7 @@ class BoardScene(QGraphicsScene):
         self._results_range = (0.0, 1.0)
         self._results_visible = True
         self._results_overlays: dict[str, LayerItem] = {}
+        self._probes: dict[str, FieldProbe] = {}
         self._mesh_visible = True
         self._grid_spacing = DEFAULT_GRID_SPACING_MM
         self._grid_visible = True
@@ -424,6 +432,7 @@ class BoardScene(QGraphicsScene):
         for overlay in self._results_overlays.values():
             self.removeItem(overlay)
         self._results_overlays = {}
+        self._probes = {}
         self._results = results
         if mode is not None:
             self._results_mode = mode
@@ -444,6 +453,25 @@ class BoardScene(QGraphicsScene):
     def results_range(self) -> tuple[float, float]:
         """Colour scale limits of the current results overlay, in display units."""
         return self._results_range
+
+    def probe(self, pos: QPointF) -> tuple[str, DisplayMode, float] | None:
+        """The displayed result value under a point, as shown by the overlay.
+
+        Args:
+            pos: Scene position in millimetres.
+
+        Returns:
+            ``(layer, mode, value)`` in display units, or None if no results are
+            shown there (overlay hidden, off the board, in a hole, or off copper
+            for current density and voltage).
+        """
+        layer = self._active_layer
+        if layer is None or not self.results_overlay_visible(layer):
+            return None
+        if layer not in self._probes:
+            self._probes[layer] = FieldProbe(self._results.layer(layer))
+        value = self._probes[layer].value_at(pos.x(), pos.y(), self._results_mode)
+        return None if value is None else (layer, self._results_mode, value)
 
     def results_overlay_visible(self, layer: str) -> bool:
         """Whether a layer's results overlay is currently drawn.

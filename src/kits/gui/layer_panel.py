@@ -1,13 +1,16 @@
-"""Dock panel listing display layers with visibility checkboxes.
+"""Dock panel listing display layers with visibility checkboxes, plus overlay toggles.
 
-Selecting a copper layer makes it the active layer (drawn on top).
+Selecting a copper layer makes it the active layer (drawn on top, and the layer
+whose mesh and results overlays are shown).
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPixmap
+from PySide6.QtGui import QAction, QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QGroupBox,
     QHBoxLayout,
     QListWidget,
     QListWidgetItem,
@@ -60,10 +63,41 @@ class LayerPanel(QWidget):
         buttons.addWidget(show_all)
         buttons.addWidget(hide_all)
 
+        self.overlay_boxes: dict[str, QCheckBox] = {}
+        self._overlay_layout = QVBoxLayout()
+        overlays = QGroupBox("Overlays")
+        overlays.setLayout(self._overlay_layout)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.addWidget(self._list)
         layout.addLayout(buttons)
+        layout.addWidget(overlays)
+
+    def add_overlay_toggle(self, label: str, action: QAction) -> QCheckBox:
+        """Add a checkbox mirroring a checkable action (e.g. "Show mesh").
+
+        The checkbox and the action stay in sync in both directions, so menus,
+        shortcuts and other panels' checkboxes all agree.
+
+        Args:
+            label: Checkbox text.
+            action: The checkable action it mirrors.
+
+        Returns:
+            The new checkbox.
+        """
+        box = QCheckBox(label)
+        box.setChecked(action.isChecked())
+        shortcut = action.shortcut().toString()
+        box.setToolTip(
+            f"{action.text().replace('&', '')} ({shortcut})" if shortcut else action.text().replace("&", "")
+        )
+        box.toggled.connect(action.setChecked)
+        action.toggled.connect(box.setChecked)
+        self._overlay_layout.addWidget(box)
+        self.overlay_boxes[label] = box
+        return box
 
     def set_layers(self, layers: list[tuple[str, QColor, bool]]) -> None:
         """Populate from ``(name, colour, is_copper)`` tuples, all visible.

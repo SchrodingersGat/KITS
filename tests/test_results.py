@@ -153,3 +153,17 @@ def app_or_skip():
     from PySide6.QtWidgets import QApplication
 
     return QApplication.instance() or QApplication([])
+
+
+def test_field_probe_interpolates_and_respects_copper(app_or_skip):
+    from kits.gui.field_display import DisplayMode, FieldProbe
+
+    layer = _results().layer("F.Cu")  # one triangle (0,0)-(1,0)-(0,1); V = 0, 1, 2 at its corners
+    probe = FieldProbe(layer)
+    assert probe.value_at(0.25, 0.25, DisplayMode.VOLTAGE) == pytest.approx(0.75)  # 0.5*0 + 0.25*1 + 0.25*2
+    assert probe.value_at(0.25, 0.25, DisplayMode.TEMPERATURE) == pytest.approx(25.75)
+    assert probe.value_at(0.25, 0.25, DisplayMode.CURRENT_DENSITY) == pytest.approx(3.0)
+    assert probe.value_at(0.9, 0.9, DisplayMode.VOLTAGE) is None  # outside the triangle
+    layer.copper[:] = False  # bare board: only temperature is shown
+    assert probe.value_at(0.25, 0.25, DisplayMode.VOLTAGE) is None
+    assert probe.value_at(0.25, 0.25, DisplayMode.TEMPERATURE) == pytest.approx(25.75)

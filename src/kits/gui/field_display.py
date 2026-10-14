@@ -7,6 +7,7 @@ from enum import Enum
 
 import numpy as np
 from PySide6.QtGui import QColor
+from scipy.spatial import cKDTree
 
 from ..solve.results import LayerResult, SolveResults
 
@@ -167,3 +168,77 @@ def format_value(value: float, mode: DisplayMode) -> str:
             if magnitude >= scale or scale == 1e-6:
                 return f"{value / scale:.3g} {prefix}V"
     return f"{value:.3g} {mode.unit}"
+
+
+class FieldProbe:
+    """Looks up result values at arbitrary points on one layer's mesh.
+
+    Built once per layer (a k-d tree of triangle centroids); each lookup checks
+    the nearest few triangles for the one containing the point.
+    """
+
+    _CANDIDATES = 12  # nearest centroids checked per lookup
+    _WIDE_CANDIDATES = 128  # second, wider search if the first misses
+
+    def __init__(self, layer: LayerResult):
+        """Index a layer's triangles.
+
+        Args:
+            layer: The layer's results.
+        """
+        self.layer = layer
+        self._corners = layer.nodes[layer.triangles]  # (M, 3, 2)
+        self._tree = cKDTree(self._corners.mean(axis=1))
+
+    def locate(self, x: float, y: float) -> tuple[int, np.ndarray] | None:
+        """Find the triangle containing a point.
+
+        Args:
+            x: X in board millimetres.
+            y: Y in board millimetres.
+
+        Returns:
+            ``(triangle, barycentric weights)``, or None if the point is off the mesh
+            (outside the board or in a hole).
+        """
+        # Next to a finely meshed hole, a big triangle's centroid can be farther
+        # away than many small ones', so widen the search if the first pass misses.
+        for k in (self._CANDIDATES, self._WIDE_CANDIDATES):
+            _, candidates = self._tree.query((x, y), k=min(k, len(self._corners)))
+            for t in np.atleast_1d(candidates):
+                a, b, c = self._corners[t]
+                det = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])
+                if det == 0:
+                    continue
+                l1 = ((x - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (y - a[1])) / det
+                l2 = ((b[0] - a[0]) * (y - a[1]) - (x - a[0]) * (b[1] - a[1])) / det
+                weights = np.array([1 - l1 - l2, l1, l2])
+                if weights.min() >= -1e-9:
+                    return int(t), weights
+        return None
+
+    def value_at(self, x: float, y: float, mode: DisplayMode) -> float | None:
+        """The displayed quantity at a point, in display units.
+
+        Voltage and temperature are interpolated within the triangle; current
+        density is constant per triangle. Current density and voltage are only
+        defined on copper.
+
+        Args:
+            x: X in board millimetres.
+            y: Y in board millimetres.
+            mode: Quantity to look up.
+
+        Returns:
+            The value, or None where the quantity isn't shown (off the mesh, or off copper).
+        """
+        found = self.locate(x, y)
+        if found is None:
+            return None
+        t, weights = found
+        if mode is not DisplayMode.TEMPERATURE and not self.layer.copper[t]:
+            return None
+        if mode is DisplayMode.CURRENT_DENSITY:
+            return float(self.layer.current_density[t] / 1e6)
+        nodal = self.layer.voltage if mode is DisplayMode.VOLTAGE else self.layer.temperature
+        return float(weights @ nodal[self.layer.triangles[t]])

@@ -517,3 +517,69 @@ def test_show_hide_current_sources(window, strip_kits):
     assert window.scene.pad_at(QPointF(7, 5)) == ("P1", "1")
     window.reload_board()
     assert not window.scene.sources_visible
+
+
+def test_status_bar_shows_value_under_cursor(app, window, strip_kits):
+    from kits.gui.field_display import DisplayMode
+
+    assert window.open_path(strip_kits)
+    label = window._probe_label
+    window._on_cursor_moved(25.0, 5.0)  # middle of the strip
+    assert label.text() == ""  # nothing solved yet
+
+    window.solve()
+    _wait(app, lambda: not window.solve_job_running)
+    window._on_cursor_moved(25.0, 5.0)
+    # Uniform current density in the strip: I / (W t) = 5 A / (6 mm x 0.035 mm).
+    text = label.text()
+    assert text.startswith("F.Cu · Current density:") and text.endswith("A/mm²")
+    value = float(text.split(":")[1].split()[0])
+    assert value == pytest.approx(5 / (6 * 0.035), rel=0.01)
+
+    # Changing the display mode updates the readout without moving the mouse.
+    window.solve_panel.mode.setCurrentIndex(window.solve_panel.mode.findData(DisplayMode.TEMPERATURE))
+    assert "Temperature:" in label.text() and label.text().endswith("°C")
+
+    window._on_cursor_moved(25.0, 9.5)  # bare board beside the strip: temperature still shown
+    assert "Temperature:" in label.text()
+    window.solve_panel.mode.setCurrentIndex(window.solve_panel.mode.findData(DisplayMode.VOLTAGE))
+    assert label.text() == ""  # voltage is copper-only
+    window._on_cursor_moved(80.0, 80.0)  # off the board
+    assert label.text() == ""
+
+    window._on_cursor_moved(25.0, 5.0)
+    assert "Voltage:" in label.text()
+    window.show_results_action.trigger()  # hiding the overlay clears it
+    assert label.text() == ""
+
+
+def test_layers_panel_overlay_toggles(app, window, strip_kits):
+    assert window.open_path(strip_kits)
+    window.build_mesh()
+    _wait(app, lambda: not window.mesh_job_running)
+    window.solve()
+    _wait(app, lambda: not window.solve_job_running)
+    boxes = window.layer_panel.overlay_boxes
+    assert list(boxes) == ["Mesh", "Results", "Current sources", "Grid"]
+    assert all(box.isChecked() for box in boxes.values())
+    scene = window.scene
+
+    # Checkbox -> action and board.
+    boxes["Mesh"].setChecked(False)
+    assert not window.show_mesh_action.isChecked() and not scene.mesh_overlay_visible("F.Cu")
+    boxes["Results"].setChecked(False)
+    assert not window.show_results_action.isChecked() and not scene.results_overlay_visible("F.Cu")
+    boxes["Current sources"].setChecked(False)
+    assert not window.show_sources_action.isChecked() and not scene.sources_visible
+    boxes["Grid"].setChecked(False)
+    assert not window.settings.grid_visible and not scene.grid_visible
+
+    # Menu actions / other panels -> checkbox.
+    window.show_mesh_action.trigger()
+    assert boxes["Mesh"].isChecked() and scene.mesh_overlay_visible("F.Cu")
+    window.solve_panel.show_results.setChecked(True)
+    assert boxes["Results"].isChecked() and scene.results_overlay_visible("F.Cu")
+    window.sources_panel.show_sources.setChecked(True)
+    assert boxes["Current sources"].isChecked()
+    window.settings.grid_visible = True
+    assert boxes["Grid"].isChecked()

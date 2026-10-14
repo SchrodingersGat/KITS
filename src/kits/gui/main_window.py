@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtCore import QPointF, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -32,6 +32,7 @@ from .board_info import BoardInfoPanel
 from .board_scene import BoardScene
 from .board_view import BoardView
 from .document import Document
+from .field_display import format_value
 from .layer_panel import LayerPanel
 from .mesh_job import MeshJob
 from .mesh_panel import MeshPanel
@@ -102,11 +103,22 @@ class MainWindow(QMainWindow):
         self.tabifyDockWidget(self._mesh_dock, self._solve_dock)
         self._mesh_dock.raise_()
 
+        self._last_cursor: QPointF | None = None
+        self._probe_label = QLabel()
+        self._probe_label.setToolTip("Solved value under the cursor, on the active layer")
+        self.statusBar().addPermanentWidget(self._probe_label)
         self._cursor_label = QLabel()
         self.statusBar().addPermanentWidget(self._cursor_label)
 
         self._create_actions()
         self._create_menus()
+        for label, act in (
+            ("Mesh", self.show_mesh_action),
+            ("Results", self.show_results_action),
+            ("Current sources", self.show_sources_action),
+            ("Grid", self.grid_action),
+        ):
+            self.layer_panel.add_overlay_toggle(label, act)
 
         self.document.project_changed.connect(self._on_project_changed)
         self.document.board_changed.connect(self._on_board_changed)
@@ -828,6 +840,7 @@ class MainWindow(QMainWindow):
             self.scene.set_results_visible(self.show_results_action.isChecked())
             if results is not None:
                 self.solve_panel.set_legend(self.solve_panel.display_mode, *self.scene.results_range)
+        self._update_probe()
 
     def _on_display_mode_changed(self, mode) -> None:
         """Recolour the results overlay for a different quantity.
@@ -838,6 +851,7 @@ class MainWindow(QMainWindow):
         if self.scene is not None and self.document.results is not None:
             self.scene.set_results(self.document.results, mode)
             self.solve_panel.set_legend(mode, *self.scene.results_range)
+        self._update_probe()
 
     def _on_show_results_toggled(self, checked: bool) -> None:
         """Show or hide the results overlay, keeping the panel checkbox in sync.
@@ -848,6 +862,7 @@ class MainWindow(QMainWindow):
         self.solve_panel.show_results.setChecked(checked)
         if self.scene is not None:
             self.scene.set_results_visible(checked)
+        self._update_probe()
 
     def _on_mesh_built(self, mesh: BoardMesh) -> None:
         """Store a freshly built mesh in the document.
@@ -1039,6 +1054,7 @@ class MainWindow(QMainWindow):
         """
         if self.scene is not None:
             self.scene.set_layer_visible(name, visible)
+        self._update_probe()
 
     def _on_active_layer(self, name: str) -> None:
         """Make a copper layer the active (topmost) layer in the scene.
@@ -1048,6 +1064,7 @@ class MainWindow(QMainWindow):
         """
         if self.scene is not None:
             self.scene.set_active_layer(name)
+        self._update_probe()
 
     # -- pad selection and current sources --------------------------------------
 
@@ -1134,7 +1151,7 @@ class MainWindow(QMainWindow):
             self.scene.set_sources(self.document.current_sources)
 
     def _on_cursor_moved(self, x: float, y: float) -> None:
-        """Show the cursor position, relative to the grid origin, in the status bar.
+        """Show the cursor position (relative to the grid origin) and the solved value under it.
 
         Args:
             x: Cursor X in KiCad board coordinates (mm).
@@ -1144,3 +1161,23 @@ class MainWindow(QMainWindow):
             gx, gy = self.scene.to_grid_coords(x, y)
             self._cursor_label.setText(f"X {gx:9.3f} mm   Y {gy:9.3f} mm")
             self._cursor_label.setToolTip(f"Relative to grid origin\nKiCad: X {x:.3f}  Y {y:.3f} mm")
+            self._last_cursor = QPointF(x, y)
+            self._update_probe()
+
+    def _update_probe(self, *_args) -> None:
+        """Show the solved value at the last cursor position (or nothing, if none is shown there).
+
+        Also called when the overlay, display mode or active layer changes, so the
+        readout never shows a stale value.
+
+        Args:
+            *_args: Ignored signal arguments.
+        """
+        probe = None
+        if self.scene is not None and self._last_cursor is not None:
+            probe = self.scene.probe(self._last_cursor)
+        if probe is None:
+            self._probe_label.clear()
+        else:
+            layer, mode, value = probe
+            self._probe_label.setText(f"{layer} · {mode.label}: {format_value(value, mode)}")
