@@ -10,10 +10,12 @@ layer is a single operation on that container.
 
 from __future__ import annotations
 
+import itertools
+import math
 from dataclasses import dataclass
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QPainterPath, QPen
+from PySide6.QtCore import QLineF, QPointF, QRectF, Qt
+from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsLineItem,
@@ -24,6 +26,7 @@ from PySide6.QtWidgets import (
 from ..ingest.geometry import arc_points
 from ..ingest.model import EDGE_CUTS, Board, Pad
 from . import colors
+from .settings import DEFAULT_GRID_SPACING_MM
 from .shapes import (
     circle_path,
     drill_path,
@@ -44,6 +47,8 @@ MODEL_ROLE = 0
 
 _Z_ZONE, _Z_GRAPHIC, _Z_TRACK, _Z_PAD = 0, 1, 2, 3
 _EDGE_CUTS_PX = 1.5
+_GRID_MIN_PX = 8  # never draw grid lines closer than this on screen
+_GRID_ORIGIN_PX = 8  # half-size of the origin marker
 
 
 @dataclass
@@ -99,6 +104,8 @@ class BoardScene(QGraphicsScene):
         super().__init__(parent)
         self.board = board
         self.layers: dict[str, DisplayLayer] = {}
+        self._grid_spacing = DEFAULT_GRID_SPACING_MM
+        self._grid_visible = True
         self.setBackgroundBrush(colors.BACKGROUND)
         self._build()
 
@@ -126,6 +133,84 @@ class BoardScene(QGraphicsScene):
             return self.itemsBoundingRect()
         x0, y0, x1, y1 = bbox
         return QRectF(x0, y0, x1 - x0, y1 - y0)
+
+    # -- grid ----------------------------------------------------------------
+
+    def set_grid(self, spacing_mm: float, visible: bool) -> None:
+        if spacing_mm <= 0:
+            raise ValueError("grid spacing must be positive")
+        self._grid_spacing = spacing_mm
+        self._grid_visible = visible
+        self.update()
+
+    @property
+    def grid_spacing(self) -> float:
+        return self._grid_spacing
+
+    @property
+    def grid_visible(self) -> bool:
+        return self._grid_visible
+
+    def grid_origin(self) -> QPointF:
+        """Bottom-left corner of the board bounding box (Y points down)."""
+        return self.board_rect().bottomLeft()
+
+    def displayed_grid_spacing(self, pixels_per_mm: float) -> float:
+        """Grid pitch actually drawn at a zoom level.
+
+        When the configured pitch would put lines closer than ``_GRID_MIN_PX``
+        on screen, only every 2nd/5th/10th/20th/... line is drawn, so lines
+        stay on the configured grid but never smear into a solid fill.
+        """
+        spacing = self._grid_spacing
+        steps = itertools.cycle((2, 2.5, 2))  # x1, x2, x5, x10, x20, x50, ...
+        while spacing * pixels_per_mm < _GRID_MIN_PX:
+            spacing *= next(steps)
+        return spacing
+
+    def drawBackground(self, painter: QPainter, rect: QRectF) -> None:
+        super().drawBackground(painter, rect)
+        if not self._grid_visible:
+            return
+        scale = painter.worldTransform().m11()
+        if scale <= 0:
+            return
+        spacing = self.displayed_grid_spacing(scale)
+        origin = self.grid_origin()
+
+        first_x = origin.x() + math.ceil((rect.left() - origin.x()) / spacing) * spacing
+        first_y = origin.y() + math.ceil((rect.top() - origin.y()) / spacing) * spacing
+        xs = [first_x + i * spacing for i in range(int((rect.right() - first_x) // spacing) + 1)]
+        ys = [first_y + j * spacing for j in range(int((rect.bottom() - first_y) // spacing) + 1)]
+        lines = [QLineF(x, rect.top(), x, rect.bottom()) for x in xs]
+        lines += [QLineF(rect.left(), y, rect.right(), y) for y in ys]
+
+        painter.save()
+        pen = QPen(colors.GRID, 1)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.drawLines(lines)
+        painter.restore()
+
+    def drawForeground(self, painter: QPainter, rect: QRectF) -> None:
+        super().drawForeground(painter, rect)
+        if not self._grid_visible:
+            return
+        scale = painter.worldTransform().m11()
+        if scale <= 0:
+            return
+        # Origin marker: a fixed-size cross in screen pixels.
+        origin = self.grid_origin()
+        r = _GRID_ORIGIN_PX / scale
+        painter.save()
+        pen = QPen(colors.GRID_ORIGIN, 1.5)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        painter.drawLine(QLineF(origin.x() - r, origin.y(), origin.x() + r, origin.y()))
+        painter.drawLine(QLineF(origin.x(), origin.y() - r, origin.x(), origin.y() + r))
+        painter.drawEllipse(origin, r / 2, r / 2)
+        painter.restore()
 
     # -- construction ----------------------------------------------------------
 

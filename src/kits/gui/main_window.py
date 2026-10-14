@@ -24,6 +24,8 @@ from .board_scene import BoardScene
 from .board_view import BoardView
 from .document import Document
 from .layer_panel import LayerPanel
+from .settings import AppSettings
+from .settings_dialog import SettingsDialog
 
 log = logging.getLogger(__name__)
 
@@ -32,9 +34,10 @@ _LAST_DIR_KEY = "paths/last_open_dir"
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, document: Document | None = None):
+    def __init__(self, document: Document | None = None, settings: AppSettings | None = None):
         super().__init__()
         self.document = document or Document(self)
+        self.settings = settings or AppSettings(parent=self)
         self.scene: BoardScene | None = None
 
         self.view = BoardView()
@@ -55,6 +58,7 @@ class MainWindow(QMainWindow):
         self.layer_panel.visibility_changed.connect(self._on_layer_visibility)
         self.layer_panel.active_layer_changed.connect(self._on_active_layer)
         self.view.cursor_moved.connect(self._on_cursor_moved)
+        self.settings.changed.connect(self._apply_settings)
 
         self.setAcceptDrops(True)
         self.resize(1400, 900)
@@ -85,6 +89,12 @@ class MainWindow(QMainWindow):
         self.fit_action = action("Zoom to &fit", self.view.zoom_to_fit, Qt.Key.Key_Home, False)
         self.zoom_in_action = action("Zoom &in", self.view.zoom_in, keys.ZoomIn, False)
         self.zoom_out_action = action("Zoom &out", self.view.zoom_out, keys.ZoomOut, False)
+        self.grid_action = QAction("Show &grid", self)
+        self.grid_action.setCheckable(True)
+        self.grid_action.setChecked(self.settings.grid_visible)
+        self.grid_action.setShortcut(Qt.Key.Key_G)
+        self.grid_action.toggled.connect(self._on_grid_toggled)
+        self.preferences_action = action("&Preferences…", self.open_preferences, "Ctrl+,")
         self._board_actions = [self.reload_action, self.fit_action, self.zoom_in_action, self.zoom_out_action]
 
     def _create_menus(self) -> None:
@@ -94,13 +104,31 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.quit_action)
 
+        edit_menu = self.menuBar().addMenu("&Edit")
+        edit_menu.addAction(self.preferences_action)
+
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.fit_action)
         view_menu.addAction(self.zoom_in_action)
         view_menu.addAction(self.zoom_out_action)
         view_menu.addSeparator()
+        view_menu.addAction(self.grid_action)
+        view_menu.addSeparator()
         view_menu.addAction(self._layer_dock.toggleViewAction())
         view_menu.addAction(self._info_dock.toggleViewAction())
+
+    # -- settings --------------------------------------------------------------
+
+    def open_preferences(self) -> None:
+        SettingsDialog(self.settings, self).exec()
+
+    def _on_grid_toggled(self, checked: bool) -> None:
+        self.settings.grid_visible = checked
+
+    def _apply_settings(self) -> None:
+        self.grid_action.setChecked(self.settings.grid_visible)
+        if self.scene is not None:
+            self.scene.set_grid(self.settings.grid_spacing_mm, self.settings.grid_visible)
 
     # -- file handling ---------------------------------------------------------
 
@@ -163,6 +191,7 @@ class MainWindow(QMainWindow):
     def _on_project_changed(self, project: Project | None) -> None:
         old_scene = self.scene
         self.scene = BoardScene(project.board, self) if project else None
+        self._apply_settings()
         self.view.setScene(self.scene)
         if old_scene is not None:
             old_scene.deleteLater()

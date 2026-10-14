@@ -7,7 +7,7 @@ left free for selection / click-to-edit tools.
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QRectF, Qt, Signal
-from PySide6.QtGui import QMouseEvent, QPainter, QWheelEvent
+from PySide6.QtGui import QMouseEvent, QPainter, QPalette, QWheelEvent
 from PySide6.QtWidgets import QGraphicsView
 
 from . import colors
@@ -24,7 +24,12 @@ class BoardView(QGraphicsView):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.setBackgroundBrush(colors.BACKGROUND)
+        # Colour for when no board is open. Deliberately not setBackgroundBrush():
+        # a view brush stops QGraphicsView from calling the scene's
+        # drawBackground(), which draws the grid.
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Base, colors.BACKGROUND)
+        self.setPalette(palette)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.SmartViewportUpdate)

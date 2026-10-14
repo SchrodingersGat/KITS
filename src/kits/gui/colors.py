@@ -9,6 +9,8 @@ EDGE_CUTS = QColor(208, 210, 205)
 VIAS = QColor(194, 194, 194)
 TH_PADS = QColor(227, 183, 46)
 HOLES = QColor(BACKGROUND).lighter(130)
+GRID = QColor(58, 76, 100)
+GRID_ORIGIN = QColor(220, 220, 220)
 ZONE_DARKEN = 160  # zones drawn this much darker than tracks on the same layer
 
 _FRONT = QColor(200, 52, 52)

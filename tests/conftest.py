@@ -5,6 +5,20 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+
+@pytest.fixture(autouse=True)
+def isolated_qsettings(tmp_path):
+    """Keep tests from reading or writing the user's real KITS preferences."""
+    try:
+        from PySide6.QtCore import QSettings
+    except ImportError:
+        yield
+        return
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path / "qsettings"))
+    yield
+
+
 # Demo projects shipped with KiCad make good real-world ingest fixtures.
 _DEMO_ROOTS = [
     Path(os.environ.get("KICAD_DEMOS", "")),

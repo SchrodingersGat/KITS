@@ -2,10 +2,16 @@ import pytest
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import QRectF, QSettings  # noqa: E402
+from PySide6.QtGui import QImage, QPainter  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from kits.gui.board_scene import HOLES, MODEL_ROLE, TH_PADS, VIAS  # noqa: E402
+from kits.gui import colors  # noqa: E402
+from kits.gui.board_scene import HOLES, MODEL_ROLE, TH_PADS, VIAS, BoardScene  # noqa: E402
 from kits.gui.main_window import MainWindow  # noqa: E402
+from kits.gui.settings import DEFAULT_GRID_SPACING_MM, AppSettings  # noqa: E402
+from kits.gui.settings_dialog import SettingsDialog  # noqa: E402
+from kits.ingest import load_board  # noqa: E402
 from kits.ingest.model import Pad  # noqa: E402
 
 
@@ -48,3 +54,90 @@ def test_failed_open_keeps_previous_project(app, board_v9_path, tmp_path, monkey
     assert not window.open_path(tmp_path / "nope.kicad_pro")
     assert errors
     assert window.document.project.name == "demo"
+
+
+# -- grid -------------------------------------------------------------------
+
+
+def _render(scene, source: QRectF, size: int = 200) -> QImage:
+    image = QImage(size, size, QImage.Format.Format_RGB32)
+    painter = QPainter(image)
+    scene.render(painter, QRectF(0, 0, size, size), source)
+    painter.end()
+    return image
+
+
+def test_settings_defaults_and_persistence(app, tmp_path):
+    store = QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat)
+    settings = AppSettings(store)
+    assert settings.grid_spacing_mm == DEFAULT_GRID_SPACING_MM == 10.0
+    assert settings.grid_visible
+
+    changes = []
+    settings.changed.connect(lambda: changes.append(1))
+    settings.grid_spacing_mm = 2.54
+    settings.grid_visible = False
+    settings.grid_visible = False  # unchanged: no signal
+    assert len(changes) == 2
+
+    reloaded = AppSettings(QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat))
+    assert reloaded.grid_spacing_mm == pytest.approx(2.54)
+    assert not reloaded.grid_visible
+
+    store.setValue("grid/spacing_mm", "garbage")
+    assert settings.grid_spacing_mm == DEFAULT_GRID_SPACING_MM
+
+
+def test_grid_origin_is_bottom_left_of_board(app, board_v9_path):
+    scene = BoardScene(load_board(board_v9_path))  # outline is (0, 0)-(40, 30)
+    origin = scene.grid_origin()
+    assert (origin.x(), origin.y()) == (0, 30)  # Y points down: bottom is max Y
+
+
+def test_grid_thins_out_when_zoomed_out(app, board_v9_path):
+    scene = BoardScene(load_board(board_v9_path))
+    scene.set_grid(10, True)
+    assert scene.displayed_grid_spacing(pixels_per_mm=5) == 10
+    assert scene.displayed_grid_spacing(pixels_per_mm=0.5) == 20
+    assert scene.displayed_grid_spacing(pixels_per_mm=0.1) == 100
+    with pytest.raises(ValueError):
+        scene.set_grid(0, True)
+
+
+def test_grid_is_drawn_on_origin_aligned_lines(app, board_v9_path):
+    scene = BoardScene(load_board(board_v9_path))
+    scene.set_grid(10, True)
+    # Empty area off the board, at 10 px/mm: origin (0, 30) puts lines at x=50, y=40.
+    source = QRectF(42, 32, 20, 20)
+    image = _render(scene, source)
+    on_line = image.pixelColor(80, 30)  # x = 50 mm
+    off_line = image.pixelColor(30, 30)  # x = 45 mm
+    assert on_line == colors.GRID
+    assert off_line == colors.BACKGROUND
+    assert image.pixelColor(30, 80) == colors.GRID  # y = 40 mm
+
+    scene.set_grid(10, False)
+    assert _render(scene, source).pixelColor(80, 30) == colors.BACKGROUND
+
+
+def test_grid_toggle_and_preferences(app, board_v9_path):
+    window = MainWindow()
+    assert window.open_path(board_v9_path)
+    assert window.scene.grid_visible
+    assert window.scene.grid_spacing == 10
+
+    window.grid_action.trigger()
+    assert not window.scene.grid_visible
+    assert not window.settings.grid_visible
+
+    dialog = SettingsDialog(window.settings, window)
+    dialog.grid_spacing.setValue(2.5)
+    dialog.grid_visible.setChecked(True)
+    dialog.accept()
+    assert window.scene.grid_spacing == 2.5
+    assert window.scene.grid_visible
+    assert window.grid_action.isChecked()
+
+    # A newly opened board picks up the stored settings.
+    assert window.open_path(board_v9_path)
+    assert window.scene.grid_spacing == 2.5

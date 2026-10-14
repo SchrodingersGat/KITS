@@ -145,17 +145,14 @@ def test_board_without_outline(board_v10_path):
 
 
 def test_example_simple_in_out():
-    # The example's rectangle is on Eco2.User, not Edge.Cuts, so KiCad itself
-    # reports no board outline either.
     path = Path(__file__).parent.parent / "examples" / "Simple-In-Out" / "Simple-In-Out.kicad_pro"
     if not path.is_file():
         pytest.skip("example project not present")
     b = load_project(path).board
     assert b.version == 20260206
-    assert not b.has_outline
+    assert b.has_outline
+    assert b.outline_bounding_box() == pytest.approx((80, 60, 120, 80))  # 40 x 20 mm
     assert {p.net for p in b.pads()} == {"/NET"}
-    x0, y0, x1, y1 = b.bounding_box()
-    assert (x1 - x0, y1 - y0) > (20, 5)  # covers the zones, not just pad centres
 
 
 @pytest.mark.parametrize("project", kicad_demo_projects(), ids=lambda p: p.stem)
