@@ -560,7 +560,7 @@ def test_layers_panel_overlay_toggles(app, window, strip_kits):
     window.solve()
     _wait(app, lambda: not window.solve_job_running)
     boxes = window.layer_panel.overlay_boxes
-    assert list(boxes) == ["Mesh", "Results", "Current sources", "Markers", "Grid"]
+    assert list(boxes) == ["Mesh", "Results", "Current sources", "Heat loads", "Markers", "Grid"]
     assert all(box.isChecked() for box in boxes.values())
     scene = window.scene
 
@@ -721,3 +721,61 @@ def test_current_multiplier(app, window, strip_kits):
 
     assert window.save()
     assert load_kits_project(strip_kits).current_multiplier == 2.0
+
+
+def test_heat_loads_panel(app, window, strip_kits):
+    from PySide6.QtCore import QPointF
+
+    from kits.config import HeatLoad, HeatLoadKind
+
+    assert window.open_path(strip_kits)
+    doc, panel, scene = window.document, window.heat_panel, window.scene
+    sources_before = doc.current_sources
+
+    # Double-click adds to whichever of Current Sources / Heat Loads was shown last.
+    window._heat_dock.show()
+    window._heat_dock.raise_()
+    window._on_load_dock_shown(window._heat_dock, True)  # docks don't report visibility offscreen
+    window._on_board_double_clicked(QPointF(7, 5))
+    assert doc.heat_loads == [HeatLoad("P1", "1", HeatLoadKind.POWER, 1.0)]
+    assert doc.current_sources == sources_before and doc.dirty
+    assert panel.table.rowCount() == 1 and scene.heat_load_marker_count == 1
+
+    # Edit the value, then switch kind: the value restarts at that kind's default.
+    panel.table.cellWidget(0, 3).setValue(2.5)
+    assert doc.heat_load("P1", "1").value == 2.5
+    combo = panel.table.cellWidget(0, 2)
+    combo.setCurrentIndex(combo.findData(HeatLoadKind.TEMPERATURE))
+    assert doc.heat_load("P1", "1") == HeatLoad(
+        "P1", "1", HeatLoadKind.TEMPERATURE, doc.solve_settings.ambient_c
+    )
+    assert panel.table.cellWidget(0, 3).suffix() == " °C"
+    combo = panel.table.cellWidget(0, 2)
+    combo.setCurrentIndex(combo.findData(HeatLoadKind.RESISTANCE))
+    assert doc.heat_load("P1", "1").value == 10.0 and panel.table.cellWidget(0, 3).suffix() == " K/W"
+
+    # Show/hide: action, panel checkbox and Layers overlay box stay in sync.
+    window.show_heat_loads_action.trigger()
+    assert not scene.heat_loads_visible and not panel.show_heat_loads.isChecked()
+    assert not window.layer_panel.overlay_boxes["Heat loads"].isChecked()
+    panel.show_heat_loads.setChecked(True)
+    assert scene.heat_loads_visible and window.show_heat_loads_action.isChecked()
+
+    # A heat-only solve: no current sources needed.
+    for source in doc.current_sources:
+        doc.remove_current_source(source.ref, source.pad)
+    doc.add_heat_load("P2", "1", HeatLoadKind.POWER, 3.0)
+    assert window.solve_panel.solve_button.isEnabled()
+    window.solve()
+    _wait(app, lambda: not window.solve_job_running)
+    results = doc.results
+    assert results is not None and results.load_heat["P2.1"] == 3.0
+    assert results.load_heat["P1.1"] < 0  # the 10 K/W heatsink takes some of it out
+    assert "Heat loads" in window.solve_panel.status.text()
+    assert load_kits_project(strip_kits).heat_loads == doc.heat_loads  # saved before solving
+
+    # Remove via the panel; editing a load makes the results stale.
+    panel.table.selectRow(0)
+    panel.remove_selected_rows()
+    assert [h.key for h in doc.heat_loads] == [("P2", "1")]
+    assert doc.results_staleness is not None

@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import math
 from dataclasses import dataclass
+from enum import Enum
 
 DEFAULT_MESH_MAX_SIZE_MM = 1.0
 DEFAULT_MESH_MIN_SIZE_MM = 0.1
@@ -16,6 +17,7 @@ DEFAULT_MIN_CIRCLE_POINTS = 36
 DEFAULT_CORNER_SIZE_MM = 0.1
 # Global scale applied to every current source at solve time.
 MAX_CURRENT_MULTIPLIER = 1000.0
+ABSOLUTE_ZERO_C = -273.15
 MIN_CIRCLE_POINTS_RANGE = (8, 1000)
 
 
@@ -230,6 +232,148 @@ def current_multiplier_from_value(data) -> float:
     if not (0 < value <= MAX_CURRENT_MULTIPLIER):  # also rejects NaN
         raise ConfigError(f"'current_multiplier' must be above 0 and at most {MAX_CURRENT_MULTIPLIER:g}")
     return value
+
+
+class HeatLoadKind(Enum):
+    """How a heat load acts on its pad.
+
+    The value is the key holding the load's number in the project file.
+    """
+
+    POWER = "power_w"  # heat injected into the board (negative extracts it)
+    TEMPERATURE = "temperature_c"  # pad held at a fixed temperature
+    RESISTANCE = "thermal_resistance_k_w"  # pad tied to ambient through a thermal resistance
+
+    @property
+    def is_sink(self) -> bool:
+        """Whether this kind can take heat out of the board by itself (any but power)."""
+        return self is not HeatLoadKind.POWER
+
+    @property
+    def unit(self) -> str:
+        """Unit of the load's value: ``"W"``, ``"°C"`` or ``"K/W"``."""
+        return {HeatLoadKind.POWER: "W", HeatLoadKind.TEMPERATURE: "°C", HeatLoadKind.RESISTANCE: "K/W"}[self]
+
+    @property
+    def title(self) -> str:
+        """Human-readable name, e.g. ``"Power"``."""
+        return {
+            HeatLoadKind.POWER: "Power",
+            HeatLoadKind.TEMPERATURE: "Fixed temperature",
+            HeatLoadKind.RESISTANCE: "Thermal resistance",
+        }[self]
+
+
+@dataclass
+class HeatLoad:
+    """A heat source or sink applied to a pad's copper (on all of its layers).
+
+    Attributes:
+        ref: Footprint reference, e.g. ``"U1"``.
+        pad: Pad number, e.g. ``"9"``. Every pad of the footprint with this number is included.
+        kind: Power source, fixed temperature, or thermal resistance to ambient.
+        value: Watts, °C, or K/W (°C/W) according to ``kind``.
+    """
+
+    ref: str
+    pad: str
+    kind: HeatLoadKind
+    value: float
+
+    @property
+    def key(self) -> tuple[str, str]:
+        """``(ref, pad)``, unique within a project."""
+        return (self.ref, self.pad)
+
+    @property
+    def label(self) -> str:
+        """Short display name, e.g. ``"U1.9"``."""
+        return f"{self.ref}.{self.pad}"
+
+    @property
+    def value_text(self) -> str:
+        """The value with its unit, e.g. ``"2 W"`` or ``"5 K/W"``."""
+        return f"{self.value:g} {self.kind.unit}"
+
+    def validate(self) -> None:
+        """Check the reference, pad and value.
+
+        Raises:
+            ConfigError: If the reference or pad is empty, the value isn't finite,
+                a temperature is below absolute zero, or a resistance isn't positive.
+        """
+        if not self.ref or not self.pad:
+            raise ConfigError("a heat load needs a footprint reference and a pad number")
+        if not math.isfinite(self.value):
+            raise ConfigError(f"heat load value for {self.label} must be a finite number")
+        if self.kind is HeatLoadKind.TEMPERATURE and self.value <= ABSOLUTE_ZERO_C:
+            raise ConfigError(f"temperature for {self.label} must be above absolute zero")
+        if self.kind is HeatLoadKind.RESISTANCE and self.value <= 0:
+            raise ConfigError(f"thermal resistance for {self.label} must be above zero")
+
+    def to_dict(self) -> dict:
+        """Return the YAML representation.
+
+        Returns:
+            Mapping with ``ref``, ``pad`` and one of ``power_w``, ``temperature_c``
+            or ``thermal_resistance_k_w``.
+        """
+        return {"ref": self.ref, "pad": self.pad, self.kind.value: self.value}
+
+    @classmethod
+    def from_dict(cls, data) -> HeatLoad:
+        """Build a heat load from one entry of the ``heat_loads:`` list.
+
+        Args:
+            data: The parsed entry.
+
+        Returns:
+            The validated heat load.
+
+        Raises:
+            ConfigError: If the entry is malformed or doesn't give exactly one value.
+        """
+        keys = ", ".join(k.value for k in HeatLoadKind)
+        if not isinstance(data, dict):
+            raise ConfigError(f"each heat load must be a mapping with ref, pad and one of {keys}")
+        kinds = [k for k in HeatLoadKind if k.value in data]
+        if len(kinds) != 1:
+            raise ConfigError(f"each heat load needs exactly one of {keys}")
+        try:
+            load = cls(
+                ref=str(data["ref"]), pad=str(data["pad"]), kind=kinds[0], value=float(data[kinds[0].value])
+            )
+        except KeyError as exc:
+            raise ConfigError(f"heat load is missing {exc.args[0]!r}") from exc
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"invalid heat load: {exc}") from exc
+        load.validate()
+        return load
+
+
+def heat_loads_from_list(data) -> list[HeatLoad]:
+    """Parse the ``heat_loads:`` section.
+
+    Args:
+        data: The parsed list, or None if the section is absent.
+
+    Returns:
+        The heat loads, in file order.
+
+    Raises:
+        ConfigError: If the section isn't a list, an entry is invalid, or a pad appears twice.
+    """
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        raise ConfigError("'heat_loads' must be a list")
+    loads = [HeatLoad.from_dict(item) for item in data]
+    seen = set()
+    for load in loads:
+        if load.key in seen:
+            raise ConfigError(f"pad {load.label} has more than one heat load")
+        seen.add(load.key)
+    return loads
 
 
 @dataclass

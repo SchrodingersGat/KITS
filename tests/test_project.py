@@ -241,3 +241,51 @@ def test_invalid_current_multiplier_is_rejected(tmp_path, value):
     path.write_text(f"current_multiplier: {value}\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="current_multiplier"):
         load_kits_project(path)
+
+
+def test_heat_loads_round_trip(tmp_path):
+    from kits.config import HeatLoad, HeatLoadKind
+
+    path = tmp_path / "p.kits"
+    path.write_text(
+        "heat_loads:\n"
+        "  - {ref: U1, pad: 9, power_w: 2.5}\n"
+        "  - {ref: J1, pad: '1', temperature_c: 40}\n"
+        "  - {ref: Q1, pad: '2', thermal_resistance_k_w: 5}\n",
+        encoding="utf-8",
+    )
+    project = load_kits_project(path)
+    assert project.heat_loads == [
+        HeatLoad("U1", "9", HeatLoadKind.POWER, 2.5),
+        HeatLoad("J1", "1", HeatLoadKind.TEMPERATURE, 40.0),
+        HeatLoad("Q1", "2", HeatLoadKind.RESISTANCE, 5.0),
+    ]
+    project.save()
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert data["heat_loads"][2] == {"ref": "Q1", "pad": "2", "thermal_resistance_k_w": 5.0}
+    assert load_kits_project(path).heat_loads == project.heat_loads
+
+    project.heat_loads = []
+    project.save()
+    assert "heat_loads" not in yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    "entry, match",
+    [
+        ("3", "must be a list"),
+        ("\n  - {ref: U1, pad: 1}", "exactly one"),
+        ("\n  - {ref: U1, pad: 1, power_w: 1, temperature_c: 30}", "exactly one"),
+        ("\n  - {pad: 1, power_w: 1}", "missing 'ref'"),
+        ("\n  - {ref: U1, pad: 1, power_w: lots}", "invalid heat load"),
+        ("\n  - {ref: U1, pad: 1, power_w: .inf}", "finite"),
+        ("\n  - {ref: U1, pad: 1, temperature_c: -300}", "absolute zero"),
+        ("\n  - {ref: U1, pad: 1, thermal_resistance_k_w: 0}", "above zero"),
+        ("\n  - {ref: U1, pad: 1, power_w: 1}\n  - {ref: U1, pad: '1', temperature_c: 30}", "more than one"),
+    ],
+)
+def test_invalid_heat_loads_are_rejected(tmp_path, entry, match):
+    path = tmp_path / "p.kits"
+    path.write_text(f"heat_loads: {entry}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match=match):
+        load_kits_project(path)

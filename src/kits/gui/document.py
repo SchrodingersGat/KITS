@@ -14,7 +14,15 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
-from ..config import ConfigError, CurrentSource, MeshSettings, SolveSettings, current_multiplier_from_value
+from ..config import (
+    ConfigError,
+    CurrentSource,
+    HeatLoad,
+    HeatLoadKind,
+    MeshSettings,
+    SolveSettings,
+    current_multiplier_from_value,
+)
 from ..ingest import Board, BoardLoadError, Project, load_project
 from ..mesh.fingerprint import MeshFingerprint, board_hash, settings_hash
 from ..mesh.model import BoardMesh, load_saved_mesh
@@ -30,7 +38,8 @@ class Document(QObject):
         board_changed(Project | None): The linked KiCad board was loaded, reloaded,
             replaced or unloaded (``None`` if no board is loaded).
         settings_changed(): Project settings (e.g. mesh sizes) were edited.
-        sources_changed(): Current sources were added, edited or removed.
+        sources_changed(): Current sources (or the current multiplier) were edited.
+        heat_loads_changed(): Heat loads were added, edited or removed.
         dirty_changed(bool): The project gained or lost unsaved changes.
         mesh_changed(BoardMesh | None): A mesh was built, or cleared.
         results_changed(SolveResults | None): A solve finished, or results were cleared.
@@ -41,6 +50,7 @@ class Document(QObject):
     board_changed = Signal(object)
     settings_changed = Signal()
     sources_changed = Signal()
+    heat_loads_changed = Signal()
     dirty_changed = Signal(bool)
     mesh_changed = Signal(object)
     results_changed = Signal(object)
@@ -214,7 +224,8 @@ class Document(QObject):
             ``(mesh_fingerprint, inputs_hash)`` to compare saved results against.
         """
         mesh_fp = MeshFingerprint(settings=settings_hash(self._project.mesh), board=self._board_hash)
-        return mesh_fp, inputs_hash(self._project.scaled_current_sources(), self._project.solve)
+        project = self._project
+        return mesh_fp, inputs_hash(project.scaled_current_sources(), project.solve, project.heat_loads)
 
     def _load_saved_results(self) -> tuple[SolveResults | None, str | None]:
         """Load the project's saved results if they match the current inputs.
@@ -482,6 +493,96 @@ class Document(QObject):
         """Mark the project dirty and announce the change."""
         self._set_dirty(True)
         self.sources_changed.emit()
+
+    # -- heat loads -------------------------------------------------------------------
+
+    @property
+    def heat_loads(self) -> list[HeatLoad]:
+        """The open project's heat sources and sinks (a copy; use the methods below to edit)."""
+        return list(self._project.heat_loads) if self._project else []
+
+    def heat_load(self, ref: str, pad: str) -> HeatLoad | None:
+        """Return the heat load on a pad, if there is one.
+
+        Args:
+            ref: Footprint reference.
+            pad: Pad number.
+
+        Returns:
+            The heat load, or None.
+        """
+        return next((h for h in self.heat_loads if h.key == (ref, str(pad))), None)
+
+    def add_heat_load(
+        self, ref: str, pad: str, kind: HeatLoadKind = HeatLoadKind.POWER, value: float = 1.0
+    ) -> HeatLoad:
+        """Add a heat source or sink on a pad (in memory; save to persist).
+
+        Args:
+            ref: Footprint reference.
+            pad: Pad number.
+            kind: Power, fixed temperature or thermal resistance.
+            value: Watts, °C or K/W according to ``kind``.
+
+        Returns:
+            The new heat load.
+
+        Raises:
+            ConfigError: If no project is open, the pad already has a heat load, or the value is invalid.
+        """
+        project = self._require_project()
+        load = HeatLoad(ref, str(pad), kind, float(value))
+        load.validate()
+        if self.heat_load(ref, pad) is not None:
+            raise ConfigError(f"pad {load.label} already has a heat load")
+        project.heat_loads.append(load)
+        self._heat_loads_edited()
+        return load
+
+    def set_heat_load(self, ref: str, pad: str, kind: HeatLoadKind, value: float) -> None:
+        """Change the kind and value of an existing heat load.
+
+        Args:
+            ref: Footprint reference.
+            pad: Pad number.
+            kind: New kind.
+            value: New value, in the kind's unit.
+
+        Raises:
+            ConfigError: If there is no such heat load or the value is invalid.
+        """
+        project = self._require_project()
+        for i, load in enumerate(project.heat_loads):
+            if load.key == (ref, str(pad)):
+                updated = HeatLoad(load.ref, load.pad, kind, float(value))
+                updated.validate()
+                if updated != load:
+                    project.heat_loads[i] = updated
+                    self._heat_loads_edited()
+                return
+        raise ConfigError(f"pad {ref}.{pad} has no heat load")
+
+    def remove_heat_load(self, ref: str, pad: str) -> None:
+        """Remove the heat load on a pad.
+
+        Args:
+            ref: Footprint reference.
+            pad: Pad number.
+
+        Raises:
+            ConfigError: If there is no such heat load.
+        """
+        project = self._require_project()
+        remaining = [h for h in project.heat_loads if h.key != (ref, str(pad))]
+        if len(remaining) == len(project.heat_loads):
+            raise ConfigError(f"pad {ref}.{pad} has no heat load")
+        project.heat_loads = remaining
+        self._heat_loads_edited()
+
+    def _heat_loads_edited(self) -> None:
+        """Mark the project dirty and announce the change."""
+        self._set_dirty(True)
+        self.heat_loads_changed.emit()
 
     @property
     def solve_settings(self) -> SolveSettings:

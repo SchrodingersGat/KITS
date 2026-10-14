@@ -33,6 +33,7 @@ from .board_scene import BoardScene
 from .board_view import BoardView
 from .document import Document
 from .field_display import format_value
+from .heat_loads_panel import HeatLoadsPanel
 from .layer_panel import LayerPanel
 from .mesh_job import MeshJob
 from .mesh_panel import MeshPanel
@@ -83,6 +84,7 @@ class MainWindow(QMainWindow):
         self.info_panel = BoardInfoPanel()
         self.mesh_panel = MeshPanel(self.document)
         self.sources_panel = SourcesPanel(self.document)
+        self.heat_panel = HeatLoadsPanel(self.document)
         self.solve_panel = SolvePanel(self.document)
         self._selected_pad: tuple[str, str] | None = None
         self._layer_dock = self._add_dock("Layers", self.layer_panel, Qt.DockWidgetArea.LeftDockWidgetArea)
@@ -91,8 +93,14 @@ class MainWindow(QMainWindow):
         self._sources_dock = self._add_dock(
             "Current Sources", self.sources_panel, Qt.DockWidgetArea.RightDockWidgetArea
         )
+        self._heat_dock = self._add_dock("Heat Loads", self.heat_panel, Qt.DockWidgetArea.RightDockWidgetArea)
         self.tabifyDockWidget(self._info_dock, self._sources_dock)
+        self.tabifyDockWidget(self._sources_dock, self._heat_dock)
         self._sources_dock.raise_()
+        # Double-clicking a pad adds a load in whichever of these two tabs was shown last.
+        self._pad_load_dock = self._sources_dock
+        for dock in (self._sources_dock, self._heat_dock):
+            dock.visibilityChanged.connect(lambda shown, dock=dock: self._on_load_dock_shown(dock, shown))
         # Scrollable: the Solve tab is tall, and a dock's minimum height would
         # otherwise set the whole window's minimum size.
         solve_scroll = QScrollArea()
@@ -117,6 +125,7 @@ class MainWindow(QMainWindow):
             ("Mesh", self.show_mesh_action),
             ("Results", self.show_results_action),
             ("Current sources", self.show_sources_action),
+            ("Heat loads", self.show_heat_loads_action),
             ("Markers", self.show_markers_action),
             ("Grid", self.grid_action),
         ):
@@ -134,6 +143,7 @@ class MainWindow(QMainWindow):
         self.solve_panel.show_markers_toggled.connect(self.show_markers_action.setChecked)
         self.document.markers_changed.connect(self._show_markers)
         self.sources_panel.show_sources_toggled.connect(self.show_sources_action.setChecked)
+        self.heat_panel.show_heat_loads_toggled.connect(self.show_heat_loads_action.setChecked)
         self.mesh_panel.build_requested.connect(self.build_mesh)
         self.mesh_panel.show_mesh_toggled.connect(self.show_mesh_action.setChecked)
         self.layer_panel.visibility_changed.connect(self._on_layer_visibility)
@@ -142,7 +152,9 @@ class MainWindow(QMainWindow):
         self.view.clicked.connect(self._on_board_clicked)
         self.view.double_clicked.connect(self._on_board_double_clicked)
         self.sources_panel.pad_selected.connect(self._on_source_row_selected)
+        self.heat_panel.pad_selected.connect(self._on_source_row_selected)
         self.document.sources_changed.connect(self._show_sources)
+        self.document.heat_loads_changed.connect(self._show_heat_loads)
         self.start_page.new_requested.connect(self.new_project)
         self.start_page.open_requested.connect(self.open_project_dialog)
         self.start_page.recent_requested.connect(self.open_path)
@@ -246,6 +258,9 @@ class MainWindow(QMainWindow):
         self.show_sources_action = toggle(
             "Show current &sources", True, self._on_show_sources_toggled, Qt.Key.Key_S
         )
+        self.show_heat_loads_action = toggle(
+            "Show &heat loads", True, self._on_show_heat_loads_toggled, Qt.Key.Key_H
+        )
         self._project_actions = [
             self.save_action,
             self.save_as_action,
@@ -291,11 +306,13 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.grid_action)
         view_menu.addAction(self.cursor_action)
         view_menu.addAction(self.show_sources_action)
+        view_menu.addAction(self.show_heat_loads_action)
         view_menu.addSeparator()
         view_menu.addAction(self._layer_dock.toggleViewAction())
         view_menu.addAction(self._info_dock.toggleViewAction())
         view_menu.addAction(self._mesh_dock.toggleViewAction())
         view_menu.addAction(self._sources_dock.toggleViewAction())
+        view_menu.addAction(self._heat_dock.toggleViewAction())
         view_menu.addAction(self._solve_dock.toggleViewAction())
 
         mesh_menu = self.menuBar().addMenu("&Mesh")
@@ -751,10 +768,12 @@ class MainWindow(QMainWindow):
         if not doc.board.has_outline:
             QMessageBox.warning(self, "Cannot solve", "The board has no Edge.Cuts outline.")
             return
-        if not sources:
-            QMessageBox.warning(self, "Cannot solve", "Add current sources to pads before solving.")
+        if not sources and not doc.heat_loads:
+            QMessageBox.warning(
+                self, "Cannot solve", "Add current sources or heat loads to pads before solving."
+            )
             return
-        if abs(sum(s.current_a for s in sources)) > 1e-9:
+        if sources and abs(sum(s.current_a for s in sources)) > 1e-9:
             QMessageBox.warning(self, "Cannot solve", "Current sources and sinks must sum to zero.")
             return
         if doc.dirty and not self.save():
@@ -994,7 +1013,9 @@ class MainWindow(QMainWindow):
         self.info_panel.set_project(kicad)
         self._selected_pad = None
         self.sources_panel.set_selected_pad(None)
+        self.heat_panel.set_selected_pad(None)
         self._show_sources()
+        self._show_heat_loads()
         self._show_markers()
         self._update_state()
 
@@ -1096,6 +1117,7 @@ class MainWindow(QMainWindow):
         if self.scene is not None:
             self.scene.set_selected_pad(self._selected_pad)
         self.sources_panel.set_selected_pad(self._selected_pad)
+        self.heat_panel.set_selected_pad(self._selected_pad)
 
     @property
     def selected_pad(self) -> tuple[str, str] | None:
@@ -1120,11 +1142,16 @@ class MainWindow(QMainWindow):
             net = next((p.net for p in pads if p.net), None)
             on_net = f" on net {net}" if net else ""
             self.statusBar().showMessage(
-                f"{key[0]} pad {key[1]}{on_net} — double-click or 'Add selected pad' to set a current", 5000
+                f"{key[0]} pad {key[1]}{on_net} — double-click or 'Add selected pad' to add a "
+                "current source or heat load",
+                5000,
             )
 
     def _on_board_double_clicked(self, pos) -> None:
-        """Add (or go to) a current source on the double-clicked pad.
+        """Add (or go to) a current source or heat load on the double-clicked pad.
+
+        The load goes in whichever of the Current Sources and Heat Loads tabs was
+        shown last.
 
         Args:
             pos: Scene position of the double-click, in millimetres.
@@ -1139,9 +1166,13 @@ class MainWindow(QMainWindow):
             self.document.remove_markers([self._click_marker])
         self._click_marker = None
         self.select_pad(key)
-        self._sources_dock.show()
-        self._sources_dock.raise_()
-        self.sources_panel.add_selected_pad()
+        dock = self._pad_load_dock
+        dock.show()
+        dock.raise_()
+        if dock is self._heat_dock:
+            self.heat_panel.add_selected_pad()
+        else:
+            self.sources_panel.add_selected_pad()
 
     def _on_source_row_selected(self, key: tuple[str, str] | None) -> None:
         """Highlight the pad of the row selected in the Current Sources panel.
@@ -1164,6 +1195,36 @@ class MainWindow(QMainWindow):
         self.sources_panel.show_sources.setChecked(checked)
         if self.scene is not None:
             self.scene.set_sources_visible(checked)
+
+    def _on_load_dock_shown(self, dock, shown: bool) -> None:
+        """Remember which of the Current Sources / Heat Loads tabs was shown last.
+
+        Args:
+            dock: The dock whose visibility changed.
+            shown: Whether it became visible.
+        """
+        if shown:
+            self._pad_load_dock = dock
+
+    def _on_show_heat_loads_toggled(self, checked: bool) -> None:
+        """Show or hide the heat load markers, keeping the panel checkbox in sync.
+
+        Args:
+            checked: New state of the "Show heat loads" action.
+        """
+        self.heat_panel.show_heat_loads.setChecked(checked)
+        if self.scene is not None:
+            self.scene.set_heat_loads_visible(checked)
+
+    def _show_heat_loads(self, *_args) -> None:
+        """Redraw the heat load markers on the board.
+
+        Args:
+            *_args: Ignored signal arguments.
+        """
+        if self.scene is not None:
+            self.scene.set_heat_loads_visible(self.show_heat_loads_action.isChecked())
+            self.scene.set_heat_loads(self.document.heat_loads)
 
     def _on_show_markers_toggled(self, checked: bool) -> None:
         """Show or hide the result markers, keeping the panel checkbox in sync.

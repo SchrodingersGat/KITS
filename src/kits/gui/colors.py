@@ -18,6 +18,8 @@ SELECTION = QColor(255, 255, 255)  # selected pad outline
 SOURCE = QColor(46, 204, 113)  # current into the board
 SINK = QColor(255, 140, 26)  # current out of the board
 MARKER = QColor(80, 220, 255)  # result probe markers
+HEAT_SOURCE = QColor(235, 64, 52)  # heat injected at a pad
+HEAT_SINK = QColor(66, 135, 245)  # pad held at a temperature or tied to ambient
 ZONE_DARKEN = 160  # zones drawn this much darker than tracks on the same layer
 
 _FRONT = QColor(200, 52, 52)

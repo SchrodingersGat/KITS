@@ -16,10 +16,10 @@ convection:
   top_w_m2k: 10.0
   bottom_w_m2k: 10.0
 current_multiplier: 5.0
-current_sources:
-- ref: J1
-  pad: '1'
-  current_a: 10.0
+heat_loads:
 - ref: J2
   pad: '1'
-  current_a: -10.0
+  power_w: 1.0
+- ref: J1
+  pad: '1'
+  power_w: -1.0

@@ -206,3 +206,45 @@ def test_solve_project_applies_the_current_multiplier(strip_project):
     results, _, _ = cli.solve_project(strip_project)
     assert results.electrode_currents["P1.1"] == pytest.approx(10.0, rel=1e-6)
     assert results.inputs == inputs_hash(project.scaled_current_sources(), project.solve)
+
+
+def test_inputs_hash_includes_heat_loads_only_when_present():
+    from kits.config import HeatLoad, HeatLoadKind
+
+    sources, settings = [CurrentSource("P1", "1", 5.0)], SolveSettings()
+    assert inputs_hash(sources, settings, []) == inputs_hash(sources, settings)  # older results stay valid
+    power = HeatLoad("P1", "1", HeatLoadKind.POWER, 1.0)
+    with_power = inputs_hash(sources, settings, [power])
+    assert with_power != inputs_hash(sources, settings)
+    assert with_power != inputs_hash(sources, settings, [HeatLoad("P1", "1", HeatLoadKind.POWER, 2.0)])
+    assert with_power != inputs_hash(sources, settings, [HeatLoad("P1", "1", HeatLoadKind.TEMPERATURE, 1.0)])
+
+
+def test_heat_only_solve(strip_project, tmp_path):
+    from kits.config import HeatLoad, HeatLoadKind
+
+    project = load_kits_project(strip_project)
+    project.current_sources = []
+    project.heat_loads = [
+        HeatLoad("P1", "1", HeatLoadKind.POWER, 2.0),
+        HeatLoad("P2", "1", HeatLoadKind.RESISTANCE, 4.0),
+    ]
+    project.save()
+    results, results_path, _ = cli.solve_project(strip_project)
+    assert results.total_power_w == 0.0 and results.electrode_voltages == {}
+    assert all(not layer.voltage.any() and not layer.current_density.any() for layer in results.layers)
+    assert results.load_heat["P1.1"] == 2.0
+    sink = results.load_heat["P2.1"]
+    assert sink == pytest.approx(-(results.load_temperatures["P2.1"] - 25.0) / 4.0, rel=1e-9)
+    assert results.max_temperature_c > 25.0
+
+    # Saved and reloaded with the heat load results.
+    loaded = SolveResults.load_npz(results_path)
+    assert loaded.load_heat == results.load_heat and loaded.load_temperatures == results.load_temperatures
+    assert loaded.inputs == inputs_hash([], project.solve, project.heat_loads)
+
+    # Neither sources nor loads: nothing to solve.
+    project.heat_loads = []
+    project.save()
+    with pytest.raises(ConfigError, match="no current sources or heat loads"):
+        cli.solve_project(strip_project)

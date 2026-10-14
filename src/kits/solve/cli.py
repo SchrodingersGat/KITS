@@ -2,7 +2,7 @@
 
 Loads the project and its board, reuses the saved mesh if it is still current
 (otherwise meshes the board and saves the mesh), solves DC current and steady
-temperature for the project's current sources, and saves the results to
+temperature for the project's current sources and heat loads, and saves the results to
 ``kits_output/<project>.results.npz``. The GUI runs this in a child process
 with ``--progress``; the output protocol matches ``kits-mesh``:
 
@@ -17,6 +17,8 @@ import argparse
 import json
 import sys
 from pathlib import Path
+
+import numpy as np
 
 from ..config import ConfigError
 from ..ingest import BoardLoadError, load_project
@@ -50,7 +52,8 @@ def solve_project(project_path: str | Path, progress=None) -> tuple[SolveResults
         ``(results, results_path, saved_mesh_path)``.
 
     Raises:
-        ConfigError: If the project is invalid, has no board, or its sources don't balance.
+        ConfigError: If the project is invalid, has no board, has neither current
+            sources nor heat loads, or its sources don't balance.
         BoardLoadError: If the board can't be loaded.
         GeometryError: If the board can't be meshed (e.g. no outline).
         MeshError: If gmsh fails.
@@ -64,9 +67,10 @@ def solve_project(project_path: str | Path, progress=None) -> tuple[SolveResults
     if kits.board is None:
         raise ConfigError(f"{kits.path.name} doesn't link a KiCad board")
     sources = kits.scaled_current_sources()
-    if not sources:
-        raise ConfigError("the project has no current sources; add some before solving")
-    if abs(sum(s.current_a for s in sources)) > _BALANCE_TOLERANCE_A:
+    heat_loads = kits.heat_loads
+    if not sources and not heat_loads:
+        raise ConfigError("the project has no current sources or heat loads; add some before solving")
+    if sources and abs(sum(s.current_a for s in sources)) > _BALANCE_TOLERANCE_A:
         raise ConfigError("current sources and sinks must sum to zero")
     try:
         kits.output_dir.mkdir(parents=True, exist_ok=True)
@@ -88,10 +92,12 @@ def solve_project(project_path: str | Path, progress=None) -> tuple[SolveResults
     span = 1.0 - start
     report("Assembling the model", start)
     model = LayeredModel(board, mesh, settings)
-    report("Solving current flow", start + 0.1 * span)
-    dc = model.solve_dc([Electrode(s.ref, s.pad, current=s.current_a) for s in sources])
+    dc = None
+    if sources:
+        report("Solving current flow", start + 0.1 * span)
+        dc = model.solve_dc([Electrode(s.ref, s.pad, current=s.current_a) for s in sources])
     report("Solving temperature", start + 0.45 * span)
-    thermal = model.solve_thermal(dc)
+    thermal = model.solve_thermal(dc, heat_loads)
 
     report("Saving results", start + 0.9 * span)
     results = SolveResults(
@@ -101,17 +107,19 @@ def solve_project(project_path: str | Path, progress=None) -> tuple[SolveResults
                 nodes=lm.nodes,
                 triangles=lm.triangles,
                 copper=lm.copper,
-                voltage=dc.voltage[lm.layer],
+                voltage=dc.voltage[lm.layer] if dc else np.zeros(len(lm.nodes)),
                 temperature=thermal.temperature[lm.layer],
-                current_density=dc.current_density[lm.layer],
+                current_density=dc.current_density[lm.layer] if dc else np.zeros(len(lm.triangles)),
             )
             for lm in mesh.layers
         ],
-        total_power_w=dc.total_power,
-        electrode_voltages={f"{ref}.{pad}": v for (ref, pad), v in dc.electrode_voltages.items()},
-        electrode_currents={f"{ref}.{pad}": i for (ref, pad), i in dc.electrode_currents.items()},
+        total_power_w=dc.total_power if dc else 0.0,
+        electrode_voltages={f"{r}.{p}": v for (r, p), v in dc.electrode_voltages.items()} if dc else {},
+        electrode_currents={f"{r}.{p}": i for (r, p), i in dc.electrode_currents.items()} if dc else {},
         mesh_fingerprint=mesh.fingerprint,
-        inputs=inputs_hash(sources, settings),
+        inputs=inputs_hash(sources, settings, heat_loads),
+        load_heat={f"{r}.{p}": q for (r, p), q in thermal.load_heat.items()},
+        load_temperatures={f"{r}.{p}": t for (r, p), t in thermal.load_temperatures.items()},
     )
     results.save_npz(kits.results_path)
     report("Done", 1.0)
@@ -161,6 +169,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Joule power {results.total_power_w:.4g} W, max temperature {results.max_temperature_c:.2f} C")
         for label, voltage in results.electrode_voltages.items():
             print(f"  {label}: {voltage * 1e3:+.3f} mV, {results.electrode_currents[label]:+.4g} A")
+        for label, heat in results.load_heat.items():
+            print(f"  {label}: {heat:+.4g} W into the board, {results.load_temperatures[label]:.2f} C")
     return 0
 
 

@@ -190,13 +190,11 @@ def test_cursor_setting_defaults_on(app, tmp_path):
 
 def test_crosshair_follows_mouse_and_toggles(app, board_v9_path, kits_v9_path):
     from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QDockWidget
 
     window = MainWindow()
-    window._layer_dock.hide()
-    window._info_dock.hide()
-    window._mesh_dock.hide()
-    window._sources_dock.hide()
-    window._solve_dock.hide()
+    for dock in window.findChildren(QDockWidget):
+        dock.hide()
     window.show()
     window.resize(800, 600)  # after show(), so the hidden docks' minimum widths don't count
     assert window.open_path(kits_v9_path)
@@ -376,3 +374,29 @@ def test_document_markers(app):
     doc.add_marker(0, 0)
     doc.set_mesh(None)
     assert doc.markers == []
+
+
+def test_document_heat_loads(app, kits_v9_path):
+    from kits.config import ConfigError, HeatLoadKind
+    from kits.gui.document import Document
+
+    doc = Document()
+    with pytest.raises(ConfigError):
+        doc.add_heat_load("U1", "1")  # no project open
+    doc.open_project(kits_v9_path)
+    changes = []
+    doc.heat_loads_changed.connect(lambda: changes.append(doc.heat_loads))
+    doc.add_heat_load("U1", "1", HeatLoadKind.POWER, 2.0)
+    with pytest.raises(ConfigError, match="already has"):
+        doc.add_heat_load("U1", "1")
+    with pytest.raises(ConfigError, match="above zero"):
+        doc.add_heat_load("U1", "2", HeatLoadKind.RESISTANCE, 0.0)
+    doc.set_heat_load("U1", "1", HeatLoadKind.POWER, 2.0)  # unchanged: no signal
+    doc.set_heat_load("U1", "1", HeatLoadKind.TEMPERATURE, 50.0)
+    assert doc.heat_load("U1", "1").kind is HeatLoadKind.TEMPERATURE and doc.dirty
+    with pytest.raises(ConfigError, match="no heat load"):
+        doc.set_heat_load("U9", "1", HeatLoadKind.POWER, 1.0)
+    doc.remove_heat_load("U1", "1")
+    with pytest.raises(ConfigError, match="no heat load"):
+        doc.remove_heat_load("U1", "1")
+    assert doc.heat_loads == [] and len(changes) == 3

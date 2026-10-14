@@ -11,7 +11,7 @@ import pytest
 
 pytest.importorskip("skfem")
 
-from kits.config import MeshSettings  # noqa: E402
+from kits.config import HeatLoad, HeatLoadKind, MeshSettings  # noqa: E402
 from kits.ingest import load_board  # noqa: E402
 from kits.mesh.mesher import layer_heights, mesh_board  # noqa: E402
 from kits.solve.fem import mass_matrix  # noqa: E402
@@ -205,3 +205,82 @@ def test_copper_weight_from_stackup_sets_sheet_resistance(tmp_path):
         [Electrode("P1", "1", voltage=1.0), Electrode("P2", "1", voltage=0.0)]
     )
     assert dc.resistance(("P1", "1"), ("P2", "1")) == pytest.approx(R_SQUARE * 32 / 6 / 2, rel=1e-6)
+
+
+# -- heat loads ---------------------------------------------------------------------------
+
+POWER, FIXED, RESISTANCE = HeatLoadKind.POWER, HeatLoadKind.TEMPERATURE, HeatLoadKind.RESISTANCE
+
+
+def _surface_mean_rise(model, thermal, ambient):
+    """Area-weighted mean rise over the top and bottom faces, and that total area (m²)."""
+    total, area = 0.0, 0.0
+    for lf in (model.layers[0], model.layers[-1]):
+        weights = np.asarray(mass_matrix(lf, np.ones(lf.mesh.nelements)).sum(axis=0)).ravel()
+        total += float(weights @ (thermal.temperature[lf.layer] - ambient))
+        area += float(weights.sum())
+    return total / area, area
+
+
+def test_heat_only_power_source_matches_convection(strip_board):
+    # No current: a 2 W pad source must all leave by convection, so the mean
+    # surface rise is exactly P / (h A), as for Joule heat.
+    settings = SolveSettings(convection_top_w_m2k=10.0, convection_bottom_w_m2k=10.0, ambient_c=25.0)
+    model = _model(strip_board, settings)
+    thermal = model.solve_thermal(None, [HeatLoad("P1", "1", POWER, 2.0)])
+    assert thermal.convected_power == pytest.approx(2.0, rel=1e-9)
+    mean_rise, area = _surface_mean_rise(model, thermal, 25.0)
+    assert mean_rise == pytest.approx(2.0 / (10.0 * area), rel=1e-9)
+    assert thermal.load_heat[("P1", "1")] == 2.0
+    # The source pad is the hottest place on the board.
+    assert thermal.load_temperatures[("P1", "1")] > thermal.temperature["F.Cu"].mean()
+    # Linear: twice the power, twice the rise.
+    double = model.solve_thermal(None, [HeatLoad("P1", "1", POWER, 4.0)])
+    np.testing.assert_allclose(
+        double.temperature["F.Cu"] - 25, 2 * (thermal.temperature["F.Cu"] - 25), rtol=1e-9
+    )
+
+
+def test_fixed_temperature_sink_balances_heat(strip_board):
+    model = _model(strip_board, SolveSettings(ambient_c=25.0))
+    dc = model.solve_dc([Electrode("P1", "1", current=10.0), Electrode("P2", "1", current=-10.0)])
+    loads = [HeatLoad("P1", "1", POWER, 1.5), HeatLoad("P2", "1", FIXED, 20.0)]
+    thermal = model.solve_thermal(dc, loads)
+
+    # Every node of the sink pad is held at 20 °C.
+    nodes, _ = model.pad_nodes("P2", "1")
+    f_cu = model.by_name["F.Cu"]
+    assert np.allclose(np.concatenate(list(thermal.temperature.values()))[nodes], 20.0)
+    assert thermal.load_temperatures[("P2", "1")] == pytest.approx(20.0)
+    # Energy: Joule + source + sink (negative here: it removes heat) = convected.
+    sink = thermal.load_heat[("P2", "1")]
+    assert sink < 0
+    assert dc.total_power + 1.5 + sink == pytest.approx(thermal.convected_power, rel=1e-8)
+    # A sink cooler than ambient also pulls heat in from the air: the board runs cooler overall.
+    plain = model.solve_thermal(dc, [HeatLoad("P1", "1", POWER, 1.5)])
+    assert thermal.temperature[f_cu.layer].mean() < plain.temperature[f_cu.layer].mean()
+
+
+def test_thermal_resistance_sink(strip_board):
+    model = _model(strip_board, SolveSettings(ambient_c=25.0))
+    source = HeatLoad("P1", "1", POWER, 2.0)
+    thermal = model.solve_thermal(None, [source, HeatLoad("P2", "1", RESISTANCE, 5.0)])
+    flow = -thermal.load_heat[("P2", "1")]
+    # The heatsink carries (T_pad - T_ambient) / R, and the books balance.
+    assert flow == pytest.approx((thermal.load_temperatures[("P2", "1")] - 25.0) / 5.0, rel=1e-9)
+    assert 0 < flow < 2.0
+    assert 2.0 - flow == pytest.approx(thermal.convected_power, rel=1e-8)
+    # A better heatsink takes more of the heat and cools the source.
+    better = model.solve_thermal(None, [source, HeatLoad("P2", "1", RESISTANCE, 0.5)])
+    assert -better.load_heat[("P2", "1")] > flow
+    assert better.load_temperatures[("P1", "1")] < thermal.load_temperatures[("P1", "1")]
+    # A near-perfect heatsink approaches a pad fixed at ambient.
+    ideal = model.solve_thermal(None, [source, HeatLoad("P2", "1", RESISTANCE, 1e-9)])
+    fixed = model.solve_thermal(None, [source, HeatLoad("P2", "1", FIXED, 25.0)])
+    assert ideal.load_heat[("P2", "1")] == pytest.approx(fixed.load_heat[("P2", "1")], rel=1e-5)
+
+
+def test_heat_load_on_missing_pad_is_an_error(strip_board):
+    model = _model(strip_board)
+    with pytest.raises(SolveError, match="Q9.1"):
+        model.solve_thermal(None, [HeatLoad("Q9", "1", POWER, 1.0)])

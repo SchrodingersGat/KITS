@@ -213,6 +213,7 @@ class SolvePanel(QWidget):
             document.project_changed,
             document.board_changed,
             document.sources_changed,
+            document.heat_loads_changed,
             document.settings_changed,
             document.results_changed,
         ):
@@ -395,7 +396,7 @@ class SolvePanel(QWidget):
         can_solve = (
             board is not None
             and board.has_outline
-            and bool(sources)
+            and bool(sources or doc.heat_loads)
             and balanced
             and valid
             and not self._busy
@@ -410,8 +411,8 @@ class SolvePanel(QWidget):
         elif not board.has_outline:
             style = _WARNING_STYLE
             lines.append("The board has no Edge.Cuts outline, so it can't be solved.")
-        elif not sources:
-            lines.append("Add current sources (Current Sources tab) to solve.")
+        elif not sources and not doc.heat_loads:
+            lines.append("Add current sources or heat loads (Current Sources / Heat Loads tabs) to solve.")
         elif not balanced:
             style = _WARNING_STYLE
             lines.append("Current sources and sinks must sum to zero to solve.")
@@ -422,6 +423,11 @@ class SolvePanel(QWidget):
             lines.append(f"Max temperature: {results.max_temperature_c:.1f} °C")
             for label, voltage in sorted(results.electrode_voltages.items()):
                 lines.append(f"  {label}: {format_value(voltage, DisplayMode.VOLTAGE)}")
+            if results.load_heat:
+                lines.append("Heat loads (heat into the board, pad temperature):")
+            for label, heat in sorted(results.load_heat.items()):
+                temperature = format_value(results.load_temperatures[label], DisplayMode.TEMPERATURE)
+                lines.append(f"  {label}: {heat:+.4g} W, {temperature}")
             if doc.results_from_file:
                 lines.append("Reloaded from the project's saved results.")
             staleness = doc.results_staleness

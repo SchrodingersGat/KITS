@@ -11,7 +11,9 @@ Model (see PLAN.md):
   of each adjacent dielectric slab. Heat crosses between adjacent layers through
   the dielectric (``k / thickness`` per area) and through plated barrels, and
   leaves by convection from the top and bottom layers. Sources are Joule heat
-  in the sheets and barrels.
+  in the sheets and barrels, plus user heat loads on pads: injected power,
+  fixed temperature, or a thermal resistance to ambient (each spread over the
+  pad's copper area on all its layers).
 
 Temperature dependence of copper resistivity is not modelled yet.
 """
@@ -19,7 +21,7 @@ Temperature dependence of copper resistivity is not modelled yet.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import scipy.sparse as sp
@@ -27,7 +29,7 @@ import shapely
 from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import spsolve
 
-from ..config import SolveSettings
+from ..config import HeatLoad, HeatLoadKind, SolveSettings
 from ..ingest.model import Board
 from ..mesh.geometry import board_holes, pad_area
 from ..mesh.model import BoardMesh
@@ -115,11 +117,17 @@ class ThermalResult:
 
     Attributes:
         temperature: Nodal temperature per layer, °C.
-        convected_power: Heat leaving by convection, W (equals the input power at steady state).
+        convected_power: Heat leaving by convection, W. At steady state it equals
+            the Joule power plus the net heat of all heat loads.
+        load_heat: Heat into the board at each heat load's pad, W (negative where
+            a sink takes heat out), keyed ``(ref, pad)``.
+        load_temperatures: Area-weighted mean temperature of each heat load's pad, °C.
     """
 
     temperature: dict[str, np.ndarray]
     convected_power: float
+    load_heat: dict[tuple[str, str], float] = field(default_factory=dict)
+    load_temperatures: dict[tuple[str, str], float] = field(default_factory=dict)
 
     @property
     def max_temperature(self) -> float:
@@ -172,15 +180,30 @@ class LayeredModel:
             electrode: The electrode.
 
         Returns:
+            See :meth:`pad_nodes`.
+
+        Raises:
+            SolveError: If the pad doesn't exist or has no meshed copper.
+        """
+        return self.pad_nodes(electrode.ref, electrode.pad)
+
+    def pad_nodes(self, ref: str, number: str) -> tuple[np.ndarray, np.ndarray]:
+        """Global nodes covered by a pad, with their lumped area weights.
+
+        Args:
+            ref: Footprint reference.
+            number: Pad number; every pad of the footprint with it is included.
+
+        Returns:
             ``(nodes, weights)``: global node indices on the pad's copper (all
             its layers) and each node's share of the pad's copper area.
 
         Raises:
             SolveError: If the pad doesn't exist or has no meshed copper.
         """
-        pads = [p for p in self.board.find_pads(electrode.ref, electrode.pad) if p.layers]
+        pads = [p for p in self.board.find_pads(ref, number) if p.layers]
         if not pads:
-            raise SolveError(f"no pad {electrode.ref}.{electrode.pad} with copper on the board")
+            raise SolveError(f"no pad {ref}.{number} with copper on the board")
         area = shapely.union_all([pad_area(p) for p in pads]).buffer(1e-6)
         pad_layers = {layer for p in pads for layer in p.layers}
         nodes, weights = [], []
@@ -198,7 +221,7 @@ class LayeredModel:
             nodes.append(lf.offset + local)
             weights.append(lumped[local])
         if not nodes:
-            raise SolveError(f"pad {electrode.ref}.{electrode.pad} has no copper in the mesh")
+            raise SolveError(f"pad {ref}.{number} has no copper in the mesh")
         weights = np.concatenate(weights)
         return np.concatenate(nodes), weights / weights.sum()
 
@@ -325,14 +348,23 @@ class LayeredModel:
 
     # -- thermal -------------------------------------------------------------------------
 
-    def solve_thermal(self, dc: DCResult) -> ThermalResult:
-        """Solve for steady temperature with Joule heating from a DC solution.
+    def solve_thermal(self, dc: DCResult | None, heat_loads: Sequence[HeatLoad] = ()) -> ThermalResult:
+        """Solve for steady temperature with Joule heating and pad heat loads.
+
+        Heat loads act over their pad's copper (all of its layers), shared by
+        area: power is injected; a fixed temperature holds every node of the pad;
+        a thermal resistance ``R`` ties the pad to ambient with a total
+        conductance ``1/R``.
 
         Args:
-            dc: The DC solution supplying the heat sources.
+            dc: The DC solution supplying Joule heat, or None for no current flow.
+            heat_loads: Heat sources and sinks on pads.
 
         Returns:
-            The temperature field.
+            The temperature field, with each heat load's heat flow and pad temperature.
+
+        Raises:
+            SolveError: If a heat load's pad doesn't exist or has no meshed copper.
         """
         s = self.settings
         k_cu, k_d = s.copper_thermal_conductivity_w_mk, s.dielectric_thermal_conductivity_w_mk
@@ -343,7 +375,8 @@ class LayeredModel:
             dielectric_share = k_d * ((gaps[i - 1] if i > 0 else 0) + (gaps[i] if i < len(gaps) else 0)) / 2
             conductance = np.where(lf.copper, k_cu * self.copper_thickness[lf.layer], 0) + dielectric_share
             sheets.append(sheet_matrix(lf, conductance))
-            loads.append(load_vector(lf, dc.sheet_power[lf.layer]))
+            if dc is not None:
+                loads.append(load_vector(lf, dc.sheet_power[lf.layer]))
             h_layer = (s.convection_top_w_m2k if i == 0 else 0.0) + (
                 s.convection_bottom_w_m2k if i == len(self.layers) - 1 else 0.0
             )
@@ -356,11 +389,47 @@ class LayeredModel:
         k = k + link_matrix(self.barrel_links(k_cu), self.size)
 
         conv = block_diag(convection)
-        rhs = np.concatenate(loads) + dc.barrel_heat + conv @ np.full(self.size, s.ambient_c)
-        temperature = spsolve(k.tocsc(), rhs)
+        rhs = conv @ np.full(self.size, s.ambient_c)
+        if dc is not None:
+            rhs = rhs + np.concatenate(loads) + dc.barrel_heat
+
+        # Pad heat loads.
+        fixed = np.zeros(self.size, dtype=bool)
+        values = np.zeros(self.size)
+        tie = np.zeros(self.size)  # lumped conductance to ambient from thermal resistances, W/K
+        load_nodes = {}
+        for load in heat_loads:
+            nodes, weights = self.pad_nodes(load.ref, load.pad)
+            load_nodes[load.key] = (load, nodes, weights)
+            if load.kind is HeatLoadKind.POWER:
+                rhs[nodes] += load.value * weights
+            elif load.kind is HeatLoadKind.TEMPERATURE:
+                fixed[nodes] = True
+                values[nodes] = load.value
+            else:
+                tie[nodes] += weights / load.value
+        k = (k + sp.diags(tie)).tocsr()
+        rhs = rhs + tie * s.ambient_c
+
+        temperature = _solve_partitioned(k, rhs, fixed, values) if fixed.any() else spsolve(k.tocsc(), rhs)
         convected = float(np.ones(self.size) @ (conv @ (temperature - s.ambient_c)))
+        injected = k @ temperature - rhs  # heat the fixed-temperature constraints put in
+        load_heat, load_temperatures = {}, {}
+        for key, (load, nodes, weights) in load_nodes.items():
+            if load.kind is HeatLoadKind.POWER:
+                load_heat[key] = load.value
+            elif load.kind is HeatLoadKind.TEMPERATURE:
+                load_heat[key] = float(injected[nodes].sum())
+            else:
+                load_heat[key] = -float(weights @ (temperature[nodes] - s.ambient_c)) / load.value
+            load_temperatures[key] = float(weights @ temperature[nodes])
         by_layer = {lf.layer: temperature[lf.offset : lf.offset + lf.num_nodes] for lf in self.layers}
-        return ThermalResult(temperature=by_layer, convected_power=convected)
+        return ThermalResult(
+            temperature=by_layer,
+            convected_power=convected,
+            load_heat=load_heat,
+            load_temperatures=load_temperatures,
+        )
 
 
 # -- helpers ---------------------------------------------------------------------------
@@ -423,6 +492,23 @@ def _solve_with_fixed(k: sp.csr_matrix, rhs: np.ndarray, fixed: np.ndarray, valu
     fixed = fixed | (diagonal == 0)
     leak = _LEAKAGE * diagonal[diagonal > 0].mean()
     k = k + sp.diags(np.where(fixed, 0, leak))
+    return _solve_partitioned(k.tocsr(), rhs, fixed, values)
+
+
+def _solve_partitioned(
+    k: sp.csr_matrix, rhs: np.ndarray, fixed: np.ndarray, values: np.ndarray
+) -> np.ndarray:
+    """Solve ``k x = rhs`` for the free unknowns, with the others prescribed.
+
+    Args:
+        k: Global stiffness (non-singular on the free unknowns).
+        rhs: Nodal loads.
+        fixed: True where the value is prescribed.
+        values: Prescribed values (used where ``fixed``).
+
+    Returns:
+        The full solution vector.
+    """
     free = ~fixed
     x = np.where(fixed, values, 0.0)
     k_ff = k[free][:, free].tocsc()

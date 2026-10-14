@@ -5,12 +5,13 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
-from ..config import CurrentSource
+from ..config import CurrentSource, HeatLoad
 from ..mesh.fingerprint import MeshFingerprint
 from .solver import SolveSettings
 
@@ -18,12 +19,16 @@ from .solver import SolveSettings
 SOLVER_VERSION = 2  # 2: stackup sub-layers summed; top/bottom convection
 
 
-def inputs_hash(sources: list[CurrentSource], settings: SolveSettings) -> str:
+def inputs_hash(
+    sources: list[CurrentSource], settings: SolveSettings, heat_loads: Sequence[HeatLoad] = ()
+) -> str:
     """Fingerprint the solve inputs that aren't part of the mesh.
 
     Args:
         sources: Current sources (order doesn't matter).
         settings: Material and boundary settings.
+        heat_loads: Pad heat sources and sinks (order doesn't matter). Left out of
+            the digest when there are none, so older results stay valid.
 
     Returns:
         A hex SHA-256 digest.
@@ -33,6 +38,8 @@ def inputs_hash(sources: list[CurrentSource], settings: SolveSettings) -> str:
         "sources": sorted((s.ref, s.pad, s.current_a) for s in sources),
         "settings": dataclasses.asdict(settings),
     }
+    if heat_loads:
+        payload["heat_loads"] = sorted((h.ref, h.pad, h.kind.value, h.value) for h in heat_loads)
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
@@ -68,6 +75,9 @@ class SolveResults:
         total_power_w: Total Joule power.
         electrode_voltages: Mean potential of each source pad, keyed ``"REF.PAD"``.
         electrode_currents: Current into the board at each source pad, keyed ``"REF.PAD"``.
+        load_heat: Heat into the board at each heat load's pad, W (negative for
+            sinks), keyed ``"REF.PAD"``.
+        load_temperatures: Mean temperature of each heat load's pad, °C, keyed ``"REF.PAD"``.
         mesh_fingerprint: Fingerprint of the board and mesh settings the mesh was built from.
         inputs: :func:`inputs_hash` of the sources and solver settings.
     """
@@ -78,6 +88,8 @@ class SolveResults:
     electrode_currents: dict[str, float]
     mesh_fingerprint: MeshFingerprint = field(default_factory=MeshFingerprint)
     inputs: str = ""
+    load_heat: dict[str, float] = field(default_factory=dict)
+    load_temperatures: dict[str, float] = field(default_factory=dict)
 
     def layer(self, name: str) -> LayerResult | None:
         """Return one layer's results.
@@ -109,6 +121,8 @@ class SolveResults:
             "mesh_settings_hash": self.mesh_fingerprint.settings,
             "mesh_board_hash": self.mesh_fingerprint.board,
             "inputs": self.inputs,
+            "load_heat": self.load_heat,
+            "load_temperatures": self.load_temperatures,
         }
         arrays: dict[str, np.ndarray] = {"meta": np.array(json.dumps(meta))}
         for i, r in enumerate(self.layers):
@@ -147,6 +161,8 @@ class SolveResults:
             electrode_currents={k: float(v) for k, v in meta["electrode_currents"].items()},
             mesh_fingerprint=MeshFingerprint(meta["mesh_settings_hash"], meta["mesh_board_hash"]),
             inputs=str(meta["inputs"]),
+            load_heat={k: float(v) for k, v in meta.get("load_heat", {}).items()},
+            load_temperatures={k: float(v) for k, v in meta.get("load_temperatures", {}).items()},
         )
 
     def staleness(self, mesh_fingerprint: MeshFingerprint, inputs: str) -> str | None:
@@ -163,7 +179,9 @@ class SolveResults:
         if reason is not None:
             return reason.replace("saved mesh", "results")
         if self.inputs != inputs:
-            return "The current sources or solver settings changed since the results were computed"
+            return (
+                "The current sources, heat loads or solver settings changed since the results were computed"
+            )
         return None
 
 

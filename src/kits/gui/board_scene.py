@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QGraphicsSimpleTextItem,
 )
 
-from ..config import CurrentSource
+from ..config import CurrentSource, HeatLoad
 from ..ingest.geometry import arc_points
 from ..ingest.model import EDGE_CUTS, Board, Pad
 from ..mesh.model import BoardMesh, LayerMesh
@@ -67,6 +67,7 @@ _Z_RESULTS_OVERLAY = 950  # solved fields, above the board, below the mesh
 _Z_MESH_OVERLAY = 1000  # above all board layers
 _RESULTS_ALPHA = 235
 _Z_SOURCES = 1100  # current source markers, above the mesh
+_Z_HEAT_LOADS = 1150  # heat load markers, above current sources
 _Z_SELECTION = 1200  # selected pad outline, on top of everything
 _Z_MARKERS = 1300  # result probe markers
 _MARKER_RADIUS_PX = 6
@@ -194,6 +195,8 @@ class BoardScene(QGraphicsScene):
         self._pad_items: dict[tuple[str, str], list[QGraphicsPathItem]] = {}
         self._source_markers: LayerItem | None = None
         self._sources_visible = True
+        self._heat_markers: LayerItem | None = None
+        self._heat_loads_visible = True
         self._selection: LayerItem | None = None
         self._results: SolveResults | None = None
         self._results_mode = DisplayMode.CURRENT_DENSITY
@@ -365,6 +368,77 @@ class BoardScene(QGraphicsScene):
         if self._source_markers is None:
             return 0
         return sum(isinstance(i, QGraphicsRectItem) for i in self._source_markers.childItems())
+
+    def set_heat_loads(self, loads: list[HeatLoad]) -> None:
+        """Mark pads that have heat loads: dashed outline plus a value label left of the pad.
+
+        Heat sources are red, sinks (fixed temperature or thermal resistance)
+        blue. Outlines aren't filled, so a current source's tint stays visible on
+        the same pad. Loads on pads missing from the board are skipped.
+
+        Args:
+            loads: The project's heat loads.
+        """
+        if self._heat_markers is not None:
+            self.removeItem(self._heat_markers)
+        self._heat_markers = LayerItem()
+        self._heat_markers.setZValue(_Z_HEAT_LOADS)
+        self._heat_markers.setVisible(self._heat_loads_visible)
+        self.addItem(self._heat_markers)
+        font = QFont()
+        font.setBold(True)
+        for load in loads:
+            items = self._pad_items.get(load.key)
+            if not items:
+                continue
+            color = colors.HEAT_SINK if load.kind.is_sink else colors.HEAT_SOURCE
+            pen = _cosmetic_pen(color, 2.5)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            for pad_item in items:
+                outline = self._pad_copy(pad_item, self._heat_markers)
+                outline.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+                outline.setPen(pen)
+            text = load.value_text
+            label = QGraphicsSimpleTextItem(text)
+            label.setFont(font)
+            label.setBrush(QColor(255, 255, 255))
+            bounds = label.boundingRect()
+            # Screen-pixel box just left of the pad (current labels sit to the right).
+            box = QGraphicsRectItem(bounds.adjusted(-3, -1, 3, 1), self._heat_markers)
+            box.setBrush(QColor(color.red(), color.green(), color.blue(), 220))
+            box.setPen(QPen(Qt.PenStyle.NoPen))
+            box.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+            box.setTransform(
+                box.transform().translate(-bounds.width() - _LABEL_GAP_PX - 3, -bounds.height() / 2)
+            )
+            pad_bounds = items[0].sceneBoundingRect()
+            for pad_item in items[1:]:
+                pad_bounds = pad_bounds.united(pad_item.sceneBoundingRect())
+            box.setPos(QPointF(pad_bounds.left(), pad_bounds.center().y()))
+            box.setToolTip(f"{load.label}: {text}")
+            label.setParentItem(box)
+
+    def set_heat_loads_visible(self, visible: bool) -> None:
+        """Show or hide the heat load markers.
+
+        Args:
+            visible: Whether heat load outlines and labels are drawn. Kept when they are redrawn.
+        """
+        self._heat_loads_visible = visible
+        if self._heat_markers is not None:
+            self._heat_markers.setVisible(visible)
+
+    @property
+    def heat_loads_visible(self) -> bool:
+        """Whether heat load markers are shown."""
+        return self._heat_loads_visible and self._heat_markers is not None and self._heat_markers.isVisible()
+
+    @property
+    def heat_load_marker_count(self) -> int:
+        """Number of heat load labels drawn (one per load whose pad is on the board)."""
+        if self._heat_markers is None:
+            return 0
+        return sum(isinstance(i, QGraphicsRectItem) for i in self._heat_markers.childItems())
 
     @staticmethod
     def _pad_copy(pad_item: QGraphicsPathItem, parent: QGraphicsItem) -> QGraphicsPathItem:
