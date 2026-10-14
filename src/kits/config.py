@@ -14,6 +14,8 @@ DEFAULT_MESH_MAX_SIZE_MM = 1.0
 DEFAULT_MESH_MIN_SIZE_MM = 0.1
 DEFAULT_MIN_CIRCLE_POINTS = 36
 DEFAULT_CORNER_SIZE_MM = 0.1
+# Global scale applied to every current source at solve time.
+MAX_CURRENT_MULTIPLIER = 1000.0
 MIN_CIRCLE_POINTS_RANGE = (8, 1000)
 
 
@@ -200,6 +202,34 @@ def current_sources_from_list(data) -> list[CurrentSource]:
             raise ConfigError(f"pad {source.label} has more than one current source")
         seen.add(source.key)
     return sources
+
+
+def current_multiplier_from_value(data) -> float:
+    """Parse and check the ``current_multiplier:`` value.
+
+    Every source's current is multiplied by it when solving, so a whole load case
+    can be scaled without editing each source.
+
+    Args:
+        data: The parsed value, or None if the key is absent (meaning 1).
+
+    Returns:
+        The multiplier.
+
+    Raises:
+        ConfigError: If it isn't a number in ``(0, MAX_CURRENT_MULTIPLIER]``.
+    """
+    if data is None:
+        return 1.0
+    if isinstance(data, bool):
+        raise ConfigError("'current_multiplier' must be a number")
+    try:
+        value = float(data)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("'current_multiplier' must be a number") from exc
+    if not (0 < value <= MAX_CURRENT_MULTIPLIER):  # also rejects NaN
+        raise ConfigError(f"'current_multiplier' must be above 0 and at most {MAX_CURRENT_MULTIPLIER:g}")
+    return value
 
 
 @dataclass

@@ -197,3 +197,12 @@ def test_log_colour_scale(app_or_skip):
     assert high == pytest.approx(np.percentile(layer.current_density / 1e6, 99.5))
     assert low == pytest.approx(high / 1e3)
     assert value_range(results, DisplayMode.CURRENT_DENSITY)[0] == 0.0  # linear starts at zero
+
+
+def test_solve_project_applies_the_current_multiplier(strip_project):
+    project = load_kits_project(strip_project)
+    project.current_multiplier = 2.0
+    project.save()
+    results, _, _ = cli.solve_project(strip_project)
+    assert results.electrode_currents["P1.1"] == pytest.approx(10.0, rel=1e-6)
+    assert results.inputs == inputs_hash(project.scaled_current_sources(), project.solve)

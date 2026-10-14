@@ -308,7 +308,7 @@ class BoardScene(QGraphicsScene):
         skipped.
 
         Args:
-            sources: The project's current sources.
+            sources: The current sources as solved (i.e. with the multiplier applied).
         """
         if self._source_markers is not None:
             self.removeItem(self._source_markers)

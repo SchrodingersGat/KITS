@@ -696,3 +696,28 @@ def test_double_click_pad_leaves_no_marker(app, window, strip_kits):
     window._on_board_clicked(QPointF(25.0, 5.0))  # double-click off a pad keeps its one marker
     window._on_board_double_clicked(QPointF(25.0, 5.0))
     assert window.document.markers == [(25.0, 5.0)]
+
+
+def test_current_multiplier(app, window, strip_kits):
+    assert window.open_path(strip_kits)
+    doc, panel = window.document, window.sources_panel
+    assert panel.multiplier.value() == 1.0 and "Solved with" not in panel.total_label.text()
+    window.build_mesh()
+    _wait(app, lambda: not window.mesh_job_running)
+    window.solve()
+    _wait(app, lambda: not window.solve_job_running)
+    assert doc.results is not None and doc.results_staleness is None
+    base = doc.results.electrode_currents["P1.1"]
+
+    panel.multiplier.setValue(2.0)
+    assert doc.current_multiplier == 2.0 and doc.dirty
+    assert "Solved with × 2" in panel.total_label.text()
+    assert [s.current_a for s in doc.scaled_current_sources] == [2 * s.current_a for s in doc.current_sources]
+    assert doc.results_staleness is not None  # results no longer match the inputs
+
+    window.solve()
+    _wait(app, lambda: not window.solve_job_running)
+    assert doc.results.electrode_currents["P1.1"] == pytest.approx(2 * base, rel=1e-6)
+
+    assert window.save()
+    assert load_kits_project(strip_kits).current_multiplier == 2.0

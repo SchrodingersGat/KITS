@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..config import ConfigError, CurrentSource
+from ..config import MAX_CURRENT_MULTIPLIER, ConfigError, CurrentSource
 from .document import Document
 
 DEFAULT_CURRENT_A = 1.0
@@ -33,7 +33,8 @@ class SourcesPanel(QWidget):
     """Edits the current fed into (or drawn from) the board at pads.
 
     Positive currents flow into the board (sources), negative ones out of it
-    (sinks). For a solve they must sum to zero; the panel warns otherwise.
+    (sinks). For a solve they must sum to zero; the panel warns otherwise. A
+    global multiplier scales every current at solve time.
 
     Signals:
         pad_selected(object): A row was selected; carries its ``(ref, pad)`` key, or None.
@@ -82,6 +83,18 @@ class SourcesPanel(QWidget):
         self.show_sources.setChecked(True)
         self.show_sources.setToolTip("Show the source/sink markers and current labels on the board (S)")
         self.show_sources.toggled.connect(self.show_sources_toggled)
+        self.multiplier = QDoubleSpinBox()
+        self.multiplier.setRange(0.001, MAX_CURRENT_MULTIPLIER)
+        self.multiplier.setDecimals(3)
+        self.multiplier.setPrefix("× ")
+        self.multiplier.setSingleStep(0.1)
+        self.multiplier.setKeyboardTracking(False)
+        self.multiplier.setValue(1.0)
+        self.multiplier.setToolTip(
+            "Scale every current by this factor when solving (the board labels show the scaled\n"
+            "currents; the table keeps the values you entered)"
+        )
+        self.multiplier.valueChanged.connect(self._on_multiplier_edited)
         self.total_label = QLabel()
         self.total_label.setWordWrap(True)
 
@@ -94,6 +107,11 @@ class SourcesPanel(QWidget):
         layout.addWidget(self.selected_label)
         layout.addLayout(buttons)
         layout.addWidget(self.table, 1)
+        multiplier_row = QHBoxLayout()
+        multiplier_row.addWidget(QLabel("Current multiplier:"))
+        multiplier_row.addWidget(self.multiplier)
+        multiplier_row.addStretch(1)
+        layout.addLayout(multiplier_row)
         layout.addWidget(self.total_label)
         layout.addWidget(self.show_sources)
 
@@ -152,6 +170,10 @@ class SourcesPanel(QWidget):
         Args:
             *_args: Ignored signal arguments.
         """
+        self.multiplier.blockSignals(True)
+        self.multiplier.setValue(self._document.current_multiplier)
+        self.multiplier.blockSignals(False)
+        self.multiplier.setEnabled(self._document.project is not None)
         if self._editing:  # a spin box in the table is being edited: keep it
             self._update_total()
             return
@@ -218,6 +240,17 @@ class SourcesPanel(QWidget):
             pass
         finally:
             self._editing = False
+
+    def _on_multiplier_edited(self, value: float) -> None:
+        """Store an edited current multiplier.
+
+        Args:
+            value: The new multiplier.
+        """
+        try:
+            self._document.set_current_multiplier(value)
+        except ConfigError:
+            pass
 
     def _on_row_selection(self) -> None:
         """Report the selected row's pad so the board can highlight it."""
@@ -299,6 +332,9 @@ class SourcesPanel(QWidget):
         total = sum(s.current_a for s in sources)
         into = sum(s.current_a for s in sources if s.current_a > 0)
         text = f"Total in: {into:g} A · net: {total:+g} A"
+        multiplier = self._document.current_multiplier
+        if multiplier != 1.0:
+            text += f"\nSolved with × {multiplier:g}: {into * multiplier:g} A in"
         if abs(total) > _BALANCE_TOLERANCE_A:
             self.total_label.setStyleSheet(_WARNING_STYLE)
             text += "\nSources and sinks must sum to zero to solve."

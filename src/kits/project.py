@@ -23,7 +23,14 @@ from pathlib import Path
 
 import yaml
 
-from .config import ConfigError, CurrentSource, MeshSettings, SolveSettings, current_sources_from_list
+from .config import (
+    ConfigError,
+    CurrentSource,
+    MeshSettings,
+    SolveSettings,
+    current_multiplier_from_value,
+    current_sources_from_list,
+)
 
 PROJECT_SUFFIX = ".kits"
 OUTPUT_DIR = "kits_output"
@@ -50,6 +57,7 @@ class KitsProject:
         board: The linked KiCad ``.kicad_pro``/``.kicad_pcb`` file (absolute), or None.
         mesh: Mesh element size settings.
         current_sources: Currents fed into / drawn from the board at pads.
+        current_multiplier: Scale applied to every source's current when solving.
         solve: Materials, convection and ambient temperature for the solver.
         extra: Top-level keys KITS doesn't interpret yet, kept so saving doesn't drop them.
     """
@@ -58,6 +66,7 @@ class KitsProject:
     board: Path | None = None
     mesh: MeshSettings = field(default_factory=MeshSettings)
     current_sources: list[CurrentSource] = field(default_factory=list)
+    current_multiplier: float = 1.0
     solve: SolveSettings = field(default_factory=SolveSettings)
     extra: dict = field(default_factory=dict)
 
@@ -100,6 +109,16 @@ class KitsProject:
         """Where solve results (fields per layer, with input fingerprints) are saved."""
         return self.output_dir / f"{self.name}.results.npz"
 
+    def scaled_current_sources(self) -> list[CurrentSource]:
+        """The current sources as solved: each current times :attr:`current_multiplier`.
+
+        Returns:
+            New source objects; the stored ones are unchanged.
+        """
+        return [
+            CurrentSource(s.ref, s.pad, s.current_a * self.current_multiplier) for s in self.current_sources
+        ]
+
     def board_reference(self) -> str | None:
         """The board path as written to the file: relative to the project if possible.
 
@@ -118,11 +137,13 @@ class KitsProject:
         """Return the YAML representation of the project.
 
         Returns:
-            Mapping with ``board``, ``mesh``, ``current_sources`` (if any) and any
-            preserved extra keys.
+            Mapping with ``board``, ``mesh``, the solver sections, ``current_multiplier``
+            (unless 1), ``current_sources`` (if any) and any preserved extra keys.
         """
         data: dict = {"board": self.board_reference(), "mesh": self.mesh.to_dict()}
         data.update(self.solve.to_sections())
+        if self.current_multiplier != 1.0:
+            data["current_multiplier"] = self.current_multiplier
         if self.current_sources:
             data["current_sources"] = [s.to_dict() for s in self.current_sources]
         data.update({k: v for k, v in self.extra.items() if k not in data})
@@ -144,6 +165,7 @@ class KitsProject:
         self.solve.validate()
         for source in self.current_sources:
             source.validate()
+        current_multiplier_from_value(self.current_multiplier)
         target = _normalise(path) if path is not None else self.path
         try:
             target.write_text(yaml.safe_dump(self._dict_for(target), sort_keys=False), encoding="utf-8")
@@ -196,6 +218,7 @@ def load_kits_project(path: str | Path) -> KitsProject:
         raise ConfigError(f"{path.name}: 'board' must be a file path")
     mesh = MeshSettings.from_dict(data.pop("mesh", None))
     sources = current_sources_from_list(data.pop("current_sources", None))
+    multiplier = current_multiplier_from_value(data.pop("current_multiplier", None))
     solve = SolveSettings.from_sections(
         data.pop("ambient_temperature_c", None), data.pop("materials", None), data.pop("convection", None)
     )
@@ -204,6 +227,7 @@ def load_kits_project(path: str | Path) -> KitsProject:
         board=(path.parent / board) if board else None,
         mesh=mesh,
         current_sources=sources,
+        current_multiplier=multiplier,
         solve=solve,
         extra=data,
     )

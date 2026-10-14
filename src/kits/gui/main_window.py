@@ -1199,7 +1199,7 @@ class MainWindow(QMainWindow):
         """
         if self.scene is not None:
             self.scene.set_sources_visible(self.show_sources_action.isChecked())
-            self.scene.set_sources(self.document.current_sources)
+            self.scene.set_sources(self.document.scaled_current_sources)
 
     def _on_cursor_moved(self, x: float, y: float) -> None:
         """Show the cursor position (relative to the grid origin) and the solved value under it.

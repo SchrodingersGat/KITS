@@ -14,7 +14,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
-from ..config import ConfigError, CurrentSource, MeshSettings, SolveSettings
+from ..config import ConfigError, CurrentSource, MeshSettings, SolveSettings, current_multiplier_from_value
 from ..ingest import Board, BoardLoadError, Project, load_project
 from ..mesh.fingerprint import MeshFingerprint, board_hash, settings_hash
 from ..mesh.model import BoardMesh, load_saved_mesh
@@ -214,7 +214,7 @@ class Document(QObject):
             ``(mesh_fingerprint, inputs_hash)`` to compare saved results against.
         """
         mesh_fp = MeshFingerprint(settings=settings_hash(self._project.mesh), board=self._board_hash)
-        return mesh_fp, inputs_hash(self._project.current_sources, self._project.solve)
+        return mesh_fp, inputs_hash(self._project.scaled_current_sources(), self._project.solve)
 
     def _load_saved_results(self) -> tuple[SolveResults | None, str | None]:
         """Load the project's saved results if they match the current inputs.
@@ -452,6 +452,31 @@ class Document(QObject):
         if self._project is None:
             raise ConfigError("no project is open")
         return self._project
+
+    @property
+    def current_multiplier(self) -> float:
+        """Scale applied to every source's current when solving (1 if no project is open)."""
+        return self._project.current_multiplier if self._project else 1.0
+
+    @property
+    def scaled_current_sources(self) -> list[CurrentSource]:
+        """The current sources as solved, i.e. times :attr:`current_multiplier`."""
+        return self._project.scaled_current_sources() if self._project else []
+
+    def set_current_multiplier(self, value: float) -> None:
+        """Change the global current multiplier (in memory; save to persist).
+
+        Args:
+            value: The new multiplier.
+
+        Raises:
+            ConfigError: If no project is open or the value is out of range.
+        """
+        project = self._require_project()
+        value = current_multiplier_from_value(value)
+        if value != project.current_multiplier:
+            project.current_multiplier = value
+            self._sources_edited()
 
     def _sources_edited(self) -> None:
         """Mark the project dirty and announce the change."""

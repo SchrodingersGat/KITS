@@ -216,3 +216,28 @@ def test_corner_size_validation(tmp_path, value, ok):
     else:
         with pytest.raises(ConfigError, match="corner size"):
             load_kits_project(path)
+
+
+def test_current_multiplier_round_trip(tmp_path):
+    from kits.config import CurrentSource
+
+    project = KitsProject(tmp_path / "p.kits", current_sources=[CurrentSource("J1", "1", 2.0)])
+    project.save()
+    assert "current_multiplier" not in yaml.safe_load(project.path.read_text(encoding="utf-8"))
+    assert load_kits_project(project.path).current_multiplier == 1.0
+
+    project.current_multiplier = 2.5
+    project.save()
+    assert yaml.safe_load(project.path.read_text(encoding="utf-8"))["current_multiplier"] == 2.5
+    loaded = load_kits_project(project.path)
+    assert loaded.current_multiplier == 2.5
+    assert loaded.scaled_current_sources() == [CurrentSource("J1", "1", 5.0)]
+    assert loaded.current_sources == [CurrentSource("J1", "1", 2.0)]  # stored values unchanged
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1001", "lots", ".nan", "true"])
+def test_invalid_current_multiplier_is_rejected(tmp_path, value):
+    path = tmp_path / "p.kits"
+    path.write_text(f"current_multiplier: {value}\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="current_multiplier"):
+        load_kits_project(path)

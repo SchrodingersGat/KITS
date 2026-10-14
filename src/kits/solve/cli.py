@@ -63,7 +63,7 @@ def solve_project(project_path: str | Path, progress=None) -> tuple[SolveResults
     kits = load_kits_project(project_path)
     if kits.board is None:
         raise ConfigError(f"{kits.path.name} doesn't link a KiCad board")
-    sources = kits.current_sources
+    sources = kits.scaled_current_sources()
     if not sources:
         raise ConfigError("the project has no current sources; add some before solving")
     if abs(sum(s.current_a for s in sources)) > _BALANCE_TOLERANCE_A:
