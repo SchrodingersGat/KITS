@@ -891,17 +891,18 @@ def test_toolbar_quick_actions(window, kits_v9_path):
     from kits.gui import colors
 
     toolbar = window.toolbar
-    assert toolbar.actions() == [window.build_mesh_action, window.solve_action]
-    assert not any(a.isEnabled() for a in toolbar.actions())  # no board yet
+    buttons = [a for a in toolbar.actions() if not a.isSeparator()]
+    assert buttons == [window.build_mesh_action, window.solve_action]
+    assert not any(a.isEnabled() for a in buttons)  # no board yet
     assert "F9" in window.solve_action.toolTip()
     # Distinct solid colours so they stand out on the dark theme.
-    mesh_style, solve_style = (toolbar.widgetForAction(a).styleSheet() for a in toolbar.actions())
+    mesh_style, solve_style = (toolbar.widgetForAction(a).styleSheet() for a in buttons[:2])
     assert colors.MESH_BUTTON.name() in mesh_style and colors.SOLVE_BUTTON.name() in solve_style
     assert colors.MESH_BUTTON != colors.SOLVE_BUTTON
     # The panels' buttons for the same actions match.
     assert colors.MESH_BUTTON.name() in window.mesh_panel.build_button.styleSheet()
     assert colors.SOLVE_BUTTON.name() in window.solve_panel.solve_button.styleSheet()
     assert window.open_path(kits_v9_path)
-    assert all(a.isEnabled() for a in toolbar.actions())
+    assert all(a.isEnabled() for a in buttons)
     view_menu = next(a.menu() for a in window.menuBar().actions() if a.text() == "&View")
     assert window.toolbar.toggleViewAction() in view_menu.actions()  # can be hidden from the View menu

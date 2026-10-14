@@ -7,7 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QSettings, Qt, QTimer
-from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QDragEnterEvent, QDropEvent, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QDockWidget,
@@ -46,6 +46,8 @@ from .solve_job import SolveJob
 from .solve_panel import SolvePanel
 from .sources_panel import SourcesPanel
 from .start_page import NoBoardPage, StartPage
+from .view3d import Board3DView, preload_viewer, prime_window_for_3d
+from .view_switch import ViewSwitch
 
 log = logging.getLogger(__name__)
 
@@ -76,12 +78,16 @@ class MainWindow(QMainWindow):
         self._mesh_progress: QProgressDialog | None = None
 
         self.view = BoardView()
+        self.view3d = Board3DView()
         self.start_page = StartPage()
         self.no_board_page = NoBoardPage()
         self._pages = QStackedWidget()
-        for page in (self.start_page, self.no_board_page, self.view):
+        for page in (self.start_page, self.no_board_page, self.view, self.view3d):
             self._pages.addWidget(page)
         self.setCentralWidget(self._pages)
+        # Without this, switching to 3D the first time re-creates the window (it
+        # vanishes and re-appears) while Qt turns on OpenGL composition.
+        self._gl_primer = prime_window_for_3d(self)
 
         self.layer_panel = LayerPanel()
         self.info_panel = BoardInfoPanel()
@@ -130,6 +136,7 @@ class MainWindow(QMainWindow):
         self._create_actions()
         self._create_toolbar()
         self._create_menus()
+        self.view_switch = ViewSwitch(self._pages, [self.view_2d_action, self.view_3d_action])
         for label, act in (
             ("Mesh", self.show_mesh_action),
             ("Results", self.show_results_action),
@@ -142,6 +149,16 @@ class MainWindow(QMainWindow):
             self.layer_panel.add_overlay_toggle(label, act)
 
         self.document.project_changed.connect(self._on_project_changed)
+        self.document.settings_changed.connect(self._refresh_3d)
+        for signal in (
+            self.document.mesh_changed,
+            self.document.results_changed,
+            self.solve_panel.mode_changed,
+            self.solve_panel.log_scale_toggled,
+            self.show_mesh_action.toggled,
+            self.show_results_action.toggled,
+        ):
+            signal.connect(self._update_3d_overlays)
         self.document.board_changed.connect(self._on_board_changed)
         self.document.dirty_changed.connect(self._update_title)
         self.document.mesh_changed.connect(self._on_mesh_changed)
@@ -253,7 +270,19 @@ class MainWindow(QMainWindow):
         self.link_board_action = action("&Link KiCad Board…", self.link_board_dialog, None, False)
         self.reload_action = action("&Reload Board", self.reload_board, keys.Refresh, False)
         self.preferences_action = action("&Preferences…", self.open_preferences, "Ctrl+,")
-        self.fit_action = action("Zoom to &fit", self.view.zoom_to_fit, Qt.Key.Key_Home, False)
+        self.fit_action = action("Zoom to &fit", self._zoom_to_fit, Qt.Key.Key_Home, False)
+        # 2D / 3D viewport: one of the two is always checked.
+        self.view_2d_action = toggle("&2D view", True, lambda _on: None, Qt.Key.Key_2)
+        self.view_2d_action.setIconText("2D")
+        self.view_2d_action.setToolTip("2D board view (2)")
+        self.view_3d_action = toggle("&3D view", False, self._on_view_3d_toggled, Qt.Key.Key_3)
+        self.view_3d_action.setIconText("3D")
+        self.view_3d_action.setToolTip("3D view of the stackup, holes and vias, with mesh and results (3)")
+        self._view_mode_group = QActionGroup(self)
+        self._view_mode_group.setExclusive(True)
+        for act in (self.view_2d_action, self.view_3d_action):
+            act.setEnabled(False)
+            self._view_mode_group.addAction(act)
         self.zoom_in_action = action("Zoom &in", self.view.zoom_in, keys.ZoomIn, False)
         self.zoom_out_action = action("Zoom &out", self.view.zoom_out, keys.ZoomOut, False)
         self.grid_action = toggle(
@@ -287,6 +316,8 @@ class MainWindow(QMainWindow):
             self.fit_action,
             self.zoom_in_action,
             self.zoom_out_action,
+            self.view_2d_action,
+            self.view_3d_action,
             self.build_mesh_action,
             self.solve_action,
         ]
@@ -337,6 +368,8 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.fit_action)
         view_menu.addAction(self.zoom_in_action)
         view_menu.addAction(self.zoom_out_action)
+        view_menu.addAction(self.view_2d_action)
+        view_menu.addAction(self.view_3d_action)
         view_menu.addSeparator()
         view_menu.addAction(self.grid_action)
         view_menu.addAction(self.cursor_action)
@@ -997,6 +1030,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self._cancel_jobs()
+        self.view3d.shutdown()
         super().closeEvent(event)
 
     def _cancel_jobs(self) -> None:
@@ -1049,6 +1083,7 @@ class MainWindow(QMainWindow):
             self.layer_panel.set_layers([])
 
         self.info_panel.set_project(kicad)
+        self._refresh_3d()
         self._selected_pad = None
         self.sources_panel.set_selected_pad(None)
         self.heat_panel.set_selected_pad(None)
@@ -1058,6 +1093,55 @@ class MainWindow(QMainWindow):
         self._show_elements()
         self._show_markers()
         self._update_state()
+
+    def _on_view_3d_toggled(self, checked: bool) -> None:
+        """Switch the viewport between the 2D board view and the 3D view.
+
+        Args:
+            checked: True for 3D.
+        """
+        self._update_state()
+        if checked:
+            self.statusBar().showMessage("3D view — press 2 for the 2D view", 4000)
+
+    def _refresh_3d(self, *_args) -> None:
+        """Give the 3D view the current board and settings (it rebuilds when shown).
+
+        Args:
+            *_args: Ignored signal arguments.
+        """
+        doc = self.document
+        if doc.board is not None:
+            preload_viewer()  # import VTK in the background so switching to 3D is quick
+        self.view3d.set_board(
+            doc.board,
+            doc.project.mesh if doc.project else None,
+            doc.solve_settings if doc.project else None,
+        )
+        self._update_3d_overlays()
+
+    def _update_3d_overlays(self, *_args) -> None:
+        """Give the 3D view the mesh and results to draw, with the 2D view's display options.
+
+        Args:
+            *_args: Ignored signal arguments.
+        """
+        self.view3d.set_overlays(
+            self.document.mesh,
+            self.document.results,
+            self.solve_panel.display_mode,
+            self.solve_panel.log_scale_selected,
+        )
+        self.view3d.set_overlay_visible(
+            self.show_mesh_action.isChecked(), self.show_results_action.isChecked()
+        )
+
+    def _zoom_to_fit(self) -> None:
+        """Fit the board in whichever view (2D or 3D) is showing."""
+        if self.view_3d_action.isChecked():
+            self.view3d.reset_camera()
+        else:
+            self.view.zoom_to_fit()
 
     def _update_state(self, *_args) -> None:
         """Sync the visible page, action states and title with the document.
@@ -1079,7 +1163,9 @@ class MainWindow(QMainWindow):
             self.no_board_page.set_message(message)
             self._pages.setCurrentWidget(self.no_board_page)
         else:
-            self._pages.setCurrentWidget(self.view)
+            self._pages.setCurrentWidget(self.view3d if self.view_3d_action.isChecked() else self.view)
+        self.view_switch.setVisible(self._pages.currentWidget() in (self.view, self.view3d))
+        self.view_switch.place()
         for act in self._project_actions:
             act.setEnabled(doc.project is not None)
         for act in self._board_actions:
@@ -1132,6 +1218,7 @@ class MainWindow(QMainWindow):
         """
         if self.scene is not None:
             self.scene.set_layer_visible(name, visible)
+        self.view3d.set_layer_visible(name, visible)
         self._update_probe()
 
     def _on_active_layer(self, name: str) -> None:
