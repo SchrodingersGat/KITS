@@ -28,7 +28,6 @@ class BoardView(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.SmartViewportUpdate)
-        self.setOptimizationFlag(QGraphicsView.OptimizationFlag.DontAdjustForAntialiasing)
         self.setMouseTracking(True)
         self._pan_origin: QPoint | None = None
         self._fit_rect: QRectF | None = None
@@ -39,8 +38,9 @@ class BoardView(QGraphicsView):
         self._fit_rect = rect
         if not rect.isEmpty():
             margin = max(rect.width(), rect.height()) * 0.03
-            self.fitInView(rect.adjusted(-margin, -margin, margin, margin),
-                           Qt.AspectRatioMode.KeepAspectRatio)
+            self.fitInView(
+                rect.adjusted(-margin, -margin, margin, margin), Qt.AspectRatioMode.KeepAspectRatio
+            )
 
     def zoom_to_fit(self) -> None:
         if self._fit_rect is not None:

@@ -17,6 +17,11 @@ from PySide6.QtWidgets import (
 from ..ingest import Project
 
 _STACKUP_COLUMNS = ["Layer", "Type", "Thickness (mm)", "Material", "εr"]
+_WARNING_COLOR = "#e0a030"
+
+
+def _size(bbox) -> str:
+    return f"{bbox[2] - bbox[0]:.2f} × {bbox[3] - bbox[1]:.2f} mm"
 
 
 def _fmt(value, spec: str = "g") -> str:
@@ -28,8 +33,19 @@ class BoardInfoPanel(QWidget):
         super().__init__(parent)
         self._labels: dict[str, QLabel] = {}
         form = QFormLayout()
-        for key in ("File", "Format version", "Size", "Thickness", "Copper layers",
-                    "Footprints", "Pads", "Tracks", "Vias", "Zones", "Nets"):
+        for key in (
+            "File",
+            "Format version",
+            "Size",
+            "Thickness",
+            "Copper layers",
+            "Footprints",
+            "Pads",
+            "Tracks",
+            "Vias",
+            "Zones",
+            "Nets",
+        ):
             label = QLabel("—")
             label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             self._labels[key] = label
@@ -51,16 +67,17 @@ class BoardInfoPanel(QWidget):
         if project is None:
             for label in self._labels.values():
                 label.setText("—")
+                label.setStyleSheet("")
+                label.setToolTip("")
             self._stackup.setRowCount(0)
             return
 
         b = project.board
-        bbox = b.bounding_box()
-        size = f"{bbox[2] - bbox[0]:.2f} × {bbox[3] - bbox[1]:.2f} mm" if bbox else "—"
+        outline = b.outline_bounding_box()
         values = {
             "File": b.path.name,
             "Format version": str(b.version),
-            "Size": size,
+            "Size": _size(outline) if outline else "No board outline",
             "Thickness": f"{b.thickness_mm:g} mm" if b.thickness_mm else "—",
             "Copper layers": str(len(b.copper_layers)),
             "Footprints": str(len(b.footprints)),
@@ -74,9 +91,27 @@ class BoardInfoPanel(QWidget):
             self._labels[key].setText(text)
         self._labels["File"].setToolTip(str(b.path))
 
+        size_label = self._labels["Size"]
+        if outline:
+            size_label.setStyleSheet("")
+            size_label.setToolTip("Extent of the Edge.Cuts outline")
+        else:
+            copper = b.copper_bounding_box()
+            size_label.setStyleSheet(f"color: {_WARNING_COLOR}; font-weight: bold;")
+            size_label.setToolTip(
+                "The board has nothing on the Edge.Cuts layer.\n"
+                "Draw the board outline on Edge.Cuts in KiCad."
+                + (f"\nCopper extent: {_size(copper)}" if copper else "")
+            )
+
         self._stackup.setRowCount(len(b.stackup))
         for row, layer in enumerate(b.stackup):
-            cells = [layer.name, layer.type, _fmt(layer.thickness_mm),
-                     layer.material or "", _fmt(layer.epsilon_r)]
+            cells = [
+                layer.name,
+                layer.type,
+                _fmt(layer.thickness_mm),
+                layer.material or "",
+                _fmt(layer.epsilon_r),
+            ]
             for col, text in enumerate(cells):
                 self._stackup.setItem(row, col, QTableWidgetItem(text))

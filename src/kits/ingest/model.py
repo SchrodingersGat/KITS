@@ -7,10 +7,13 @@ Nothing in this module depends on KiCad file syntax or on Qt.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
-Point = tuple[float, float]
+from .geometry import Point, arc_extent, bezier_points
+
+BBox = tuple[float, float, float, float]  # min_x, min_y, max_x, max_y
 Polygon = list[Point]
 
 EDGE_CUTS = "Edge.Cuts"
@@ -195,19 +198,36 @@ class Board:
     def outline_graphics(self) -> list[Graphic]:
         return [g for g in self.graphics if g.layer == EDGE_CUTS]
 
-    def bounding_box(self) -> tuple[float, float, float, float] | None:
-        """(min_x, min_y, max_x, max_y) of the board outline, else of all items."""
-        pts: list[Point] = [p for g in self.outline_graphics() for p in _graphic_extent(g)]
-        if not pts:
-            pts = [p for g in self.graphics for p in _graphic_extent(g)]
-            pts += [t.start for t in self.tracks] + [t.end for t in self.tracks]
-            pts += [p.position for p in self.pads()]
-            pts += [v.position for v in self.vias]
-        if not pts:
-            return None
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-        return (min(xs), min(ys), max(xs), max(ys))
+    @property
+    def has_outline(self) -> bool:
+        return any(g.layer == EDGE_CUTS for g in self.graphics)
+
+    def outline_bounding_box(self) -> BBox | None:
+        """(min_x, min_y, max_x, max_y) of the Edge.Cuts outline, or None if there is none."""
+        return _bbox([p for g in self.outline_graphics() for p in _graphic_extent(g)])
+
+    def copper_bounding_box(self) -> BBox | None:
+        """Extent of all copper: zones, tracks (with width), pads and vias (with size)."""
+        pts: list[Point] = []
+        for zone in self.zones:
+            if not zone.is_rule_area:
+                pts += zone.outline
+                pts += [p for polys in zone.fills.values() for poly in polys for p in poly]
+        pts += [p for g in self.graphics if g.layer != EDGE_CUTS for p in _graphic_extent(g)]
+        for t in self.tracks:
+            pts += _grow([t.start, t.end], t.width / 2)
+        for a in self.arcs:
+            pts += _grow(arc_extent(a.start, a.mid, a.end), a.width / 2)
+        for pad in self.pads():
+            # Half-diagonal covers the pad at any rotation.
+            pts += _grow([pad.position], math.hypot(*pad.size) / 2)
+        for v in self.vias:
+            pts += _grow([v.position], v.diameter / 2)
+        return _bbox(pts)
+
+    def bounding_box(self) -> BBox | None:
+        """Board outline extent, falling back to the copper extent if there is no outline."""
+        return self.outline_bounding_box() or self.copper_bounding_box()
 
 
 @dataclass
@@ -220,9 +240,26 @@ class Project:
     settings: dict = field(default_factory=dict)  # raw .kicad_pro JSON
 
 
+def _bbox(pts: list[Point]) -> BBox | None:
+    if not pts:
+        return None
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _grow(pts: list[Point], r: float) -> list[Point]:
+    """Corners of the boxes of half-size ``r`` around each point."""
+    return [q for x, y in pts for q in ((x - r, y - r), (x + r, y + r))]
+
+
 def _graphic_extent(g: Graphic) -> list[Point]:
     if g.kind == "circle":
         (cx, cy), (px, py) = g.points
         r = ((px - cx) ** 2 + (py - cy) ** 2) ** 0.5
         return [(cx - r, cy - r), (cx + r, cy + r)]
+    if g.kind == "arc":
+        return arc_extent(*g.points)
+    if g.kind == "bezier" and len(g.points) == 4:
+        return bezier_points(*g.points)
     return g.points

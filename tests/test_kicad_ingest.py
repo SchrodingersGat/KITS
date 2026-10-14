@@ -1,9 +1,11 @@
 import math
+from pathlib import Path
 
 import pytest
 
 from kits.ingest import BoardLoadError, load_board, load_project
-from kits.ingest.geometry import arc_points, rotate
+from kits.ingest.geometry import arc_extent, arc_points, rotate
+from kits.ingest.model import Graphic
 
 from .conftest import kicad_demo_projects
 
@@ -110,6 +112,50 @@ def test_arc_points_pass_through_mid():
     assert pts[0] == (0, 0) and pts[-1] == (2, 0)
     assert all(math.hypot(x - 1, y) == pytest.approx(1) for x, y in pts)
     assert max(y for _, y in pts) == pytest.approx(1, abs=1e-3)
+
+
+def test_arc_extent_includes_bulge():
+    # Arc over the top of the unit circle with an off-centre mid, so none of
+    # its three defining points is the extreme (0, -1).
+    s = 2**-0.5
+    xs, ys = zip(*arc_extent((s, -s), (0.2, -((1 - 0.04) ** 0.5)), (-s, -s)), strict=True)
+    assert min(ys) == pytest.approx(-1)
+    # Same arc going the long way round (through the bottom).
+    xs, ys = zip(*arc_extent((s, -s), (0, 1), (-s, -s)), strict=True)
+    assert (min(xs), max(xs), max(ys)) == pytest.approx((-1, 1, 1))
+
+
+def test_bounding_box_includes_arc_bulge(board_v9_path):
+    b = load_board(board_v9_path)
+    # A rounded corner bulging past the 40 x 30 outline.
+    b.graphics.append(Graphic("arc", "Edge.Cuts", [(40, 0), (45, 5), (40, 10)], 0.1))
+    assert b.bounding_box() == pytest.approx((0, 0, 45, 30))
+
+
+def test_board_without_outline(board_v10_path):
+    b = load_board(board_v10_path)
+    assert not b.has_outline
+    assert b.outline_bounding_box() is None
+    # Falls back to the copper extent, including pad size and zones, rather
+    # than collapsing to pad centres.
+    assert b.bounding_box() == b.copper_bounding_box()
+    x0, y0, x1, y1 = b.bounding_box()
+    assert x0 == pytest.approx(-0.1) and y0 == pytest.approx(-0.1)  # 0.2 mm track at (0, 0)
+    assert x1 == pytest.approx(5 + 0.5**0.5) and y1 == pytest.approx(5 + 0.5**0.5)
+
+
+def test_example_simple_in_out():
+    # The example's rectangle is on Eco2.User, not Edge.Cuts, so KiCad itself
+    # reports no board outline either.
+    path = Path(__file__).parent.parent / "examples" / "Simple-In-Out" / "Simple-In-Out.kicad_pro"
+    if not path.is_file():
+        pytest.skip("example project not present")
+    b = load_project(path).board
+    assert b.version == 20260206
+    assert not b.has_outline
+    assert {p.net for p in b.pads()} == {"/NET"}
+    x0, y0, x1, y1 = b.bounding_box()
+    assert (x1 - x0, y1 - y0) > (20, 5)  # covers the zones, not just pad centres
 
 
 @pytest.mark.parametrize("project", kicad_demo_projects(), ids=lambda p: p.stem)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from .model import Point
+Point = tuple[float, float]
 
 
 def rotate(point: Point, angle_deg: float) -> Point:
@@ -38,11 +38,8 @@ def arc_center(start: Point, mid: Point, end: Point) -> Point | None:
     return (ux, uy)
 
 
-def arc_points(start: Point, mid: Point, end: Point, max_step_deg: float = 5.0) -> list[Point]:
-    """Approximate a three-point arc as a polyline from ``start`` to ``end``."""
-    center = arc_center(start, mid, end)
-    if center is None:
-        return [start, end]
+def _arc_sweep(start: Point, mid: Point, end: Point, center: Point) -> tuple[float, float, float]:
+    """(radius, start angle, signed sweep) in radians of a three-point arc."""
     cx, cy = center
     r = math.hypot(start[0] - cx, start[1] - cy)
     a0 = math.atan2(start[1] - cy, start[0] - cx)
@@ -55,7 +52,49 @@ def arc_points(start: Point, mid: Point, end: Point, max_step_deg: float = 5.0) 
         sweep -= 2 * math.pi
     if abs(sweep) < 1e-12:
         sweep = 2 * math.pi  # start == end: full circle
+    return r, a0, sweep
 
+
+def arc_extent(start: Point, mid: Point, end: Point) -> list[Point]:
+    """Points whose bounding box is exactly that of the arc.
+
+    The endpoints plus every axis-extreme point (0/90/180/270 deg) the arc
+    passes through — the bulge of an arc can lie well outside its three
+    defining points.
+    """
+    center = arc_center(start, mid, end)
+    if center is None:
+        return [start, end]
+    r, a0, sweep = _arc_sweep(start, mid, end, center)
+    pts = [start, end]
+    for k in range(4):
+        cardinal = k * math.pi / 2
+        offset = (cardinal - a0) % (2 * math.pi) if sweep > 0 else (a0 - cardinal) % (2 * math.pi)
+        if offset <= abs(sweep):
+            pts.append((center[0] + r * math.cos(cardinal), center[1] + r * math.sin(cardinal)))
+    return pts
+
+
+def bezier_points(p0: Point, c1: Point, c2: Point, p3: Point, steps: int = 32) -> list[Point]:
+    """Sample a cubic Bézier curve."""
+    pts = []
+    for i in range(steps + 1):
+        t = i / steps
+        u = 1 - t
+        a, b, c, d = u * u * u, 3 * u * u * t, 3 * u * t * t, t * t * t
+        pts.append(
+            (a * p0[0] + b * c1[0] + c * c2[0] + d * p3[0], a * p0[1] + b * c1[1] + c * c2[1] + d * p3[1])
+        )
+    return pts
+
+
+def arc_points(start: Point, mid: Point, end: Point, max_step_deg: float = 5.0) -> list[Point]:
+    """Approximate a three-point arc as a polyline from ``start`` to ``end``."""
+    center = arc_center(start, mid, end)
+    if center is None:
+        return [start, end]
+    cx, cy = center
+    r, a0, sweep = _arc_sweep(start, mid, end, center)
     steps = max(2, math.ceil(abs(math.degrees(sweep)) / max_step_deg))
     pts = [
         (cx + r * math.cos(a0 + sweep * i / steps), cy + r * math.sin(a0 + sweep * i / steps))

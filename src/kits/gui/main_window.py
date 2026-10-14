@@ -133,8 +133,9 @@ class MainWindow(QMainWindow):
             log.exception("Unexpected error while loading board")
             QApplication.restoreOverrideCursor()
             self.statusBar().clearMessage()
-            QMessageBox.critical(self, "Could not open board",
-                                 f"Unexpected error while loading the board:\n{exc!r}")
+            QMessageBox.critical(
+                self, "Could not open board", f"Unexpected error while loading the board:\n{exc!r}"
+            )
             return False
         QApplication.restoreOverrideCursor()
         return True
@@ -172,9 +173,17 @@ class MainWindow(QMainWindow):
             )
             self.view.fit_to_rect(self.scene.board_rect())
             b = project.board
-            self.statusBar().showMessage(
-                f"Loaded {b.path.name}: {len(b.copper_layers)} copper layers, "
-                f"{len(b.footprints)} footprints, {len(b.tracks) + len(b.arcs)} tracks", 5000)
+            if b.has_outline:
+                self.statusBar().showMessage(
+                    f"Loaded {b.path.name}: {len(b.copper_layers)} copper layers, "
+                    f"{len(b.footprints)} footprints, {len(b.tracks) + len(b.arcs)} tracks",
+                    5000,
+                )
+            else:
+                # Left up until the next message: the board can't be simulated like this.
+                self.statusBar().showMessage(
+                    f"Warning: {b.path.name} has no board outline — nothing is drawn on Edge.Cuts"
+                )
         else:
             self.layer_panel.set_layers([])
 

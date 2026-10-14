@@ -43,6 +43,7 @@ HOLES = "Holes"
 MODEL_ROLE = 0
 
 _Z_ZONE, _Z_GRAPHIC, _Z_TRACK, _Z_PAD = 0, 1, 2, 3
+_EDGE_CUTS_PX = 1.5
 
 
 @dataclass
@@ -78,6 +79,14 @@ def _round_pen(color: QColor, width: float) -> QPen:
     if width <= 0:
         pen.setCosmetic(True)
         pen.setWidthF(1.0)
+    return pen
+
+
+def _cosmetic_pen(color: QColor, pixels: float) -> QPen:
+    pen = QPen(color, pixels)
+    pen.setCosmetic(True)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     return pen
 
 
@@ -160,10 +169,13 @@ class BoardScene(QGraphicsScene):
             if g.layer == EDGE_CUTS:
                 path, _ = graphic_outline(g)
                 item = QGraphicsPathItem(path, edge_layer)
-                item.setPen(_round_pen(colors.EDGE_CUTS, g.width))
+                # The outline is a cut line, not copper: draw it at a fixed
+                # on-screen width so it stays visible at any zoom level.
+                item.setPen(_cosmetic_pen(colors.EDGE_CUTS, _EDGE_CUTS_PX))
             elif g.layer in self.layers:
-                item = self._path_item(graphic_copper(g), g.layer, _Z_GRAPHIC,
-                                       brush=self.layers[g.layer].color)
+                item = self._path_item(
+                    graphic_copper(g), g.layer, _Z_GRAPHIC, brush=self.layers[g.layer].color
+                )
                 item.setToolTip(_net_tip(g.net))
             else:
                 continue
@@ -181,8 +193,9 @@ class BoardScene(QGraphicsScene):
         for a in board.arcs:
             if a.layer not in self.layers:
                 continue
-            item = QGraphicsPathItem(polyline_path(arc_points(a.start, a.mid, a.end)),
-                                     self.layers[a.layer].item)
+            item = QGraphicsPathItem(
+                polyline_path(arc_points(a.start, a.mid, a.end)), self.layers[a.layer].item
+            )
             item.setPen(_round_pen(self.layers[a.layer].color, a.width))
             item.setZValue(_Z_TRACK)
             item.setToolTip(f"Arc track {a.width:g} mm on {a.layer}\n{_net_tip(a.net)}")
@@ -195,8 +208,9 @@ class BoardScene(QGraphicsScene):
             item = QGraphicsPathItem(circle_path(v.position, v.diameter / 2), via_layer)
             item.setPen(_no_pen())
             item.setBrush(colors.VIAS)
-            item.setToolTip(f"Via {v.diameter:g}/{v.drill:g} mm ({v.layers[0]}–{v.layers[1]})\n"
-                            f"{_net_tip(v.net)}")
+            item.setToolTip(
+                f"Via {v.diameter:g}/{v.drill:g} mm ({v.layers[0]}–{v.layers[1]})\n{_net_tip(v.net)}"
+            )
             item.setData(MODEL_ROLE, v)
             if v.drill > 0:
                 hole = QGraphicsPathItem(circle_path(v.position, v.drill / 2), hole_layer)

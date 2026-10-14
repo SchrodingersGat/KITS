@@ -555,7 +555,7 @@
 			(type default)
 		)
 		(fill no)
-		(layer "Eco2.User")
+		(layer "Edge.Cuts")
 		(uuid "2da88858-2643-4a2f-a27d-3e4a8b0a7505")
 	)
 	(zone
