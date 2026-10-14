@@ -20,6 +20,7 @@ from ..config import (
     HeatLoad,
     HeatLoadKind,
     MeshSettings,
+    ResistiveElement,
     SolveSettings,
     current_multiplier_from_value,
 )
@@ -40,6 +41,7 @@ class Document(QObject):
         settings_changed(): Project settings (e.g. mesh sizes) were edited.
         sources_changed(): Current sources (or the current multiplier) were edited.
         heat_loads_changed(): Heat loads were added, edited or removed.
+        elements_changed(): Resistive elements were added, edited or removed.
         dirty_changed(bool): The project gained or lost unsaved changes.
         mesh_changed(BoardMesh | None): A mesh was built, or cleared.
         results_changed(SolveResults | None): A solve finished, or results were cleared.
@@ -51,6 +53,7 @@ class Document(QObject):
     settings_changed = Signal()
     sources_changed = Signal()
     heat_loads_changed = Signal()
+    elements_changed = Signal()
     dirty_changed = Signal(bool)
     mesh_changed = Signal(object)
     results_changed = Signal(object)
@@ -225,7 +228,9 @@ class Document(QObject):
         """
         mesh_fp = MeshFingerprint(settings=settings_hash(self._project.mesh), board=self._board_hash)
         project = self._project
-        return mesh_fp, inputs_hash(project.scaled_current_sources(), project.solve, project.heat_loads)
+        return mesh_fp, inputs_hash(
+            project.scaled_current_sources(), project.solve, project.heat_loads, project.resistive_elements
+        )
 
     def _load_saved_results(self) -> tuple[SolveResults | None, str | None]:
         """Load the project's saved results if they match the current inputs.
@@ -583,6 +588,83 @@ class Document(QObject):
         """Mark the project dirty and announce the change."""
         self._set_dirty(True)
         self.heat_loads_changed.emit()
+
+    # -- resistive elements ------------------------------------------------------------
+
+    @property
+    def resistive_elements(self) -> list[ResistiveElement]:
+        """The open project's resistive elements (a copy; use the methods below to edit)."""
+        return list(self._project.resistive_elements) if self._project else []
+
+    def resistive_element(self, name: str) -> ResistiveElement | None:
+        """Return a resistive element by name.
+
+        Args:
+            name: Element name.
+
+        Returns:
+            The element, or None.
+        """
+        return next((e for e in self.resistive_elements if e.name == name), None)
+
+    def add_resistive_element(self, element: ResistiveElement) -> None:
+        """Add a resistive element (in memory; save to persist).
+
+        Args:
+            element: The new element.
+
+        Raises:
+            ConfigError: If no project is open, the name is taken, or the element is invalid.
+        """
+        project = self._require_project()
+        element.validate()
+        if self.resistive_element(element.name) is not None:
+            raise ConfigError(f"there is already a resistive element named {element.name!r}")
+        project.resistive_elements.append(element)
+        self._elements_edited()
+
+    def update_resistive_element(self, name: str, element: ResistiveElement) -> None:
+        """Replace a resistive element (it may be renamed).
+
+        Args:
+            name: Current name of the element to replace.
+            element: The new definition.
+
+        Raises:
+            ConfigError: If there is no such element, the new name is taken, or it is invalid.
+        """
+        project = self._require_project()
+        element.validate()
+        if element.name != name and self.resistive_element(element.name) is not None:
+            raise ConfigError(f"there is already a resistive element named {element.name!r}")
+        for i, old in enumerate(project.resistive_elements):
+            if old.name == name:
+                if old != element:
+                    project.resistive_elements[i] = element
+                    self._elements_edited()
+                return
+        raise ConfigError(f"there is no resistive element named {name!r}")
+
+    def remove_resistive_element(self, name: str) -> None:
+        """Remove a resistive element.
+
+        Args:
+            name: Element name.
+
+        Raises:
+            ConfigError: If there is no such element.
+        """
+        project = self._require_project()
+        remaining = [e for e in project.resistive_elements if e.name != name]
+        if len(remaining) == len(project.resistive_elements):
+            raise ConfigError(f"there is no resistive element named {name!r}")
+        project.resistive_elements = remaining
+        self._elements_edited()
+
+    def _elements_edited(self) -> None:
+        """Mark the project dirty and announce the change."""
+        self._set_dirty(True)
+        self.elements_changed.emit()
 
     @property
     def solve_settings(self) -> SolveSettings:

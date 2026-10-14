@@ -377,6 +377,199 @@ def heat_loads_from_list(data) -> list[HeatLoad]:
 
 
 @dataclass
+class PadGroup:
+    """A named set of a footprint's pads that act as one terminal of an element.
+
+    Attributes:
+        name: Terminal name, e.g. ``"D"`` or a net name.
+        pads: Pad numbers; every pad with each number is included.
+    """
+
+    name: str
+    pads: list[str]
+
+    def to_dict(self) -> dict:
+        """Return the YAML representation.
+
+        Returns:
+            Mapping with ``name`` and ``pads``.
+        """
+        return {"name": self.name, "pads": list(self.pads)}
+
+    @classmethod
+    def from_dict(cls, data, which: str) -> PadGroup:
+        """Build a pad group from its YAML mapping.
+
+        Args:
+            data: The parsed mapping.
+            which: Key it was read from (``"pads_a"``/``"pads_b"``), for error messages.
+
+        Returns:
+            The pad group (not yet validated).
+
+        Raises:
+            ConfigError: If the entry is malformed.
+        """
+        if not isinstance(data, dict) or not isinstance(data.get("pads"), list):
+            raise ConfigError(f"'{which}' must be a mapping with a name and a list of pads")
+        return cls(name=str(data.get("name", "")), pads=[str(p) for p in data["pads"]])
+
+
+@dataclass
+class ResistiveElement:
+    """A lumped resistor between two pad groups of one footprint (resistor, MOSFET, fuse...).
+
+    Current through it is ``(V_a - V_b) / R`` from the area-weighted mean
+    potentials of the two groups; its ``I²R`` heats the element body, which is
+    tied to its pads and to ambient.
+
+    Attributes:
+        name: Unique element name, e.g. ``"R5"`` or ``"Q1 channel"``.
+        ref: Footprint reference the pads belong to.
+        group_a: One terminal's pads.
+        group_b: The other terminal's pads.
+        resistance_ohm: Resistance between the groups, Ω.
+        thermal_resistance_board_k_w: Body-to-pads thermal resistance, K/W; None
+            for ideal contact (the heat goes straight into the pads' copper).
+        thermal_resistance_ambient_k_w: Body-to-ambient thermal resistance, K/W;
+            None for convection from the body (``1 / (h · area)``, see
+            :func:`kits.solve.elements.default_ambient_conductance`).
+    """
+
+    name: str
+    ref: str
+    group_a: PadGroup
+    group_b: PadGroup
+    resistance_ohm: float
+    thermal_resistance_board_k_w: float | None = None
+    thermal_resistance_ambient_k_w: float | None = None
+
+    @property
+    def groups(self) -> tuple[PadGroup, PadGroup]:
+        """``(group_a, group_b)``."""
+        return (self.group_a, self.group_b)
+
+    @property
+    def all_pads(self) -> list[str]:
+        """Pad numbers of both groups."""
+        return [*self.group_a.pads, *self.group_b.pads]
+
+    def validate(self) -> None:
+        """Check the names, pad groups, resistance and thermal resistances.
+
+        Raises:
+            ConfigError: If a name or reference is empty, a group has no pads, the
+                groups share a pad, or a resistance isn't a positive finite number.
+        """
+        if not self.name or not self.ref:
+            raise ConfigError("a resistive element needs a name and a footprint reference")
+        for group in self.groups:
+            if not group.name:
+                raise ConfigError(f"element {self.name}: each pad group needs a name")
+            if not group.pads:
+                raise ConfigError(f"element {self.name}: pad group {group.name!r} has no pads")
+        shared = set(self.group_a.pads) & set(self.group_b.pads)
+        if shared:
+            raise ConfigError(f"element {self.name}: pad {', '.join(sorted(shared))} is in both groups")
+        values = {
+            "resistance": self.resistance_ohm,
+            "thermal resistance to board": self.thermal_resistance_board_k_w,
+            "thermal resistance to ambient": self.thermal_resistance_ambient_k_w,
+        }
+        for label, value in values.items():
+            if value is not None and not (math.isfinite(value) and value > 0):
+                raise ConfigError(f"element {self.name}: {label} must be a positive number")
+
+    def to_dict(self) -> dict:
+        """Return the YAML representation.
+
+        Returns:
+            Mapping with ``name``, ``ref``, ``resistance_ohm``, ``pads_a``, ``pads_b``
+            and the thermal resistances that aren't defaulted.
+        """
+        data = {
+            "name": self.name,
+            "ref": self.ref,
+            "resistance_ohm": self.resistance_ohm,
+            "pads_a": self.group_a.to_dict(),
+            "pads_b": self.group_b.to_dict(),
+        }
+        if self.thermal_resistance_board_k_w is not None:
+            data["thermal_resistance_board_k_w"] = self.thermal_resistance_board_k_w
+        if self.thermal_resistance_ambient_k_w is not None:
+            data["thermal_resistance_ambient_k_w"] = self.thermal_resistance_ambient_k_w
+        return data
+
+    @classmethod
+    def from_dict(cls, data) -> ResistiveElement:
+        """Build an element from one entry of the ``resistive_elements:`` list.
+
+        Args:
+            data: The parsed entry.
+
+        Returns:
+            The validated element.
+
+        Raises:
+            ConfigError: If the entry is malformed.
+        """
+        if not isinstance(data, dict):
+            raise ConfigError("each resistive element must be a mapping")
+
+        def optional(key: str) -> float | None:
+            """Read an optional number.
+
+            Args:
+                key: The mapping key.
+
+            Returns:
+                The value, or None if absent.
+            """
+            return None if data.get(key) is None else float(data[key])
+
+        try:
+            element = cls(
+                name=str(data["name"]),
+                ref=str(data["ref"]),
+                group_a=PadGroup.from_dict(data.get("pads_a"), "pads_a"),
+                group_b=PadGroup.from_dict(data.get("pads_b"), "pads_b"),
+                resistance_ohm=float(data["resistance_ohm"]),
+                thermal_resistance_board_k_w=optional("thermal_resistance_board_k_w"),
+                thermal_resistance_ambient_k_w=optional("thermal_resistance_ambient_k_w"),
+            )
+        except KeyError as exc:
+            raise ConfigError(f"resistive element is missing {exc.args[0]!r}") from exc
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"invalid resistive element: {exc}") from exc
+        element.validate()
+        return element
+
+
+def resistive_elements_from_list(data) -> list[ResistiveElement]:
+    """Parse the ``resistive_elements:`` section.
+
+    Args:
+        data: The parsed list, or None if the section is absent.
+
+    Returns:
+        The elements, in file order.
+
+    Raises:
+        ConfigError: If the section isn't a list, an entry is invalid, or a name repeats.
+    """
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        raise ConfigError("'resistive_elements' must be a list")
+    elements = [ResistiveElement.from_dict(item) for item in data]
+    names = [e.name for e in elements]
+    for name in names:
+        if names.count(name) > 1:
+            raise ConfigError(f"more than one resistive element is named {name!r}")
+    return elements
+
+
+@dataclass
 class SolveSettings:
     """Material and boundary-condition inputs for the solver.
 

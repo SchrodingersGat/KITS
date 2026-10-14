@@ -214,6 +214,7 @@ class SolvePanel(QWidget):
             document.board_changed,
             document.sources_changed,
             document.heat_loads_changed,
+            document.elements_changed,
             document.settings_changed,
             document.results_changed,
         ):
@@ -428,6 +429,13 @@ class SolvePanel(QWidget):
             for label, heat in sorted(results.load_heat.items()):
                 temperature = format_value(results.load_temperatures[label], DisplayMode.TEMPERATURE)
                 lines.append(f"  {label}: {heat:+.4g} W, {temperature}")
+            if results.element_temperatures:
+                lines.append("Resistive elements (current, power, body temperature):")
+            for name, body in sorted(results.element_temperatures.items()):
+                current = results.element_currents.get(name, 0.0)
+                power = results.element_power.get(name, 0.0)
+                temperature = format_value(body, DisplayMode.TEMPERATURE)
+                lines.append(f"  {name}: {current:+.4g} A, {power:.4g} W, {temperature}")
             if doc.results_from_file:
                 lines.append("Reloaded from the project's saved results.")
             staleness = doc.results_staleness

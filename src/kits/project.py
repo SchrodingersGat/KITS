@@ -28,10 +28,12 @@ from .config import (
     CurrentSource,
     HeatLoad,
     MeshSettings,
+    ResistiveElement,
     SolveSettings,
     current_multiplier_from_value,
     current_sources_from_list,
     heat_loads_from_list,
+    resistive_elements_from_list,
 )
 
 PROJECT_SUFFIX = ".kits"
@@ -61,6 +63,7 @@ class KitsProject:
         current_sources: Currents fed into / drawn from the board at pads.
         current_multiplier: Scale applied to every source's current when solving.
         heat_loads: Heat sources and sinks applied to pads.
+        resistive_elements: Lumped resistors between pad groups (resistors, MOSFETs...).
         solve: Materials, convection and ambient temperature for the solver.
         extra: Top-level keys KITS doesn't interpret yet, kept so saving doesn't drop them.
     """
@@ -71,6 +74,7 @@ class KitsProject:
     current_sources: list[CurrentSource] = field(default_factory=list)
     current_multiplier: float = 1.0
     heat_loads: list[HeatLoad] = field(default_factory=list)
+    resistive_elements: list[ResistiveElement] = field(default_factory=list)
     solve: SolveSettings = field(default_factory=SolveSettings)
     extra: dict = field(default_factory=dict)
 
@@ -142,8 +146,8 @@ class KitsProject:
 
         Returns:
             Mapping with ``board``, ``mesh``, the solver sections, ``current_multiplier``
-            (unless 1), ``current_sources`` and ``heat_loads`` (if any) and any
-            preserved extra keys.
+            (unless 1), ``current_sources``, ``heat_loads`` and
+            ``resistive_elements`` (if any) and any preserved extra keys.
         """
         data: dict = {"board": self.board_reference(), "mesh": self.mesh.to_dict()}
         data.update(self.solve.to_sections())
@@ -153,6 +157,8 @@ class KitsProject:
             data["current_sources"] = [s.to_dict() for s in self.current_sources]
         if self.heat_loads:
             data["heat_loads"] = [h.to_dict() for h in self.heat_loads]
+        if self.resistive_elements:
+            data["resistive_elements"] = [e.to_dict() for e in self.resistive_elements]
         data.update({k: v for k, v in self.extra.items() if k not in data})
         return data
 
@@ -175,6 +181,7 @@ class KitsProject:
         current_multiplier_from_value(self.current_multiplier)
         for load in self.heat_loads:
             load.validate()
+        resistive_elements_from_list([e.to_dict() for e in self.resistive_elements])
         target = _normalise(path) if path is not None else self.path
         try:
             target.write_text(yaml.safe_dump(self._dict_for(target), sort_keys=False), encoding="utf-8")
@@ -229,6 +236,7 @@ def load_kits_project(path: str | Path) -> KitsProject:
     sources = current_sources_from_list(data.pop("current_sources", None))
     multiplier = current_multiplier_from_value(data.pop("current_multiplier", None))
     heat_loads = heat_loads_from_list(data.pop("heat_loads", None))
+    elements = resistive_elements_from_list(data.pop("resistive_elements", None))
     solve = SolveSettings.from_sections(
         data.pop("ambient_temperature_c", None), data.pop("materials", None), data.pop("convection", None)
     )
@@ -239,6 +247,7 @@ def load_kits_project(path: str | Path) -> KitsProject:
         current_sources=sources,
         current_multiplier=multiplier,
         heat_loads=heat_loads,
+        resistive_elements=elements,
         solve=solve,
         extra=data,
     )

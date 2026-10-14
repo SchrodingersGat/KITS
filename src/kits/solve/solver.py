@@ -29,10 +29,11 @@ import shapely
 from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import spsolve
 
-from ..config import HeatLoad, HeatLoadKind, SolveSettings
+from ..config import HeatLoad, HeatLoadKind, ResistiveElement, SolveSettings
 from ..ingest.model import Board
 from ..mesh.geometry import board_holes, pad_area
 from ..mesh.model import BoardMesh
+from .elements import default_ambient_conductance
 from .fem import (
     MM,
     LayerFEM,
@@ -86,7 +87,10 @@ class DCResult:
         barrel_heat: Global nodal Joule power from via/plated barrels, W.
         electrode_currents: Current into the board at each electrode, A.
         electrode_voltages: Area-weighted mean potential of each electrode's pad, V.
-        total_power: Total Joule power, W.
+        total_power: Total Joule power, W, including resistive elements.
+        element_currents: Current through each resistive element from group A to
+            group B, A, keyed by element name.
+        element_power: ``I²R`` of each resistive element, W, keyed by element name.
     """
 
     layers: list[str]
@@ -97,6 +101,8 @@ class DCResult:
     electrode_currents: dict[tuple[str, str], float]
     electrode_voltages: dict[tuple[str, str], float]
     total_power: float
+    element_currents: dict[str, float] = field(default_factory=dict)
+    element_power: dict[str, float] = field(default_factory=dict)
 
     def resistance(self, a: tuple[str, str], b: tuple[str, str]) -> float:
         """Resistance between two voltage electrodes.
@@ -117,17 +123,23 @@ class ThermalResult:
 
     Attributes:
         temperature: Nodal temperature per layer, °C.
-        convected_power: Heat leaving by convection, W. At steady state it equals
-            the Joule power plus the net heat of all heat loads.
+        convected_power: Heat leaving the board surfaces by convection, W. At
+            steady state, it plus the heat resistive elements shed to ambient
+            equals the Joule power plus the net heat of all heat loads.
         load_heat: Heat into the board at each heat load's pad, W (negative where
             a sink takes heat out), keyed ``(ref, pad)``.
         load_temperatures: Area-weighted mean temperature of each heat load's pad, °C.
+        element_temperatures: Body temperature of each resistive element, °C (its
+            pads' mean temperature when the board contact is ideal), keyed by name.
+        element_ambient_heat: Heat each resistive element sheds straight to ambient, W.
     """
 
     temperature: dict[str, np.ndarray]
     convected_power: float
     load_heat: dict[tuple[str, str], float] = field(default_factory=dict)
     load_temperatures: dict[tuple[str, str], float] = field(default_factory=dict)
+    element_temperatures: dict[str, float] = field(default_factory=dict)
+    element_ambient_heat: dict[str, float] = field(default_factory=dict)
 
     @property
     def max_temperature(self) -> float:
@@ -187,28 +199,37 @@ class LayeredModel:
         """
         return self.pad_nodes(electrode.ref, electrode.pad)
 
-    def pad_nodes(self, ref: str, number: str) -> tuple[np.ndarray, np.ndarray]:
-        """Global nodes covered by a pad, with their lumped area weights.
+    def pad_nodes(self, ref: str, number: str | Sequence[str]) -> tuple[np.ndarray, np.ndarray]:
+        """Global nodes covered by a pad (or several), with their lumped area weights.
 
         Args:
             ref: Footprint reference.
-            number: Pad number; every pad of the footprint with it is included.
+            number: Pad number, or several (a pad group); every pad of the
+                footprint with one of them is included.
 
         Returns:
-            ``(nodes, weights)``: global node indices on the pad's copper (all
-            its layers) and each node's share of the pad's copper area.
+            ``(nodes, weights)``: global node indices on the pads' copper (all
+            their layers) and each node's share of the pads' copper area.
 
         Raises:
-            SolveError: If the pad doesn't exist or has no meshed copper.
+            SolveError: If a pad doesn't exist or none has meshed copper.
         """
-        pads = [p for p in self.board.find_pads(ref, number) if p.layers]
-        if not pads:
-            raise SolveError(f"no pad {ref}.{number} with copper on the board")
-        area = shapely.union_all([pad_area(p) for p in pads]).buffer(1e-6)
-        pad_layers = {layer for p in pads for layer in p.layers}
+        numbers = [number] if isinstance(number, str) else list(number)
+        label = f"{ref}.{','.join(numbers)}"
+        pads = []
+        for n in numbers:
+            found = [p for p in self.board.find_pads(ref, n) if p.layers]
+            if not found:
+                raise SolveError(f"no pad {ref}.{n} with copper on the board")
+            pads += found
+        areas = {
+            layer: shapely.union_all([pad_area(p) for p in pads if layer in p.layers]).buffer(1e-6)
+            for layer in {layer for p in pads for layer in p.layers}
+        }
         nodes, weights = [], []
         for lf in self.layers:
-            if lf.layer not in pad_layers:
+            area = areas.get(lf.layer)
+            if area is None:
                 continue
             t = lf.mesh.t[:, lf.copper]
             centroids = lf.nodes_mm[t].mean(axis=0)
@@ -221,7 +242,7 @@ class LayeredModel:
             nodes.append(lf.offset + local)
             weights.append(lumped[local])
         if not nodes:
-            raise SolveError(f"pad {ref}.{number} has no copper in the mesh")
+            raise SolveError(f"pad {label} has no copper in the mesh")
         weights = np.concatenate(weights)
         return np.concatenate(nodes), weights / weights.sum()
 
@@ -261,7 +282,9 @@ class LayeredModel:
         sigma_t = self.settings.copper_conductivity_s_m * self.copper_thickness[lf.layer]
         return np.where(lf.copper, sigma_t, 0.0)
 
-    def solve_dc(self, electrodes: Sequence[Electrode]) -> DCResult:
+    def solve_dc(
+        self, electrodes: Sequence[Electrode], elements: Sequence[ResistiveElement] = ()
+    ) -> DCResult:
         """Solve for potentials and currents with the given electrodes.
 
         Voltage electrodes are equipotential pads. Current electrodes spread their
@@ -269,14 +292,20 @@ class LayeredModel:
         first sink (negative current) is grounded and its current follows from the
         others, which must then sum to zero.
 
+        A resistive element's pad groups are its terminals: each group is
+        equipotential (its pads are soldered to one lead frame or end cap, so its
+        nodes are merged into one unknown), and a conductance ``1/R`` joins the two.
+
         Args:
             electrodes: The pads driving the board.
+            elements: Lumped resistors between pad groups.
 
         Returns:
             The DC solution.
 
         Raises:
-            SolveError: If no reference voltage can be set or currents don't balance.
+            SolveError: If no reference voltage can be set, currents don't balance,
+                or a pad can't be found.
         """
         s = self.settings
         sheets = [sheet_matrix(lf, self.sheet_conductance(lf)) for lf in self.layers]
@@ -307,14 +336,39 @@ class LayeredModel:
             elif e.current is not None:
                 rhs[nodes] += e.current * weights
 
-        _check_connectivity(k, rhs, fixed, electrode_nodes)
-        voltage = _solve_with_fixed(k, rhs, fixed, values)
+        # Merge each element terminal's nodes into one unknown: x = merge @ y.
+        terminals = {e.name: tuple(self.pad_nodes(e.ref, g.pads)[0] for g in e.groups) for e in elements}
+        merge = _merge_matrix(self.size, [nodes for pair in terminals.values() for nodes in pair])
+        label = merge.indices  # reduced unknown of each node (one entry per row)
+        size = merge.shape[1]
+        k_r = merge.T @ k @ merge
+        for e in elements:
+            a, b = (label[nodes[0]] for nodes in terminals[e.name])
+            k_r = k_r + _rank_one(np.array([a, b]), np.array([1.0, -1.0]), 1.0 / e.resistance_ohm, size)
+        k_r = k_r.tocsr()
+        rhs_r = merge.T @ rhs
+        fixed_r = np.zeros(size, dtype=bool)
+        fixed_r[label[fixed]] = True
+        values_r = np.zeros(size)
+        values_r[label[fixed]] = values[fixed]
+        reduced_nodes = {key: (np.unique(label[nodes]), None) for key, (nodes, _) in electrode_nodes.items()}
 
-        residual = k @ voltage - rhs  # current into the board at fixed nodes
+        _check_connectivity(k_r, rhs_r, fixed_r, reduced_nodes)
+        y = _solve_with_fixed(k_r, rhs_r, fixed_r, values_r)
+        voltage = y[label]
+
+        residual = k_r @ y - rhs_r  # current into the board at fixed unknowns
         currents, potentials = {}, {}
         for key, (nodes, weights) in electrode_nodes.items():
-            currents[key] = float(residual[nodes].sum() + rhs[nodes].sum())
+            currents[key] = float(residual[reduced_nodes[key][0]].sum() + rhs[nodes].sum())
             potentials[key] = float(voltage[nodes] @ weights)
+
+        element_currents, element_power = {}, {}
+        for e in elements:
+            a, b = (label[nodes[0]] for nodes in terminals[e.name])
+            current = float(y[a] - y[b]) / e.resistance_ohm
+            element_currents[e.name] = current
+            element_power[e.name] = current**2 * e.resistance_ohm
 
         by_layer, density, sheet_power = {}, {}, {}
         total_power = 0.0
@@ -333,6 +387,7 @@ class LayeredModel:
             barrel_heat[a] += p / 2
             barrel_heat[b] += p / 2
         total_power += float(barrel_heat.sum())
+        total_power += sum(element_power.values())
 
         result = DCResult(
             layers=[lf.layer for lf in self.layers],
@@ -343,12 +398,19 @@ class LayeredModel:
             electrode_currents=currents,
             electrode_voltages=potentials,
             total_power=total_power,
+            element_currents=element_currents,
+            element_power=element_power,
         )
         return result
 
     # -- thermal -------------------------------------------------------------------------
 
-    def solve_thermal(self, dc: DCResult | None, heat_loads: Sequence[HeatLoad] = ()) -> ThermalResult:
+    def solve_thermal(
+        self,
+        dc: DCResult | None,
+        heat_loads: Sequence[HeatLoad] = (),
+        elements: Sequence[ResistiveElement] = (),
+    ) -> ThermalResult:
         """Solve for steady temperature with Joule heating and pad heat loads.
 
         Heat loads act over their pad's copper (all of its layers), shared by
@@ -356,15 +418,24 @@ class LayeredModel:
         a thermal resistance ``R`` ties the pad to ambient with a total
         conductance ``1/R``.
 
+        A resistive element's ``I²R`` (from ``dc``) heats its body. With ideal
+        board contact the body is its pads (heat shared by area over both
+        groups); otherwise it is a node joined to the pads' mean temperature
+        through the thermal resistance to the board. The body also loses heat to
+        ambient through its thermal resistance to ambient, or by convection from
+        its area by default.
+
         Args:
             dc: The DC solution supplying Joule heat, or None for no current flow.
             heat_loads: Heat sources and sinks on pads.
+            elements: Resistive elements (the same ones passed to :meth:`solve_dc`).
 
         Returns:
-            The temperature field, with each heat load's heat flow and pad temperature.
+            The temperature field, with each heat load's heat flow and pad
+            temperature and each element's body temperature.
 
         Raises:
-            SolveError: If a heat load's pad doesn't exist or has no meshed copper.
+            SolveError: If a heat load's or element's pad doesn't exist or has no meshed copper.
         """
         s = self.settings
         k_cu, k_d = s.copper_thermal_conductivity_w_mk, s.dielectric_thermal_conductivity_w_mk
@@ -408,11 +479,46 @@ class LayeredModel:
                 values[nodes] = load.value
             else:
                 tie[nodes] += weights / load.value
-        k = (k + sp.diags(tie)).tocsr()
+        k = k + sp.diags(tie)
         rhs = rhs + tie * s.ambient_c
 
+        # Resistive elements: the body takes I²R and is tied to its pads (directly,
+        # or through a junction node — an extra unknown — when a thermal resistance
+        # to the board is given) and to ambient.
+        junctions = [e for e in elements if e.thermal_resistance_board_k_w is not None]
+        n = self.size + len(junctions)
+        if junctions:
+            k = sp.block_diag((k, sp.csr_matrix((len(junctions), len(junctions)))))
+            extra = np.zeros(len(junctions))
+            rhs, values, fixed = (
+                np.concatenate([rhs, extra]),
+                np.concatenate([values, extra]),
+                np.append(fixed, extra.astype(bool)),
+            )
+        junction_index = {e.name: self.size + i for i, e in enumerate(junctions)}
+        bodies = {}
+        for e in elements:
+            nodes, weights = self.pad_nodes(e.ref, e.all_pads)
+            if e.name in junction_index:
+                j = junction_index[e.name]
+                to_pads = np.concatenate([[1.0], -weights])
+                k = k + _rank_one(
+                    np.concatenate([[j], nodes]), to_pads, 1.0 / e.thermal_resistance_board_k_w, n
+                )
+                nodes, weights = np.array([j]), np.array([1.0])
+            if e.thermal_resistance_ambient_k_w is not None:
+                g_ambient = 1.0 / e.thermal_resistance_ambient_k_w
+            else:
+                footprint = next(fp for fp in self.board.footprints if fp.reference == e.ref)
+                g_ambient = default_ambient_conductance(footprint, s)
+            power = dc.element_power.get(e.name, 0.0) if dc is not None else 0.0
+            rhs[nodes] += (power + g_ambient * s.ambient_c) * weights
+            k = k + _rank_one(nodes, weights, g_ambient, n)
+            bodies[e.name] = (nodes, weights, g_ambient)
+        k = k.tocsr()
+
         temperature = _solve_partitioned(k, rhs, fixed, values) if fixed.any() else spsolve(k.tocsc(), rhs)
-        convected = float(np.ones(self.size) @ (conv @ (temperature - s.ambient_c)))
+        convected = float(np.ones(self.size) @ (conv @ (temperature[: self.size] - s.ambient_c)))
         injected = k @ temperature - rhs  # heat the fixed-temperature constraints put in
         load_heat, load_temperatures = {}, {}
         for key, (load, nodes, weights) in load_nodes.items():
@@ -423,12 +529,18 @@ class LayeredModel:
             else:
                 load_heat[key] = -float(weights @ (temperature[nodes] - s.ambient_c)) / load.value
             load_temperatures[key] = float(weights @ temperature[nodes])
+        element_temperatures, element_ambient_heat = {}, {}
+        for name, (nodes, weights, g_ambient) in bodies.items():
+            element_temperatures[name] = float(weights @ temperature[nodes])
+            element_ambient_heat[name] = g_ambient * (element_temperatures[name] - s.ambient_c)
         by_layer = {lf.layer: temperature[lf.offset : lf.offset + lf.num_nodes] for lf in self.layers}
         return ThermalResult(
             temperature=by_layer,
             convected_power=convected,
             load_heat=load_heat,
             load_temperatures=load_temperatures,
+            element_temperatures=element_temperatures,
+            element_ambient_heat=element_ambient_heat,
         )
 
 
@@ -493,6 +605,50 @@ def _solve_with_fixed(k: sp.csr_matrix, rhs: np.ndarray, fixed: np.ndarray, valu
     leak = _LEAKAGE * diagonal[diagonal > 0].mean()
     k = k + sp.diags(np.where(fixed, 0, leak))
     return _solve_partitioned(k.tocsr(), rhs, fixed, values)
+
+
+def _merge_matrix(size: int, groups: list[np.ndarray]) -> sp.csr_matrix:
+    """Map each unknown to a reduced one, merging every group of nodes into one.
+
+    Groups that share a node are merged together.
+
+    Args:
+        size: Number of unknowns.
+        groups: Node index arrays to make equipotential.
+
+    Returns:
+        ``(size, reduced)`` 0/1 matrix with one entry per row: ``x = M @ y``.
+    """
+    rows = [np.repeat(g[0], len(g)) for g in groups if len(g)]
+    cols = [g for g in groups if len(g)]
+    if rows:
+        rows, cols = np.concatenate(rows), np.concatenate(cols)
+    else:
+        rows = cols = np.zeros(0, dtype=int)
+    graph = sp.coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(size, size))
+    count, label = connected_components(graph, directed=False)
+    return sp.csr_matrix((np.ones(size), (np.arange(size), label)), shape=(size, count))
+
+
+def _rank_one(nodes: np.ndarray, coefficients: np.ndarray, conductance: float, size: int) -> sp.coo_matrix:
+    """A lumped conductance acting on a weighted combination of unknowns.
+
+    ``conductance · c cᵀ``: the flow is ``conductance · (c · x)`` and it is
+    distributed back over the same unknowns by ``c``.
+
+    Args:
+        nodes: Global unknown indices.
+        coefficients: The weights ``c`` (e.g. +area shares on one side, -on the other).
+        conductance: Siemens or W/K.
+        size: Size of the global system.
+
+    Returns:
+        A ``(size, size)`` sparse matrix.
+    """
+    rows = np.repeat(nodes, len(nodes))
+    cols = np.tile(nodes, len(nodes))
+    data = conductance * np.outer(coefficients, coefficients).ravel()
+    return sp.coo_matrix((data, (rows, cols)), shape=(size, size))
 
 
 def _solve_partitioned(

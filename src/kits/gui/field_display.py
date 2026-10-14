@@ -224,6 +224,21 @@ def format_value(value: float, mode: DisplayMode) -> str:
     return f"{value:.3g} {mode.unit}"
 
 
+def format_resistance(ohms: float) -> str:
+    """Format a resistance with an SI prefix.
+
+    Args:
+        ohms: Resistance in ohms.
+
+    Returns:
+        e.g. ``"10 mΩ"``, ``"4.7 kΩ"`` or ``"500 µΩ"``.
+    """
+    for scale, prefix in ((1e6, "M"), (1e3, "k"), (1, ""), (1e-3, "m"), (1e-6, "µ")):
+        if abs(ohms) >= scale or scale == 1e-6:
+            return f"{ohms / scale:.3g} {prefix}Ω"
+    return f"{ohms:.3g} Ω"  # pragma: no cover - the loop always returns
+
+
 class FieldProbe:
     """Looks up result values at arbitrary points on one layer's mesh.
 

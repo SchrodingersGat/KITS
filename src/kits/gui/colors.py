@@ -20,6 +20,7 @@ SINK = QColor(255, 140, 26)  # current out of the board
 MARKER = QColor(80, 220, 255)  # result probe markers
 HEAT_SOURCE = QColor(235, 64, 52)  # heat injected at a pad
 HEAT_SINK = QColor(66, 135, 245)  # pad held at a temperature or tied to ambient
+ELEMENT = QColor(190, 110, 255)  # resistive element terminals and link
 ZONE_DARKEN = 160  # zones drawn this much darker than tracks on the same layer
 
 _FRONT = QColor(200, 52, 52)

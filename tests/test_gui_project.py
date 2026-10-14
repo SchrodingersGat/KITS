@@ -560,7 +560,15 @@ def test_layers_panel_overlay_toggles(app, window, strip_kits):
     window.solve()
     _wait(app, lambda: not window.solve_job_running)
     boxes = window.layer_panel.overlay_boxes
-    assert list(boxes) == ["Mesh", "Results", "Current sources", "Heat loads", "Markers", "Grid"]
+    assert list(boxes) == [
+        "Mesh",
+        "Results",
+        "Current sources",
+        "Heat loads",
+        "Resistive elements",
+        "Markers",
+        "Grid",
+    ]
     assert all(box.isChecked() for box in boxes.values())
     scene = window.scene
 
@@ -779,3 +787,101 @@ def test_heat_loads_panel(app, window, strip_kits):
     panel.remove_selected_rows()
     assert [h.key for h in doc.heat_loads] == [("P2", "1")]
     assert doc.results_staleness is not None
+
+
+@pytest.fixture
+def bridged_kits(tmp_path):
+    """Two strips joined only by resistor R1 (value "10m"), with +5 A / -5 A at the ends."""
+    from kits.config import CurrentSource
+
+    from .test_solve import _HEADER, _RESISTOR, _pad, _zone
+
+    board = tmp_path / "bridged.kicad_pcb"
+    resistor = _RESISTOR.replace(
+        '(property "Reference" "R1")', '(property "Reference" "R1") (property "Value" "10m")'
+    )
+    pads = _pad("P1", 7, "F.Cu") + _pad("P2", 43, "F.Cu")
+    board.write_text(_HEADER + _zone(5, 22) + _zone(28, 45) + pads + resistor + ")\n")
+    project = KitsProject(
+        tmp_path / "bridged.kits",
+        board=board,
+        current_sources=[CurrentSource("P1", "1", 5.0), CurrentSource("P2", "1", -5.0)],
+    )
+    project.save()
+    return project.path
+
+
+def test_resistive_elements_panel(app, window, bridged_kits, monkeypatch):
+    from PySide6.QtCore import QPointF
+
+    from kits.config import PadGroup, ResistiveElement
+
+    assert window.open_path(bridged_kits)
+    doc, panel, scene = window.document, window.elements_panel, window.scene
+    shown = []
+
+    def accept(dialog):
+        shown.append(dialog)
+        return dialog.element
+
+    monkeypatch.setattr(panel, "run_dialog", accept)
+
+    # Double-click a pad while the Elements tab is the last shown: an element is
+    # suggested for its footprint, with the resistance read from the value "10m".
+    window._on_load_dock_shown(window._elements_dock, True)
+    window._on_board_double_clicked(QPointF(20, 5))
+    assert doc.current_sources and not doc.heat_loads
+    assert doc.resistive_elements == [
+        ResistiveElement("R1", "R1", PadGroup("A", ["1"]), PadGroup("B", ["2"]), resistance_ohm=0.01)
+    ]
+    assert panel.table.rowCount() == 1 and scene.element_marker_count == 1 and doc.dirty
+    dialog = shown[-1]
+    assert dialog.ambient_default.isChecked() and "K/W" in dialog.ambient_default.text()
+
+    # A second element on the same footprint gets a fresh name.
+    window._on_board_double_clicked(QPointF(20, 5))
+    assert [e.name for e in doc.resistive_elements] == ["R1", "R1_2"]
+    doc.remove_resistive_element("R1_2")
+
+    # Edit: typed SI values, thermal resistances; invalid entries disable OK.
+    def edit(dialog):
+        dialog.resistance.setText("4R7")
+        dialog.board_default.setChecked(False)
+        dialog.board_theta.setValue(20.0)
+        dialog.group_pads[1].item(0).setCheckState(Qt.CheckState.Checked)  # pad 1 in both groups
+        assert dialog.element is None and "both groups" in dialog.error.text()
+        dialog.group_pads[1].item(0).setCheckState(Qt.CheckState.Unchecked)
+        dialog.resistance.setText("lots")
+        assert dialog.element is None
+        dialog.resistance.setText("5m")
+        dialog.name.setText("Shunt")
+        return dialog.element
+
+    monkeypatch.setattr(panel, "run_dialog", edit)
+    panel.table.selectRow(0)
+    panel.edit_selected()
+    shunt = doc.resistive_element("Shunt")
+    assert shunt.resistance_ohm == pytest.approx(5e-3) and shunt.thermal_resistance_board_k_w == 20.0
+    assert shunt.thermal_resistance_ambient_k_w is None
+
+    # Show/hide stays in sync.
+    window.show_elements_action.trigger()
+    assert not scene.elements_visible and not panel.show_elements.isChecked()
+    assert not window.layer_panel.overlay_boxes["Resistive elements"].isChecked()
+    panel.show_elements.setChecked(True)
+    assert scene.elements_visible
+
+    # Solve: all 5 A goes through the shunt; the panel lists it.
+    window.solve()
+    _wait(app, lambda: not window.solve_job_running)
+    results = doc.results
+    assert results.element_currents["Shunt"] == pytest.approx(5.0, rel=1e-6)
+    assert results.element_power["Shunt"] == pytest.approx(25 * 5e-3, rel=1e-6)
+    assert results.element_temperatures["Shunt"] > 25.0
+    assert "Shunt" in window.solve_panel.status.text()
+    assert load_kits_project(bridged_kits).resistive_elements == doc.resistive_elements
+
+    # Remove; results go stale.
+    panel.table.selectRow(0)
+    panel.remove_selected_rows()
+    assert doc.resistive_elements == [] and doc.results_staleness is not None

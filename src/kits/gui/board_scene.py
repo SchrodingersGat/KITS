@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QGraphicsSimpleTextItem,
 )
 
-from ..config import CurrentSource, HeatLoad
+from ..config import CurrentSource, HeatLoad, ResistiveElement
 from ..ingest.geometry import arc_points
 from ..ingest.model import EDGE_CUTS, Board, Pad
 from ..mesh.model import BoardMesh, LayerMesh
@@ -37,6 +37,7 @@ from .field_display import (
     FieldProbe,
     color_indices,
     colormap,
+    format_resistance,
     format_value,
     supports_log,
     triangle_values,
@@ -68,6 +69,7 @@ _Z_MESH_OVERLAY = 1000  # above all board layers
 _RESULTS_ALPHA = 235
 _Z_SOURCES = 1100  # current source markers, above the mesh
 _Z_HEAT_LOADS = 1150  # heat load markers, above current sources
+_Z_ELEMENTS = 1175  # resistive element markers
 _Z_SELECTION = 1200  # selected pad outline, on top of everything
 _Z_MARKERS = 1300  # result probe markers
 _MARKER_RADIUS_PX = 6
@@ -197,6 +199,8 @@ class BoardScene(QGraphicsScene):
         self._sources_visible = True
         self._heat_markers: LayerItem | None = None
         self._heat_loads_visible = True
+        self._element_markers: LayerItem | None = None
+        self._elements_visible = True
         self._selection: LayerItem | None = None
         self._results: SolveResults | None = None
         self._results_mode = DisplayMode.CURRENT_DENSITY
@@ -439,6 +443,91 @@ class BoardScene(QGraphicsScene):
         if self._heat_markers is None:
             return 0
         return sum(isinstance(i, QGraphicsRectItem) for i in self._heat_markers.childItems())
+
+    def set_elements(self, elements: list[ResistiveElement]) -> None:
+        """Mark resistive elements on the board.
+
+        Each gets dotted outlines on both terminals' pads, a link between the
+        terminals and a name/resistance label at its middle. Elements whose
+        footprint or pads aren't on the board are skipped.
+
+        Args:
+            elements: The project's resistive elements.
+        """
+        if self._element_markers is not None:
+            self.removeItem(self._element_markers)
+        self._element_markers = LayerItem()
+        self._element_markers.setZValue(_Z_ELEMENTS)
+        self._element_markers.setVisible(self._elements_visible)
+        self.addItem(self._element_markers)
+        font = QFont()
+        font.setBold(True)
+        color = colors.ELEMENT
+        outline_pen = _cosmetic_pen(color, 2.0)
+        outline_pen.setStyle(Qt.PenStyle.DotLine)
+        link_pen = _cosmetic_pen(color, 2.0)
+        link_pen.setStyle(Qt.PenStyle.DashLine)
+        for element in elements:
+            centres = []
+            for group in element.groups:
+                items = [i for number in group.pads for i in self._pad_items.get((element.ref, number), [])]
+                if not items:
+                    break
+                bounds = items[0].sceneBoundingRect()
+                for pad_item in items:
+                    outline = self._pad_copy(pad_item, self._element_markers)
+                    outline.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+                    outline.setPen(outline_pen)
+                    bounds = bounds.united(pad_item.sceneBoundingRect())
+                centres.append(bounds.center())
+            if len(centres) != 2:
+                continue
+            link = QGraphicsPathItem(self._element_markers)
+            path = QPainterPath(centres[0])
+            path.lineTo(centres[1])
+            link.setPath(path)
+            link.setPen(link_pen)
+            text = f"{element.name} {format_resistance(element.resistance_ohm)}"
+            label = QGraphicsSimpleTextItem(text)
+            label.setFont(font)
+            label.setBrush(QColor(255, 255, 255))
+            bounds = label.boundingRect()
+            box = QGraphicsRectItem(bounds.adjusted(-3, -1, 3, 1), self._element_markers)
+            box.setBrush(QColor(color.red(), color.green(), color.blue(), 220))
+            box.setPen(QPen(Qt.PenStyle.NoPen))
+            box.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+            box.setTransform(box.transform().translate(-bounds.width() / 2, -bounds.height() / 2))
+            box.setPos((centres[0] + centres[1]) / 2)
+            a, b = element.groups
+            box.setToolTip(
+                f"{element.name} ({element.ref}): {a.name} ↔ {b.name}, "
+                f"{format_resistance(element.resistance_ohm)}"
+            )
+            label.setParentItem(box)
+
+    def set_elements_visible(self, visible: bool) -> None:
+        """Show or hide the resistive element markers.
+
+        Args:
+            visible: Whether they are drawn. Kept when they are redrawn.
+        """
+        self._elements_visible = visible
+        if self._element_markers is not None:
+            self._element_markers.setVisible(visible)
+
+    @property
+    def elements_visible(self) -> bool:
+        """Whether resistive element markers are shown."""
+        return (
+            self._elements_visible and self._element_markers is not None and self._element_markers.isVisible()
+        )
+
+    @property
+    def element_marker_count(self) -> int:
+        """Number of resistive element labels drawn (one per element found on the board)."""
+        if self._element_markers is None:
+            return 0
+        return sum(isinstance(i, QGraphicsRectItem) for i in self._element_markers.childItems())
 
     @staticmethod
     def _pad_copy(pad_item: QGraphicsPathItem, parent: QGraphicsItem) -> QGraphicsPathItem:

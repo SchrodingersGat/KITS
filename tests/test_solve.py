@@ -284,3 +284,123 @@ def test_heat_load_on_missing_pad_is_an_error(strip_board):
     model = _model(strip_board)
     with pytest.raises(SolveError, match="Q9.1"):
         model.solve_thermal(None, [HeatLoad("Q9", "1", POWER, 1.0)])
+
+
+# -- resistive elements -------------------------------------------------------------------
+
+
+def _zone(x0: float, x1: float, layer: str = "F.Cu") -> str:
+    pts = f"(xy {x0} 2) (xy {x1} 2) (xy {x1} 8) (xy {x0} 8)"
+    return f"""  (zone (net 1) (net_name "N") (layer "{layer}")
+    (polygon (pts {pts})) (filled_polygon (layer "{layer}") (pts {pts})))
+"""
+
+
+_RESISTOR = """  (footprint "T:R" (layer "F.Cu") (at 25 5)
+    (property "Reference" "R1")
+    (pad "1" smd rect (at -5 0) (size 4 6) (layers "F.Cu") (net 1 "N"))
+    (pad "2" smd rect (at 5 0) (size 4 6) (layers "F.Cu") (net 1 "N")))
+"""
+
+
+@pytest.fixture
+def bridged_board(tmp_path):
+    """Two F.Cu strips (x=5..22 and 28..45) joined only by resistor R1 (pads at x=18..22 and 28..32)."""
+    path = tmp_path / "bridged.kicad_pcb"
+    text = _HEADER + _zone(5, 22) + _zone(28, 45) + _pad("P1", 7, "F.Cu") + _pad("P2", 43, "F.Cu") + _RESISTOR
+    path.write_text(text + ")\n")
+    return load_board(path)
+
+
+def _element(**kwargs):
+    from kits.config import PadGroup, ResistiveElement
+
+    values = {"resistance_ohm": 1e-3} | kwargs
+    return ResistiveElement("R1", "R1", PadGroup("A", ["1"]), PadGroup("B", ["2"]), **values)
+
+
+def test_resistive_element_in_series(bridged_board):
+    model = _model(bridged_board)
+    element = _element()
+    electrodes = [Electrode("P1", "1", voltage=1e-3), Electrode("P2", "1", voltage=0.0)]
+    with pytest.raises(SolveError):  # without the element the strips aren't connected
+        model.solve_thermal(
+            model.solve_dc([Electrode("P1", "1", current=1), Electrode("P2", "1", current=-1)])
+        )
+    dc = model.solve_dc(electrodes, [element])
+    # Series: left strip (pad edge to pad edge) + element + right strip; each
+    # terminal is equipotential, like a soldered end cap.
+    strips = R_SQUARE * ((18 - 9) + (41 - 32)) / 6
+    assert dc.resistance(("P1", "1"), ("P2", "1")) == pytest.approx(strips + 1e-3, rel=0.01)
+    # All the current goes through the element, and its power is I²R.
+    current = dc.electrode_currents[("P1", "1")]
+    assert dc.element_currents["R1"] == pytest.approx(current, rel=1e-9)
+    assert dc.element_power["R1"] == pytest.approx(current**2 * 1e-3, rel=1e-9)
+    assert dc.total_power == pytest.approx(current * 1e-3, rel=1e-9)  # P = V I, element included
+
+
+def test_resistive_element_heat(bridged_board):
+    from kits.solve.elements import body_area_mm2
+
+    settings = SolveSettings(convection_top_w_m2k=10.0, convection_bottom_w_m2k=10.0, ambient_c=25.0)
+    model = _model(bridged_board, settings)
+    electrodes = [Electrode("P1", "1", current=10.0), Electrode("P2", "1", current=-10.0)]
+    ideal = _element(resistance_ohm=0.01)
+    dc = model.solve_dc(electrodes, [ideal])
+    # 10 A through 10 mΩ (to the 1e-12 leakage that keeps floating copper solvable).
+    assert dc.element_power["R1"] == pytest.approx(1.0, rel=1e-6)
+
+    # Ideal contact: the body is its pads; by default it also convects from its body area.
+    thermal = model.solve_thermal(dc, elements=[ideal])
+    footprint = next(fp for fp in bridged_board.footprints if fp.reference == "R1")
+    assert body_area_mm2(footprint) == pytest.approx(14 * 6)
+    nodes, weights = model.pad_nodes("R1", ["1", "2"])
+    temperature = np.concatenate(list(thermal.temperature.values()))
+    body = thermal.element_temperatures["R1"]
+    assert body == pytest.approx(float(weights @ temperature[nodes]))
+    assert thermal.element_ambient_heat["R1"] == pytest.approx(10.0 * 84e-6 * (body - 25.0), rel=1e-9)
+    # Energy: board convection + the body's own loss to ambient = all Joule heat.
+    total_out = thermal.convected_power + thermal.element_ambient_heat["R1"]
+    assert total_out == pytest.approx(dc.total_power, rel=1e-8)
+
+    # Through a 20 K/W junction-to-board resistance the body runs hotter, by exactly
+    # (heat into the board) x R above its pads.
+    jb = _element(resistance_ohm=0.01, thermal_resistance_board_k_w=20.0, thermal_resistance_ambient_k_w=50.0)
+    hot = model.solve_thermal(dc, elements=[jb])
+    pads = float(weights @ np.concatenate(list(hot.temperature.values()))[nodes])
+    to_ambient = hot.element_ambient_heat["R1"]
+    assert to_ambient == pytest.approx((hot.element_temperatures["R1"] - 25.0) / 50.0, rel=1e-9)
+    assert hot.element_temperatures["R1"] - pads == pytest.approx((1.0 - to_ambient) * 20.0, rel=1e-6)
+    assert hot.convected_power + to_ambient == pytest.approx(dc.total_power, rel=1e-8)
+    # Same default cooling as the ideal case: the junction runs hotter than the pads did.
+    junction = model.solve_thermal(
+        dc, elements=[_element(resistance_ohm=0.01, thermal_resistance_board_k_w=20.0)]
+    )
+    assert junction.element_temperatures["R1"] > body
+
+
+def test_auto_pad_groups(tmp_path):
+    from kits.solve.elements import auto_pad_groups
+
+    mosfet = """  (footprint "T:Q" (layer "F.Cu") (at 25 5)
+    (property "Reference" "Q1")
+    (pad "1" smd rect (at -2 -2) (size 1 1.5) (layers "F.Cu") (net 2 "S"))
+    (pad "2" smd rect (at -1 -2) (size 1 1.5) (layers "F.Cu") (net 2 "S"))
+    (pad "3" smd rect (at 0 -2) (size 1 1.5) (layers "F.Cu") (net 2 "S"))
+    (pad "4" smd rect (at 1 -2) (size 1 1.5) (layers "F.Cu") (net 3 "G"))
+    (pad "5" smd rect (at 0 1) (size 5 4) (layers "F.Cu") (net 4 "D"))
+    (pad "5" smd rect (at 3 1) (size 1 1) (layers "F.Cu") (net 4 "D"))
+    (pad "" np_thru_hole circle (at 4 4) (size 1 1) (drill 1) (layers "*.Cu")))
+"""
+    header = _HEADER.replace('(net 1 "N")', '(net 1 "N") (net 2 "S") (net 3 "G") (net 4 "D")')
+    path = tmp_path / "q.kicad_pcb"
+    path.write_text(header + mosfet + _RESISTOR + ")\n")
+    board = load_board(path)
+    q1 = next(fp for fp in board.footprints if fp.reference == "Q1")
+    a, b = auto_pad_groups(q1)
+    assert (a.name, a.pads) == ("S", ["1", "2", "3"])  # the gate is left out
+    assert (b.name, b.pads) == ("D", ["5"])
+    # Both pads on one net: split by number.
+    r1 = next(fp for fp in board.footprints if fp.reference == "R1")
+    a, b = auto_pad_groups(r1)
+    assert (a.name, a.pads, b.name, b.pads) == ("A", ["1"], "B", ["2"])

@@ -1,6 +1,6 @@
 board: Resistors.kicad_pro
 mesh:
-  max_size_mm: 0.2
+  max_size_mm: 0.3
   min_size_mm: 0.005
   min_circle_points: 36
   corner_size_mm: 0.01
@@ -15,29 +15,49 @@ materials:
 convection:
   top_w_m2k: 10.0
   bottom_w_m2k: 10.0
-current_multiplier: 2.0
+current_multiplier: 2.4
 current_sources:
 - ref: J1
   pad: '1'
   current_a: 1.0
-- ref: R2
-  pad: '1'
-  current_a: -0.5
-- ref: R1
-  pad: '1'
-  current_a: -0.5
-- ref: R2
-  pad: '2'
-  current_a: 0.5
-- ref: R1
-  pad: '2'
-  current_a: 0.5
-- ref: R3
-  pad: '1'
-  current_a: -1.0
-- ref: R3
-  pad: '2'
-  current_a: 1.0
 - ref: J2
   pad: '1'
   current_a: -1.0
+heat_loads:
+- ref: J2
+  pad: '1'
+  power_w: -0.2
+resistive_elements:
+- name: R2
+  ref: R2
+  resistance_ohm: 1.0
+  pads_a:
+    name: Net-(J1-Pin_1)
+    pads:
+    - '1'
+  pads_b:
+    name: Net-(R1-Pad2)
+    pads:
+    - '2'
+- name: R1
+  ref: R1
+  resistance_ohm: 10.0
+  pads_a:
+    name: Net-(J1-Pin_1)
+    pads:
+    - '1'
+  pads_b:
+    name: Net-(R1-Pad2)
+    pads:
+    - '2'
+- name: R3
+  ref: R3
+  resistance_ohm: 1.0
+  pads_a:
+    name: Net-(R1-Pad2)
+    pads:
+    - '1'
+  pads_b:
+    name: GND
+    pads:
+    - '2'

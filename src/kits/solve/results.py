@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..config import CurrentSource, HeatLoad
+from ..config import CurrentSource, HeatLoad, ResistiveElement
 from ..mesh.fingerprint import MeshFingerprint
 from .solver import SolveSettings
 
@@ -20,7 +20,10 @@ SOLVER_VERSION = 2  # 2: stackup sub-layers summed; top/bottom convection
 
 
 def inputs_hash(
-    sources: list[CurrentSource], settings: SolveSettings, heat_loads: Sequence[HeatLoad] = ()
+    sources: list[CurrentSource],
+    settings: SolveSettings,
+    heat_loads: Sequence[HeatLoad] = (),
+    elements: Sequence[ResistiveElement] = (),
 ) -> str:
     """Fingerprint the solve inputs that aren't part of the mesh.
 
@@ -29,6 +32,7 @@ def inputs_hash(
         settings: Material and boundary settings.
         heat_loads: Pad heat sources and sinks (order doesn't matter). Left out of
             the digest when there are none, so older results stay valid.
+        elements: Resistive elements (order doesn't matter); likewise left out when none.
 
     Returns:
         A hex SHA-256 digest.
@@ -40,6 +44,8 @@ def inputs_hash(
     }
     if heat_loads:
         payload["heat_loads"] = sorted((h.ref, h.pad, h.kind.value, h.value) for h in heat_loads)
+    if elements:
+        payload["elements"] = sorted(json.dumps(e.to_dict(), sort_keys=True) for e in elements)
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
@@ -78,6 +84,9 @@ class SolveResults:
         load_heat: Heat into the board at each heat load's pad, W (negative for
             sinks), keyed ``"REF.PAD"``.
         load_temperatures: Mean temperature of each heat load's pad, °C, keyed ``"REF.PAD"``.
+        element_currents: Current through each resistive element (group A to B), A, keyed by name.
+        element_power: Power dissipated in each resistive element, W.
+        element_temperatures: Body temperature of each resistive element, °C.
         mesh_fingerprint: Fingerprint of the board and mesh settings the mesh was built from.
         inputs: :func:`inputs_hash` of the sources and solver settings.
     """
@@ -90,6 +99,9 @@ class SolveResults:
     inputs: str = ""
     load_heat: dict[str, float] = field(default_factory=dict)
     load_temperatures: dict[str, float] = field(default_factory=dict)
+    element_currents: dict[str, float] = field(default_factory=dict)
+    element_power: dict[str, float] = field(default_factory=dict)
+    element_temperatures: dict[str, float] = field(default_factory=dict)
 
     def layer(self, name: str) -> LayerResult | None:
         """Return one layer's results.
@@ -123,6 +135,9 @@ class SolveResults:
             "inputs": self.inputs,
             "load_heat": self.load_heat,
             "load_temperatures": self.load_temperatures,
+            "element_currents": self.element_currents,
+            "element_power": self.element_power,
+            "element_temperatures": self.element_temperatures,
         }
         arrays: dict[str, np.ndarray] = {"meta": np.array(json.dumps(meta))}
         for i, r in enumerate(self.layers):
@@ -163,6 +178,9 @@ class SolveResults:
             inputs=str(meta["inputs"]),
             load_heat={k: float(v) for k, v in meta.get("load_heat", {}).items()},
             load_temperatures={k: float(v) for k, v in meta.get("load_temperatures", {}).items()},
+            element_currents={k: float(v) for k, v in meta.get("element_currents", {}).items()},
+            element_power={k: float(v) for k, v in meta.get("element_power", {}).items()},
+            element_temperatures={k: float(v) for k, v in meta.get("element_temperatures", {}).items()},
         )
 
     def staleness(self, mesh_fingerprint: MeshFingerprint, inputs: str) -> str | None:
@@ -180,7 +198,8 @@ class SolveResults:
             return reason.replace("saved mesh", "results")
         if self.inputs != inputs:
             return (
-                "The current sources, heat loads or solver settings changed since the results were computed"
+                "The current sources, heat loads, resistive elements or solver settings changed since the "
+                "results were computed"
             )
         return None
 
