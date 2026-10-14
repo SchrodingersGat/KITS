@@ -116,6 +116,7 @@ class MainWindow(QMainWindow):
         self.solve_panel.solve_requested.connect(self.solve)
         self.solve_panel.mode_changed.connect(self._on_display_mode_changed)
         self.solve_panel.show_results_toggled.connect(self.show_results_action.setChecked)
+        self.sources_panel.show_sources_toggled.connect(self.show_sources_action.setChecked)
         self.mesh_panel.build_requested.connect(self.build_mesh)
         self.mesh_panel.show_mesh_toggled.connect(self.show_mesh_action.setChecked)
         self.layer_panel.visibility_changed.connect(self._on_layer_visibility)
@@ -224,6 +225,9 @@ class MainWindow(QMainWindow):
         self.show_mesh_action = toggle("Show &mesh", True, self._on_show_mesh_toggled, Qt.Key.Key_M)
         self.solve_action = action("&Solve", self.solve, Qt.Key.Key_F9, False)
         self.show_results_action = toggle("Show &results", True, self._on_show_results_toggled, Qt.Key.Key_R)
+        self.show_sources_action = toggle(
+            "Show current &sources", True, self._on_show_sources_toggled, Qt.Key.Key_S
+        )
         self._project_actions = [
             self.save_action,
             self.save_as_action,
@@ -268,6 +272,7 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         view_menu.addAction(self.grid_action)
         view_menu.addAction(self.cursor_action)
+        view_menu.addAction(self.show_sources_action)
         view_menu.addSeparator()
         view_menu.addAction(self._layer_dock.toggleViewAction())
         view_menu.addAction(self._info_dock.toggleViewAction())
@@ -1108,6 +1113,16 @@ class MainWindow(QMainWindow):
         if self.scene is not None:
             self.scene.set_selected_pad(self._selected_pad)
 
+    def _on_show_sources_toggled(self, checked: bool) -> None:
+        """Show or hide the current source markers, keeping the panel checkbox in sync.
+
+        Args:
+            checked: New state of the "Show current sources" action.
+        """
+        self.sources_panel.show_sources.setChecked(checked)
+        if self.scene is not None:
+            self.scene.set_sources_visible(checked)
+
     def _show_sources(self, *_args) -> None:
         """Redraw the current source markers on the board.
 
@@ -1115,6 +1130,7 @@ class MainWindow(QMainWindow):
             *_args: Ignored signal arguments.
         """
         if self.scene is not None:
+            self.scene.set_sources_visible(self.show_sources_action.isChecked())
             self.scene.set_sources(self.document.current_sources)
 
     def _on_cursor_moved(self, x: float, y: float) -> None:

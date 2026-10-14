@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QDoubleSpinBox,
     QHBoxLayout,
     QHeaderView,
@@ -36,9 +37,11 @@ class SourcesPanel(QWidget):
 
     Signals:
         pad_selected(object): A row was selected; carries its ``(ref, pad)`` key, or None.
+        show_sources_toggled(bool): The user toggled the source markers on the board.
     """
 
     pad_selected = Signal(object)
+    show_sources_toggled = Signal(bool)
 
     def __init__(self, document: Document, parent=None):
         """Create the panel.
@@ -75,6 +78,10 @@ class SourcesPanel(QWidget):
         self.table.itemSelectionChanged.connect(self._on_row_selection)
         QShortcut(QKeySequence.StandardKey.Delete, self.table, self.remove_selected_rows)
 
+        self.show_sources = QCheckBox("Show current sources")
+        self.show_sources.setChecked(True)
+        self.show_sources.setToolTip("Show the source/sink markers and current labels on the board (S)")
+        self.show_sources.toggled.connect(self.show_sources_toggled)
         self.total_label = QLabel()
         self.total_label.setWordWrap(True)
 
@@ -88,6 +95,7 @@ class SourcesPanel(QWidget):
         layout.addLayout(buttons)
         layout.addWidget(self.table, 1)
         layout.addWidget(self.total_label)
+        layout.addWidget(self.show_sources)
 
         document.project_changed.connect(self._on_project_changed)
         document.board_changed.connect(self.refresh)

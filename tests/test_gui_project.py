@@ -493,3 +493,27 @@ def test_solve_panel_edits_materials_and_environment(window, strip_kits):
         ambient_c=40.0, plating_thickness_mm=0.03, convection_top_w_m2k=0.0, convection_bottom_w_m2k=5.0
     )
     assert saved.copper_conductivity_s_m == 5.8e7  # untouched fields keep their exact values
+
+
+def test_show_hide_current_sources(window, strip_kits):
+    assert window.open_path(strip_kits)
+    scene, panel = window.scene, window.sources_panel
+    assert scene.sources_visible and scene.source_marker_count == 2
+
+    window.show_sources_action.trigger()  # View menu / S
+    assert not scene.sources_visible and not panel.show_sources.isChecked()
+
+    # Stays hidden when sources change and markers are redrawn.
+    window.document.set_source_current("P1", "1", 7.0)
+    assert not scene.sources_visible and scene.source_marker_count == 2
+
+    panel.show_sources.setChecked(True)  # panel checkbox
+    assert scene.sources_visible and window.show_sources_action.isChecked()
+
+    # Hidden markers don't stop pads being picked, and stay hidden across a board reload.
+    from PySide6.QtCore import QPointF
+
+    window.show_sources_action.trigger()
+    assert window.scene.pad_at(QPointF(7, 5)) == ("P1", "1")
+    window.reload_board()
+    assert not window.scene.sources_visible

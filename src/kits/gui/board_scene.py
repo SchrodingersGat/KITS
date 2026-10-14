@@ -182,6 +182,7 @@ class BoardScene(QGraphicsScene):
         self._mesh_overlays: dict[str, LayerItem] = {}
         self._pad_items: dict[tuple[str, str], list[QGraphicsPathItem]] = {}
         self._source_markers: LayerItem | None = None
+        self._sources_visible = True
         self._selection: LayerItem | None = None
         self._results: SolveResults | None = None
         self._results_mode = DisplayMode.CURRENT_DENSITY
@@ -294,6 +295,7 @@ class BoardScene(QGraphicsScene):
             self.removeItem(self._source_markers)
         self._source_markers = LayerItem()
         self._source_markers.setZValue(_Z_SOURCES)
+        self._source_markers.setVisible(self._sources_visible)
         self.addItem(self._source_markers)
         font = QFont()
         font.setBold(True)
@@ -322,6 +324,21 @@ class BoardScene(QGraphicsScene):
             box.setPos(QPointF(pad_bounds.right(), pad_bounds.center().y()))
             box.setToolTip(f"{source.label}: {source.current_a:+g} A")
             label.setParentItem(box)
+
+    def set_sources_visible(self, visible: bool) -> None:
+        """Show or hide the current source markers (tints and labels).
+
+        Args:
+            visible: Whether the markers are drawn. Kept when sources are redrawn.
+        """
+        self._sources_visible = visible
+        if self._source_markers is not None:
+            self._source_markers.setVisible(visible)
+
+    @property
+    def sources_visible(self) -> bool:
+        """Whether current source markers are drawn."""
+        return self._sources_visible and self._source_markers is not None and self._source_markers.isVisible()
 
     @property
     def source_marker_count(self) -> int:
