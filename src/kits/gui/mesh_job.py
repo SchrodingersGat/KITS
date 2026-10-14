@@ -38,8 +38,8 @@ class MeshJob(QObject):
         """Prepare (but don't start) a job.
 
         Args:
-            project_path: The ``.kicad_pro`` or ``.kicad_pcb`` file to mesh. Settings
-                come from its ``.kits.yaml``, so save any edits before starting.
+            project_path: The ``.kits`` project to mesh. The mesher reads the board link
+                and settings from the file, so save any edits before starting.
             parent: Optional Qt parent object.
         """
         super().__init__(parent)

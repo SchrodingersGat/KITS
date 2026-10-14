@@ -3,25 +3,30 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt
-from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QKeySequence
+from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtGui import QAction, QCloseEvent, QDragEnterEvent, QDropEvent, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QDockWidget,
     QFileDialog,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressDialog,
+    QStackedWidget,
 )
 
 from .. import __version__
 from ..config import ConfigError
 from ..ingest import BoardLoadError, Project
-from ..ingest.kicad import BOARD_SUFFIX, PROJECT_SUFFIX
+from ..ingest.kicad import BOARD_SUFFIX
+from ..ingest.kicad import PROJECT_SUFFIX as KICAD_PROJECT_SUFFIX
 from ..mesh.model import BoardMesh
+from ..project import PROJECT_SUFFIX, KitsProject, default_project_path
 from .board_info import BoardInfoPanel
 from .board_scene import BoardScene
 from .board_view import BoardView
@@ -31,16 +36,19 @@ from .mesh_job import MeshJob
 from .mesh_panel import MeshPanel
 from .settings import AppSettings
 from .settings_dialog import SettingsDialog
+from .start_page import NoBoardPage, StartPage
 
 log = logging.getLogger(__name__)
 
-_FILE_FILTER = "KiCad project (*.kicad_pro);;KiCad board (*.kicad_pcb);;All files (*)"
+_KITS_FILTER = f"KITS project (*{PROJECT_SUFFIX})"
+_KICAD_FILTER = f"KiCad project or board (*{KICAD_PROJECT_SUFFIX} *{BOARD_SUFFIX})"
+_KICAD_SUFFIXES = (KICAD_PROJECT_SUFFIX, BOARD_SUFFIX)
 _LAST_DIR_KEY = "paths/last_open_dir"
 _PROGRESS_STEPS = 1000
 
 
 class MainWindow(QMainWindow):
-    """Top-level window: board view, layer and board-info docks, menus and file loading."""
+    """Top-level window: project lifecycle, board view, docks, menus and meshing."""
 
     def __init__(self, document: Document | None = None, settings: AppSettings | None = None):
         """Build the window and wire it to the document and settings.
@@ -57,7 +65,12 @@ class MainWindow(QMainWindow):
         self._mesh_progress: QProgressDialog | None = None
 
         self.view = BoardView()
-        self.setCentralWidget(self.view)
+        self.start_page = StartPage()
+        self.no_board_page = NoBoardPage()
+        self._pages = QStackedWidget()
+        for page in (self.start_page, self.no_board_page, self.view):
+            self._pages.addWidget(page)
+        self.setCentralWidget(self._pages)
 
         self.layer_panel = LayerPanel()
         self.info_panel = BoardInfoPanel()
@@ -73,18 +86,28 @@ class MainWindow(QMainWindow):
         self._create_menus()
 
         self.document.project_changed.connect(self._on_project_changed)
+        self.document.board_changed.connect(self._on_board_changed)
+        self.document.dirty_changed.connect(self._update_title)
         self.document.mesh_changed.connect(self._on_mesh_changed)
         self.mesh_panel.build_requested.connect(self.build_mesh)
         self.mesh_panel.show_mesh_toggled.connect(self.show_mesh_action.setChecked)
         self.layer_panel.visibility_changed.connect(self._on_layer_visibility)
         self.layer_panel.active_layer_changed.connect(self._on_active_layer)
         self.view.cursor_moved.connect(self._on_cursor_moved)
+        self.start_page.new_requested.connect(self.new_project)
+        self.start_page.open_requested.connect(self.open_project_dialog)
+        self.start_page.recent_requested.connect(self.open_path)
+        self.no_board_page.link_requested.connect(self.link_board_dialog)
         self.settings.changed.connect(self._apply_settings)
+        # Deferred: the change may come from a recent-list click whose widget the
+        # refresh would otherwise delete while its signal is still being handled.
+        self.settings.recent_changed.connect(lambda: QTimer.singleShot(0, self._update_recent))
         self.view.set_cursor_visible(self.settings.cursor_visible)
 
         self.setAcceptDrops(True)
         self.resize(1400, 900)
-        self._update_title()
+        self._update_recent()
+        self._update_state()
 
     # -- setup ----------------------------------------------------------------
 
@@ -106,7 +129,7 @@ class MainWindow(QMainWindow):
         return dock
 
     def _create_actions(self) -> None:
-        """Create the menu actions; board-dependent ones start disabled."""
+        """Create the menu actions; project- and board-dependent ones start disabled."""
 
         def action(text, slot, shortcut=None, enabled=True):
             """Create a QAction connected to ``slot``.
@@ -121,35 +144,59 @@ class MainWindow(QMainWindow):
                 The new action, parented to the window.
             """
             act = QAction(text, self)
-            act.triggered.connect(slot)
+            act.triggered.connect(lambda _checked=False: slot())
             if shortcut is not None:
                 act.setShortcut(shortcut)
             act.setEnabled(enabled)
             return act
 
-        self.open_action = action("&Open…", self.open_dialog, QKeySequence.StandardKey.Open)
-        self.reload_action = action("&Reload", self.reload, QKeySequence.StandardKey.Refresh, False)
-        self.quit_action = action("&Quit", self.close, QKeySequence.StandardKey.Quit)
+        def toggle(text, checked, slot, shortcut=None):
+            """Create a checkable QAction.
+
+            Args:
+                text: Menu text, with ``&`` marking the mnemonic.
+                checked: Initial checked state.
+                slot: Callable receiving the new checked state.
+                shortcut: Optional key.
+
+            Returns:
+                The new action, parented to the window.
+            """
+            act = QAction(text, self)
+            act.setCheckable(True)
+            act.setChecked(checked)
+            if shortcut is not None:
+                act.setShortcut(shortcut)
+            act.toggled.connect(slot)
+            return act
+
         keys = QKeySequence.StandardKey
+        self.new_project_action = action("&New Project…", self.new_project, keys.New)
+        self.open_project_action = action("&Open Project…", self.open_project_dialog, keys.Open)
+        self.save_action = action("&Save", self.save, keys.Save, False)
+        self.save_as_action = action("Save &As…", self.save_as_dialog, keys.SaveAs, False)
+        self.close_project_action = action("&Close Project", self.close_project, keys.Close, False)
+        self.quit_action = action("&Quit", self.close, keys.Quit)
+        self.link_board_action = action("&Link KiCad Board…", self.link_board_dialog, None, False)
+        self.reload_action = action("&Reload Board", self.reload_board, keys.Refresh, False)
+        self.preferences_action = action("&Preferences…", self.open_preferences, "Ctrl+,")
         self.fit_action = action("Zoom to &fit", self.view.zoom_to_fit, Qt.Key.Key_Home, False)
         self.zoom_in_action = action("Zoom &in", self.view.zoom_in, keys.ZoomIn, False)
         self.zoom_out_action = action("Zoom &out", self.view.zoom_out, keys.ZoomOut, False)
-        self.grid_action = QAction("Show &grid", self)
-        self.grid_action.setCheckable(True)
-        self.grid_action.setChecked(self.settings.grid_visible)
-        self.grid_action.setShortcut(Qt.Key.Key_G)
-        self.grid_action.toggled.connect(self._on_grid_toggled)
-        self.cursor_action = QAction("Show &crosshair cursor", self)
-        self.cursor_action.setCheckable(True)
-        self.cursor_action.setChecked(self.settings.cursor_visible)
-        self.cursor_action.toggled.connect(self._on_cursor_toggled)
-        self.preferences_action = action("&Preferences…", self.open_preferences, "Ctrl+,")
+        self.grid_action = toggle(
+            "Show &grid", self.settings.grid_visible, self._on_grid_toggled, Qt.Key.Key_G
+        )
+        self.cursor_action = toggle(
+            "Show &crosshair cursor", self.settings.cursor_visible, self._on_cursor_toggled
+        )
         self.build_mesh_action = action("&Build mesh", self.build_mesh, "Ctrl+B", False)
-        self.show_mesh_action = QAction("Show &mesh", self)
-        self.show_mesh_action.setCheckable(True)
-        self.show_mesh_action.setChecked(True)
-        self.show_mesh_action.setShortcut(Qt.Key.Key_M)
-        self.show_mesh_action.toggled.connect(self._on_show_mesh_toggled)
+        self.show_mesh_action = toggle("Show &mesh", True, self._on_show_mesh_toggled, Qt.Key.Key_M)
+        self._project_actions = [
+            self.save_action,
+            self.save_as_action,
+            self.close_project_action,
+            self.link_board_action,
+        ]
         self._board_actions = [
             self.reload_action,
             self.fit_action,
@@ -159,15 +206,26 @@ class MainWindow(QMainWindow):
         ]
 
     def _create_menus(self) -> None:
-        """Populate the File, Edit and View menus."""
+        """Populate the File, Edit, Project, View and Mesh menus."""
         file_menu = self.menuBar().addMenu("&File")
-        file_menu.addAction(self.open_action)
-        file_menu.addAction(self.reload_action)
+        file_menu.addAction(self.new_project_action)
+        file_menu.addAction(self.open_project_action)
+        self.recent_menu = QMenu("Open &Recent", self)
+        self.recent_menu.aboutToShow.connect(self._populate_recent_menu)
+        file_menu.addMenu(self.recent_menu)
         file_menu.addSeparator()
+        file_menu.addAction(self.save_action)
+        file_menu.addAction(self.save_as_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.close_project_action)
         file_menu.addAction(self.quit_action)
 
         edit_menu = self.menuBar().addMenu("&Edit")
         edit_menu.addAction(self.preferences_action)
+
+        project_menu = self.menuBar().addMenu("&Project")
+        project_menu.addAction(self.link_board_action)
+        project_menu.addAction(self.reload_action)
 
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.fit_action)
@@ -215,72 +273,299 @@ class MainWindow(QMainWindow):
         if self.scene is not None:
             self.scene.set_grid(self.settings.grid_spacing_mm, self.settings.grid_visible)
 
-    # -- file handling ---------------------------------------------------------
+    # -- project lifecycle -------------------------------------------------------
 
-    def open_dialog(self) -> None:
-        """Ask the user for a project or board file and open it, remembering its directory."""
-        settings = QSettings()
-        start_dir = settings.value(_LAST_DIR_KEY, str(Path.home()))
-        path, _ = QFileDialog.getOpenFileName(self, "Open KiCad project", start_dir, _FILE_FILTER)
-        if path:
-            settings.setValue(_LAST_DIR_KEY, str(Path(path).parent))
-            self.open_path(path)
+    def new_project(self) -> bool:
+        """Create a project: choose where to save the ``.kits`` file, then the KiCad board.
 
-    def open_path(self, path: str | Path) -> bool:
-        """Open a project or board file, reporting errors in a message box.
+        Returns:
+            True if a project was created and opened.
+        """
+        if not self.maybe_save():
+            return False
+        path, _ = QFileDialog.getSaveFileName(self, "New KITS project", self._last_dir(), _KITS_FILTER)
+        if not path:
+            return False
+        path = Path(path).with_suffix(PROJECT_SUFFIX)
+        board, _ = QFileDialog.getOpenFileName(
+            self, "Choose the KiCad board for this project", str(path.parent), _KICAD_FILTER
+        )
+        if not board:
+            return False
+        return self._create_project(path, Path(board))
+
+    def open_project_dialog(self) -> bool:
+        """Ask for a project file (or a KiCad file to create a project for) and open it.
+
+        Returns:
+            True if a project was opened.
+        """
+        if not self.maybe_save():
+            return False
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open KITS project", self._last_dir(), f"{_KITS_FILTER};;{_KICAD_FILTER}"
+        )
+        return bool(path) and self.open_path(path, confirm_unsaved=False)
+
+    def open_path(self, path: str | Path, confirm_unsaved: bool = True) -> bool:
+        """Open a ``.kits`` project, or offer to create one for a KiCad file.
 
         Args:
-            path: A ``.kicad_pro`` or ``.kicad_pcb`` file.
+            path: A ``.kits``, ``.kicad_pro`` or ``.kicad_pcb`` file.
+            confirm_unsaved: Ask about unsaved changes in the open project first.
 
         Returns:
-            True if the file loaded, False if an error was shown.
+            True if a project was opened (or created and opened).
         """
-        return self._load(lambda: self.document.open(path), f"Loading {Path(path).name}…")
+        path = Path(path)
+        if confirm_unsaved and not self.maybe_save():
+            return False
+        if path.suffix in _KICAD_SUFFIXES:
+            return self._open_kicad_file(path)
+        if path.suffix != PROJECT_SUFFIX:
+            message = f"{path.name} is not a KITS project ({PROJECT_SUFFIX}) or a KiCad file."
+            QMessageBox.warning(self, "Cannot open file", message)
+            return False
+        if not path.is_file():
+            self.settings.remove_recent_project(path)
+            QMessageBox.warning(self, "Cannot open project", f"Project file not found:\n{path}")
+            return False
+        if not self._run(lambda: self.document.open_project(path), f"Opening {path.name}…", "open project"):
+            return False
+        self._remember(path)
+        if self.document.board_error:
+            self.statusBar().showMessage(f"Opened {path.name}, but its board couldn't be loaded", 8000)
+        return True
 
-    def reload(self) -> bool:
-        """Reload the open board from disk, reporting errors in a message box.
+    def save(self) -> bool:
+        """Save the open project to its file.
 
         Returns:
-            True if the reload succeeded, False if an error was shown.
+            True if it was saved.
         """
-        return self._load(self.document.reload, "Reloading…")
+        if self.document.project is None:
+            return False
+        if not self._run(self.document.save, "Saving…", "save project"):
+            return False
+        self._remember(self.document.project.path)
+        self.statusBar().showMessage(f"Saved {self.document.project.path.name}", 3000)
+        return True
 
-    def _load(self, loader, message: str) -> bool:
-        """Run ``loader`` with a busy cursor and status message, showing any error to the user.
+    def save_as_dialog(self) -> bool:
+        """Save the open project under a new name.
 
-        Both :class:`BoardLoadError` and unexpected exceptions are caught and reported
-        rather than propagated, so the GUI keeps running.
+        Returns:
+            True if it was saved.
+        """
+        project = self.document.project
+        if project is None:
+            return False
+        path, _ = QFileDialog.getSaveFileName(self, "Save KITS project as", str(project.path), _KITS_FILTER)
+        if not path:
+            return False
+        path = Path(path).with_suffix(PROJECT_SUFFIX)
+        if not self._run(lambda: self.document.save_as(path), "Saving…", "save project"):
+            return False
+        self._remember(path)
+        return True
+
+    def close_project(self) -> bool:
+        """Close the open project, asking about unsaved changes.
+
+        Returns:
+            True if the project was closed (or none was open).
+        """
+        if not self.maybe_save():
+            return False
+        if self._mesh_job is not None:
+            self._mesh_job.cancel()
+        self.document.close()
+        return True
+
+    def maybe_save(self) -> bool:
+        """If the project has unsaved changes, ask whether to save them.
+
+        Returns:
+            False if the user cancelled (the caller should abort), True otherwise.
+        """
+        if not self.document.dirty:
+            return True
+        answer = self._ask_save_changes()
+        if answer == QMessageBox.StandardButton.Save:
+            return self.save()
+        return answer == QMessageBox.StandardButton.Discard
+
+    def _ask_save_changes(self) -> QMessageBox.StandardButton:
+        """Ask whether to save, discard or keep unsaved changes.
+
+        Returns:
+            ``Save``, ``Discard`` or ``Cancel``.
+        """
+        buttons = QMessageBox.StandardButton
+        return QMessageBox.question(
+            self,
+            "Unsaved changes",
+            f"Save changes to {self.document.project.path.name}?",
+            buttons.Save | buttons.Discard | buttons.Cancel,
+            buttons.Save,
+        )
+
+    def _open_kicad_file(self, board: Path) -> bool:
+        """Offer to create (or open the existing) project for a KiCad file.
 
         Args:
-            loader: Zero-argument callable that loads into the document.
-            message: Status-bar text shown while loading.
+            board: A ``.kicad_pro`` or ``.kicad_pcb`` file.
 
         Returns:
-            True on success, False if loading failed.
+            True if a project was opened.
+        """
+        target = default_project_path(board)
+        if target.is_file():
+            buttons = QMessageBox.StandardButton
+            answer = QMessageBox.question(
+                self,
+                "Open KITS project",
+                f"KITS opens project files, and a project already exists for {board.name}:\n\n"
+                f"{target}\n\nOpen it?",
+                buttons.Open | buttons.Cancel,
+            )
+            return answer == buttons.Open and self.open_path(target, confirm_unsaved=False)
+        path = self._ask_create_project(board, target)
+        return path is not None and self._create_project(path, board)
+
+    def _ask_create_project(self, board: Path, target: Path) -> Path | None:
+        """Ask whether to create a project for a KiCad file, and where.
+
+        Args:
+            board: The KiCad file the user opened.
+            target: The suggested project file location.
+
+        Returns:
+            Where to create the project, or None if the user declined.
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Create KITS project")
+        box.setText(f"KITS works with project files. Create a project for {board.name}?")
+        box.setInformativeText(f"It will be saved as:\n{target}")
+        create = box.addButton("Create", QMessageBox.ButtonRole.AcceptRole)
+        elsewhere = box.addButton("Save Elsewhere…", QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(create)
+        box.exec()
+        if box.clickedButton() is create:
+            return target
+        if box.clickedButton() is elsewhere:
+            path, _ = QFileDialog.getSaveFileName(self, "New KITS project", str(target), _KITS_FILTER)
+            return Path(path).with_suffix(PROJECT_SUFFIX) if path else None
+        return None
+
+    def _create_project(self, path: Path, board: Path) -> bool:
+        """Create and open a project linking ``board``.
+
+        Args:
+            path: The ``.kits`` file to create.
+            board: The KiCad board to link.
+
+        Returns:
+            True on success.
+        """
+        if not self._run(
+            lambda: self.document.new_project(path, board), f"Creating {path.name}…", "create project"
+        ):
+            return False
+        self._remember(path)
+        return True
+
+    def _remember(self, path: Path) -> None:
+        """Record a project in the recent list and as the last-used folder.
+
+        Args:
+            path: The project file.
+        """
+        self.settings.add_recent_project(path)
+        QSettings().setValue(_LAST_DIR_KEY, str(Path(path).parent))
+
+    @staticmethod
+    def _last_dir() -> str:
+        """Folder the last project was opened from or saved to.
+
+        Returns:
+            A directory path, defaulting to the home folder.
+        """
+        return str(QSettings().value(_LAST_DIR_KEY, str(Path.home())))
+
+    # -- board -------------------------------------------------------------------------
+
+    def link_board_dialog(self) -> bool:
+        """Ask for a KiCad board and link it to the open project.
+
+        Returns:
+            True if a board was linked.
+        """
+        project = self.document.project
+        if project is None:
+            return False
+        start = str(project.board.parent if project.board else project.path.parent)
+        board, _ = QFileDialog.getOpenFileName(self, "Link KiCad board", start, _KICAD_FILTER)
+        return bool(board) and self.link_board(board)
+
+    def link_board(self, board: str | Path) -> bool:
+        """Link a KiCad board to the open project (unsaved until File > Save).
+
+        Args:
+            board: The ``.kicad_pro`` or ``.kicad_pcb`` file.
+
+        Returns:
+            True if the board loaded and was linked.
+        """
+        return self._run(lambda: self.document.link_board(board), "Loading board…", "load board")
+
+    def reload_board(self) -> bool:
+        """Reload the linked board from disk.
+
+        Returns:
+            True if the reload succeeded.
+        """
+        return self._run(self.document.reload_board, "Reloading board…", "reload board")
+
+    def _run(self, operation: Callable[[], object], message: str, what: str) -> bool:
+        """Run a file operation with a busy cursor, reporting any error to the user.
+
+        Args:
+            operation: Zero-argument callable to run.
+            message: Status-bar text shown while it runs.
+            what: Short description for error titles, e.g. ``"open project"``.
+
+        Returns:
+            True on success, False if an error was shown.
         """
         self.statusBar().showMessage(message)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         QApplication.processEvents()
         try:
-            loader()
-        except BoardLoadError as exc:
-            QApplication.restoreOverrideCursor()
-            self.statusBar().clearMessage()
-            QMessageBox.critical(self, "Could not open board", str(exc))
-            return False
+            operation()
+        except (BoardLoadError, ConfigError) as exc:
+            error = str(exc)
         except Exception as exc:  # unexpected bug: report it rather than crash
-            log.exception("Unexpected error while loading board")
+            log.exception("Unexpected error trying to %s", what)
+            error = f"Unexpected error:\n{exc!r}"
+        else:
+            error = None
+        finally:
             QApplication.restoreOverrideCursor()
+        # Clear only our own "busy" text, not messages posted while the operation ran.
+        if self.statusBar().currentMessage() == message:
             self.statusBar().clearMessage()
-            QMessageBox.critical(
-                self, "Could not open board", f"Unexpected error while loading the board:\n{exc!r}"
-            )
+        if error is not None:
+            QMessageBox.critical(self, f"Could not {what}", error)
             return False
-        QApplication.restoreOverrideCursor()
         return True
 
+    # -- drag and drop -------------------------------------------------------------------
+
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        """Accept drags carrying a KiCad project or board file.
+        """Accept drags carrying a KITS project or KiCad file.
 
         Args:
             event: The drag-enter event.
@@ -289,7 +574,7 @@ class MainWindow(QMainWindow):
             event.acceptProposedAction()
 
     def dropEvent(self, event: QDropEvent) -> None:
-        """Open a dropped KiCad project or board file.
+        """Open a dropped KITS project, or offer to create one for a KiCad file.
 
         Args:
             event: The drop event.
@@ -301,47 +586,48 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _dropped_path(event) -> Path | None:
-        """Find the first KiCad project or board file among a drag/drop event's URLs.
+        """Find the first openable file among a drag/drop event's URLs.
 
         Args:
             event: A drag-enter or drop event.
 
         Returns:
-            Path of the first ``.kicad_pro``/``.kicad_pcb`` file, or ``None`` if there is none.
+            Path of the first ``.kits``/``.kicad_pro``/``.kicad_pcb`` file, or ``None``.
         """
         for url in event.mimeData().urls():
             path = Path(url.toLocalFile())
-            if path.suffix in (PROJECT_SUFFIX, BOARD_SUFFIX):
+            if path.suffix in (PROJECT_SUFFIX, *_KICAD_SUFFIXES):
                 return path
         return None
 
     # -- meshing ---------------------------------------------------------------
 
     def build_mesh(self) -> None:
-        """Mesh the open board in a child process, showing a cancellable progress dialog.
+        """Mesh the board in a child process, showing a cancellable progress dialog.
 
-        The panel's settings are saved to the project's ``.kits.yaml`` first (the
-        mesher reads them from there). If the board file changed on disk since it
-        was loaded, it is reloaded so the mesh matches what is displayed.
+        The project is saved first, since the mesher reads its board link and
+        settings from the project file. If the board file changed on disk since
+        it was loaded, it is reloaded so the mesh matches what is displayed.
         """
-        project = self.document.project
-        if project is None or self._mesh_job is not None:
+        doc = self.document
+        if doc.project is None or doc.board is None or self._mesh_job is not None:
             return
-        if not project.board.has_outline:
+        if not doc.board.has_outline:
             QMessageBox.warning(self, "Cannot build mesh", "The board has no Edge.Cuts outline.")
             return
         try:
-            self.document.set_mesh_settings(self.mesh_panel.settings())
+            doc.set_mesh_settings(self.mesh_panel.settings())
         except ConfigError as exc:
-            QMessageBox.warning(self, "Cannot build mesh", f"Could not save the mesh settings: {exc}")
+            QMessageBox.warning(self, "Cannot build mesh", f"Invalid mesh settings: {exc}")
             return
-        if self.document.board_changed_on_disk:
-            if not self.reload():
+        if doc.dirty and not self.save():
+            return
+        if doc.board_changed_on_disk:
+            if not self.reload_board():
                 return
             self.statusBar().showMessage("The board changed on disk and was reloaded before meshing.", 5000)
-            project = self.document.project
 
-        job = MeshJob(project.board.path, self)
+        job = MeshJob(doc.project.path, self)
         dialog = QProgressDialog("Starting mesher…", "Cancel", 0, _PROGRESS_STEPS, self)
         dialog.setWindowTitle("Building mesh")
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
@@ -386,7 +672,7 @@ class MainWindow(QMainWindow):
             self._mesh_job.deleteLater()
         self._mesh_job = self._mesh_progress = None
         self.mesh_panel.set_busy(False)
-        self.build_mesh_action.setEnabled(self.document.project is not None)
+        self._update_state()
 
     def _on_mesh_built(self, mesh: BoardMesh) -> None:
         """Store a freshly built mesh in the document.
@@ -434,26 +720,37 @@ class MainWindow(QMainWindow):
         if self.scene is not None:
             self.scene.set_mesh_visible(checked)
 
-    def closeEvent(self, event) -> None:
-        """Kill any running mesher process before the window closes.
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Ask about unsaved changes, and kill any running mesher, before closing.
 
         Args:
-            event: The close event.
+            event: The close event; ignored if the user cancels.
         """
+        if not self.maybe_save():
+            event.ignore()
+            return
         if self._mesh_job is not None:
             self._mesh_job.cancel()
         super().closeEvent(event)
 
     # -- document updates ------------------------------------------------------
 
-    def _on_project_changed(self, project: Project | None) -> None:
-        """Rebuild the scene and panels for a newly opened (or closed) project.
+    def _on_project_changed(self, project: KitsProject | None) -> None:
+        """Update the window for a newly created, opened, renamed or closed project.
 
         Args:
-            project: The new project, or ``None`` when the document was closed.
+            project: The project, or ``None`` when it was closed.
+        """
+        self._update_state()
+
+    def _on_board_changed(self, kicad: Project | None) -> None:
+        """Rebuild the scene and panels for a newly loaded (or unloaded) board.
+
+        Args:
+            kicad: The loaded KiCad project, or ``None`` if no board is loaded.
         """
         old_scene = self.scene
-        self.scene = BoardScene(project.board, self) if project else None
+        self.scene = BoardScene(kicad.board, self) if kicad else None
         self._apply_settings()
         self.view.setScene(self.scene)
         if old_scene is not None:
@@ -464,7 +761,7 @@ class MainWindow(QMainWindow):
                 [(lay.name, lay.color, lay.is_copper) for lay in self.scene.layers.values()]
             )
             self.view.fit_to_rect(self.scene.board_rect())
-            b = project.board
+            b = kicad.board
             if b.has_outline:
                 self.statusBar().showMessage(
                     f"Loaded {b.path.name}: {len(b.copper_layers)} copper layers, "
@@ -479,10 +776,68 @@ class MainWindow(QMainWindow):
         else:
             self.layer_panel.set_layers([])
 
-        self.info_panel.set_project(project)
+        self.info_panel.set_project(kicad)
+        self._update_state()
+
+    def _update_state(self, *_args) -> None:
+        """Sync the visible page, action states and title with the document.
+
+        Args:
+            *_args: Ignored signal arguments.
+        """
+        doc = self.document
+        if doc.project is None:
+            self._pages.setCurrentWidget(self.start_page)
+        elif doc.board is None:
+            if doc.project.board is None:
+                message = "This project doesn't link a KiCad board yet."
+            else:
+                message = (
+                    f"The linked KiCad board couldn't be loaded:\n{doc.board_error}\n\n"
+                    "If it has moved, link it again."
+                )
+            self.no_board_page.set_message(message)
+            self._pages.setCurrentWidget(self.no_board_page)
+        else:
+            self._pages.setCurrentWidget(self.view)
+        for act in self._project_actions:
+            act.setEnabled(doc.project is not None)
         for act in self._board_actions:
-            act.setEnabled(project is not None)
+            act.setEnabled(doc.board is not None)
+        self.build_mesh_action.setEnabled(doc.board is not None and self._mesh_job is None)
         self._update_title()
+
+    def _update_title(self, *_args) -> None:
+        """Set the window title from the project name, unsaved state and app version.
+
+        Args:
+            *_args: Ignored signal arguments.
+        """
+        project = self.document.project
+        app_title = f"KITS {__version__}"
+        if project is None:
+            self.setWindowTitle(app_title)
+        else:
+            marker = "*" if self.document.dirty else ""
+            self.setWindowTitle(f"{project.name}{marker} — {app_title}")
+
+    def _update_recent(self) -> None:
+        """Refresh the start page's recent-projects list."""
+        self.start_page.set_recent(self.settings.recent_projects)
+
+    def _populate_recent_menu(self) -> None:
+        """Rebuild the Open Recent menu just before it is shown."""
+        recent = self.settings.recent_projects
+        self.recent_menu.clear()
+        for i, path in enumerate(recent, start=1):
+            act = self.recent_menu.addAction(f"&{i % 10} {path.stem}  —  {path}")
+            act.setEnabled(path.is_file())
+            act.triggered.connect(lambda _checked=False, p=path: self.open_path(p))
+        if recent:
+            self.recent_menu.addSeparator()
+            self.recent_menu.addAction("Clear Recent Projects", self.settings.clear_recent_projects)
+        else:
+            self.recent_menu.addAction("No recent projects").setEnabled(False)
 
     def _on_layer_visibility(self, name: str, visible: bool) -> None:
         """Show or hide a layer in the scene.
@@ -514,9 +869,3 @@ class MainWindow(QMainWindow):
             gx, gy = self.scene.to_grid_coords(x, y)
             self._cursor_label.setText(f"X {gx:9.3f} mm   Y {gy:9.3f} mm")
             self._cursor_label.setToolTip(f"Relative to grid origin\nKiCad: X {x:.3f}  Y {y:.3f} mm")
-
-    def _update_title(self) -> None:
-        """Set the window title from the open project's name and the app version."""
-        project = self.document.project
-        app_title = f"KITS {__version__}"
-        self.setWindowTitle(f"{project.name} — {app_title}" if project else app_title)

@@ -83,9 +83,9 @@ def load_project(path: str | Path) -> Project:
         try:
             settings = json.loads(pro_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            raise BoardLoadError(f"Could not read project file {pro_path}: {exc}") from exc
+            raise BoardLoadError(f"Could not read KiCad project file {pro_path}: {exc}") from exc
     elif path.suffix == PROJECT_SUFFIX:
-        raise BoardLoadError(f"Project file not found: {pro_path}")
+        raise BoardLoadError(f"KiCad project file not found: {pro_path}")
 
     if not pcb_path.is_file():
         raise BoardLoadError(f"No board file found for project (expected {pcb_path.name})")

@@ -5,7 +5,7 @@ import pytest
 import shapely
 from shapely.geometry import Point
 
-from kits.config import ConfigError, MeshSettings, ProjectConfig, config_path_for, load_config
+from kits.config import MeshSettings
 from kits.ingest import load_board
 from kits.ingest.geometry import rotate
 from kits.ingest.model import Graphic, Pad
@@ -19,57 +19,6 @@ from kits.mesh.geometry import (
 )
 from kits.mesh.mesher import layer_heights, mesh_board
 from kits.mesh.model import BoardMesh
-
-# -- config ----------------------------------------------------------------------
-
-
-def test_config_defaults_when_missing(tmp_path):
-    config = load_config(tmp_path / "x.kits.yaml")
-    assert not config.exists
-    assert config.mesh == MeshSettings(1.0, 0.1)
-
-
-def test_config_round_trip_preserves_unknown_keys(tmp_path):
-    path = tmp_path / "x.kits.yaml"
-    path.write_text("ambient_temperature_c: 25\nmesh:\n  max_size_mm: 2\n", encoding="utf-8")
-    config = load_config(path)
-    assert config.mesh == MeshSettings(2.0, 0.1)
-    config.mesh = MeshSettings(0.5, 0.05)
-    config.save()
-    reloaded = load_config(path)
-    assert reloaded.mesh == MeshSettings(0.5, 0.05)
-    assert reloaded.extra == {"ambient_temperature_c": 25}
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "mesh:\n  max_size_mm: 0.1\n  min_size_mm: 0.5\n",  # min > max
-        "mesh:\n  max_size_mm: -1\n",
-        "mesh:\n  max_size_mm: big\n",
-        "mesh: 3\n",
-        "- a list\n",
-        "mesh: [unclosed\n",
-    ],
-)
-def test_config_rejects_invalid(tmp_path, text):
-    path = tmp_path / "x.kits.yaml"
-    path.write_text(text, encoding="utf-8")
-    with pytest.raises(ConfigError):
-        load_config(path)
-
-
-def test_config_path_for(tmp_path):
-    assert config_path_for(tmp_path / "board.kicad_pro") == tmp_path / "board.kits.yaml"
-    assert config_path_for(tmp_path / "board.kicad_pcb") == tmp_path / "board.kits.yaml"
-
-
-def test_config_save_rejects_invalid(tmp_path):
-    config = ProjectConfig(tmp_path / "x.kits.yaml", MeshSettings(0.1, 1.0))
-    with pytest.raises(ConfigError):
-        config.save()
-    assert not config.exists
-
 
 # -- geometry --------------------------------------------------------------------
 
@@ -212,31 +161,47 @@ def test_npz_round_trip(board_v9_path, tmp_path):
 # -- command line ----------------------------------------------------------------
 
 
-def test_cli_uses_project_config_and_default_output(board_v9_path, capsys):
-    project = board_v9_path.with_suffix(".kicad_pro")
-    config_path_for(project).write_text("mesh:\n  max_size_mm: 3\n  min_size_mm: 0.2\n", encoding="utf-8")
-    npz = board_v9_path.parent / "m.npz"
-    assert cli.main([str(project), "--progress", "--npz", str(npz)]) == 0
+def test_cli_meshes_project_with_its_settings(kits_v9_path, capsys):
+    from kits.project import load_kits_project
+
+    project = load_kits_project(kits_v9_path)
+    project.mesh = MeshSettings(3.0, 0.2)
+    project.save()
+    npz = kits_v9_path.parent / "m.npz"
+    assert cli.main([str(kits_v9_path), "--progress", "--npz", str(npz)]) == 0
 
     records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert all("progress" in r for r in records[:-1])
     assert records[-1]["done"] and records[-1]["triangles"] > 0
-    assert (board_v9_path.parent / "kits_output" / "demo.msh").is_file()
+    assert (kits_v9_path.parent / "kits_output" / "demo.msh").is_file()
     assert BoardMesh.load_npz(npz).settings == MeshSettings(3.0, 0.2)
 
 
-def test_cli_reports_errors_as_json(board_v10_path, capsys):
-    assert cli.main([str(board_v10_path), "--progress"]) == 1
+def test_cli_reports_errors_as_json(kits_v10_path, capsys):
+    assert cli.main([str(kits_v10_path), "--progress"]) == 1
     (record,) = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert "outline" in record["error"]
 
 
-def test_cli_reports_unwritable_output_before_meshing(board_v9_path, tmp_path, capsys, monkeypatch):
+def test_cli_requires_a_kits_project(board_v9_path, capsys):
+    assert cli.main([str(board_v9_path)]) == 1
+    assert "expected a KITS project file" in capsys.readouterr().err
+
+
+def test_cli_reports_unlinked_board(tmp_path, capsys):
+    from kits.project import KitsProject
+
+    KitsProject(tmp_path / "empty.kits").save()
+    assert cli.main([str(tmp_path / "empty.kits")]) == 1
+    assert "doesn't link a KiCad board" in capsys.readouterr().err
+
+
+def test_cli_reports_unwritable_output_before_meshing(kits_v9_path, tmp_path, capsys, monkeypatch):
     calls = []
     monkeypatch.setattr(cli, "mesh_board", lambda *a, **k: calls.append(a))
     blocker = tmp_path / "file"
     blocker.write_text("not a folder")
-    assert cli.main([str(board_v9_path), "--progress", "-o", str(blocker / "sub" / "x.msh")]) == 1
+    assert cli.main([str(kits_v9_path), "--progress", "-o", str(blocker / "sub" / "x.msh")]) == 1
     (record,) = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert "cannot create output folder" in record["error"]
     assert not calls  # failed before any meshing

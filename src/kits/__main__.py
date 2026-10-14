@@ -1,4 +1,4 @@
-"""``python -m kits [project.kicad_pro]`` launches the GUI."""
+"""``python -m kits [project.kits]`` launches the GUI."""
 
 import sys
 

@@ -20,9 +20,9 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
-def test_open_project_builds_scene(app, board_v9_path):
+def test_open_project_builds_scene(app, board_v9_path, kits_v9_path):
     window = MainWindow()
-    assert window.open_path(board_v9_path.with_suffix(".kicad_pro"))
+    assert window.open_path(kits_v9_path)
     scene = window.scene
     assert scene.layer_names() == ["F.Cu", "In1.Cu", "B.Cu", TH_PADS, VIAS, HOLES, "Edge.Cuts"]
     assert window.windowTitle().startswith("demo")
@@ -36,23 +36,30 @@ def test_open_project_builds_scene(app, board_v9_path):
     assert scene.layers["B.Cu"].item.zValue() > scene.layers["F.Cu"].item.zValue()
 
 
-def test_missing_outline_is_reported(app, board_v9_path, board_v10_path):
+def test_missing_outline_is_reported(app, board_v9_path, board_v10_path, kits_v9_path, kits_v10_path):
     window = MainWindow()
-    assert window.open_path(board_v10_path)
+    assert window.open_path(kits_v10_path)
     assert window.info_panel._labels["Size"].text() == "No board outline"
     assert "no board outline" in window.statusBar().currentMessage()
 
-    assert window.open_path(board_v9_path)
+    assert window.open_path(kits_v9_path)
     assert window.info_panel._labels["Size"].text() == "40.00 × 30.00 mm"
 
 
-def test_failed_open_keeps_previous_project(app, board_v9_path, tmp_path, monkeypatch):
-    errors = []
+def test_failed_open_keeps_previous_project(app, tmp_path, monkeypatch, kits_v9_path):
+    errors, warnings = [], []
     monkeypatch.setattr("kits.gui.main_window.QMessageBox.critical", lambda *a: errors.append(a))
+    monkeypatch.setattr("kits.gui.main_window.QMessageBox.warning", lambda *a: warnings.append(a))
     window = MainWindow()
-    assert window.open_path(board_v9_path)
-    assert not window.open_path(tmp_path / "nope.kicad_pro")
+    assert window.open_path(kits_v9_path)
+
+    broken = tmp_path / "broken.kits"
+    broken.write_text("mesh: [unclosed\n", encoding="utf-8")
+    assert not window.open_path(broken)
     assert errors
+    assert not window.open_path(tmp_path / "nope.kits")
+    assert "not found" in warnings[-1][2]
+    assert not window.open_path(tmp_path / "notes.txt")
     assert window.document.project.name == "demo"
 
 
@@ -120,9 +127,9 @@ def test_grid_is_drawn_on_origin_aligned_lines(app, board_v9_path):
     assert _render(scene, source).pixelColor(80, 30) == colors.BACKGROUND
 
 
-def test_grid_toggle_and_preferences(app, board_v9_path):
+def test_grid_toggle_and_preferences(app, board_v9_path, kits_v9_path):
     window = MainWindow()
-    assert window.open_path(board_v9_path)
+    assert window.open_path(kits_v9_path)
     assert window.scene.grid_visible
     assert window.scene.grid_spacing == 10
 
@@ -139,13 +146,13 @@ def test_grid_toggle_and_preferences(app, board_v9_path):
     assert window.grid_action.isChecked()
 
     # A newly opened board picks up the stored settings.
-    assert window.open_path(board_v9_path)
+    assert window.open_path(kits_v9_path)
     assert window.scene.grid_spacing == 2.5
 
 
-def test_statusbar_coords_are_grid_relative(app, board_v9_path):
+def test_statusbar_coords_are_grid_relative(app, board_v9_path, kits_v9_path):
     window = MainWindow()
-    assert window.open_path(board_v9_path)  # outline (0, 0)-(40, 30): grid origin at KiCad (0, 30)
+    assert window.open_path(kits_v9_path)  # outline (0, 0)-(40, 30): grid origin at KiCad (0, 30)
     assert window.scene.to_grid_coords(0, 30) == (0, 0)
     assert window.scene.to_grid_coords(40, 0) == (40, 30)  # top-right; Y up
 
@@ -181,7 +188,7 @@ def test_cursor_setting_defaults_on(app, tmp_path):
     assert not AppSettings(QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat)).cursor_visible
 
 
-def test_crosshair_follows_mouse_and_toggles(app, board_v9_path):
+def test_crosshair_follows_mouse_and_toggles(app, board_v9_path, kits_v9_path):
     from PySide6.QtCore import QPoint
 
     window = MainWindow()
@@ -190,7 +197,7 @@ def test_crosshair_follows_mouse_and_toggles(app, board_v9_path):
     window._mesh_dock.hide()
     window.resize(800, 600)
     window.show()
-    assert window.open_path(board_v9_path)
+    assert window.open_path(kits_v9_path)
     window.settings.grid_visible = False  # keep grid lines out of the pixel checks
     app.processEvents()
 
@@ -233,31 +240,37 @@ def _wait_until(app, condition, timeout=60.0):
         time.sleep(0.01)
 
 
-def test_mesh_panel_saves_settings_and_validates(app, board_v9_path):
-    from kits.config import config_path_for, load_config
+def test_mesh_panel_edits_project_until_saved(app, kits_v9_path):
+    from kits.project import load_kits_project
 
     window = MainWindow()
-    assert window.open_path(board_v9_path.with_suffix(".kicad_pro"))
+    assert window.open_path(kits_v9_path)
     panel = window.mesh_panel
     assert panel.build_button.isEnabled()
+    assert not window.document.dirty
 
     panel.max_size.setValue(2.5)
-    config_file = config_path_for(board_v9_path)
-    assert load_config(config_file).mesh.max_size_mm == 2.5
+    assert window.document.project.mesh.max_size_mm == 2.5
+    assert window.document.dirty and window.windowTitle().startswith("demo*")
+    assert load_kits_project(kits_v9_path).mesh.max_size_mm == 1.0  # not written yet
 
-    panel.min_size.setValue(3.0)  # larger than max: rejected, not saved
+    panel.min_size.setValue(3.0)  # larger than max: rejected
     assert not panel.settings_error.isHidden()
     assert not panel.build_button.isEnabled()
-    assert load_config(config_file).mesh.min_size_mm == 0.1
+    assert window.document.project.mesh.min_size_mm == 0.1
 
     panel.min_size.setValue(0.2)
     assert panel.settings_error.isHidden() and panel.build_button.isEnabled()
 
+    assert window.save()
+    assert not window.document.dirty and window.windowTitle().startswith("demo —")
+    assert load_kits_project(kits_v9_path).mesh.max_size_mm == 2.5
 
-def test_build_mesh_in_child_process_shows_overlay(app, board_v9_path):
+
+def test_build_mesh_in_child_process_shows_overlay(app, board_v9_path, kits_v9_path):
     window = MainWindow()
     window.show()
-    assert window.open_path(board_v9_path.with_suffix(".kicad_pro"))
+    assert window.open_path(kits_v9_path)
     window.mesh_panel.max_size.setValue(2.0)
 
     window.build_mesh()
@@ -290,9 +303,9 @@ def test_build_mesh_in_child_process_shows_overlay(app, board_v9_path):
     window.close()
 
 
-def test_cancel_mesh_job_keeps_previous_mesh(app, board_v9_path):
+def test_cancel_mesh_job_keeps_previous_mesh(app, board_v9_path, kits_v9_path):
     window = MainWindow()
-    assert window.open_path(board_v9_path)
+    assert window.open_path(kits_v9_path)
     window.build_mesh()
     window._mesh_job.cancel()
     _wait_until(app, lambda: not window.mesh_job_running)
@@ -300,21 +313,21 @@ def test_cancel_mesh_job_keeps_previous_mesh(app, board_v9_path):
     assert "cancelled" in window.statusBar().currentMessage()
 
 
-def test_build_mesh_without_outline_warns(app, board_v10_path, monkeypatch):
+def test_build_mesh_without_outline_warns(app, board_v10_path, monkeypatch, kits_v10_path):
     warnings = []
     monkeypatch.setattr("kits.gui.main_window.QMessageBox.warning", lambda *a: warnings.append(a))
     window = MainWindow()
-    assert window.open_path(board_v10_path)
+    assert window.open_path(kits_v10_path)
     assert not window.mesh_panel.build_button.isEnabled()
     window.build_mesh()
     assert warnings and not window.mesh_job_running
 
 
-def test_mesh_failure_is_reported(app, board_v9_path, monkeypatch):
+def test_mesh_failure_is_reported(app, board_v9_path, monkeypatch, kits_v9_path):
     errors = []
     monkeypatch.setattr("kits.gui.main_window.QMessageBox.critical", lambda *a: errors.append(a))
     window = MainWindow()
-    assert window.open_path(board_v9_path)
+    assert window.open_path(kits_v9_path)
     # Corrupt the board after loading: the child re-reads it and fails.
     board_v9_path.write_text("(kicad_pcb (version 1)", encoding="utf-8")
     window.document._board_mtime = board_v9_path.stat().st_mtime  # skip the auto-reload

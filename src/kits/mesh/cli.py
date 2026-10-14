@@ -1,7 +1,8 @@
-"""Command-line mesher: ``kits-mesh project.kicad_pro``.
+"""Command-line mesher: ``kits-mesh project.kits``.
 
-Reads the board and its ``.kits.yaml`` mesh settings, meshes every copper layer
-and writes ``kits_output/<project>.msh`` next to the project. The GUI runs this
+Reads a KITS project file, loads the KiCad board it links, meshes every copper
+layer with the project's mesh settings and writes ``kits_output/<project>.msh``
+next to the project file. The GUI runs this
 same entry point in a child process with ``--progress`` so a gmsh crash can't
 take the GUI down and meshing can be cancelled.
 
@@ -19,25 +20,11 @@ import json
 import sys
 from pathlib import Path
 
-from ..config import ConfigError, config_path_for, load_config
+from ..config import ConfigError
 from ..ingest import BoardLoadError, load_project
+from ..project import PROJECT_SUFFIX, load_kits_project
 from .geometry import GeometryError
 from .mesher import MeshError, mesh_board
-
-OUTPUT_DIR = "kits_output"
-
-
-def default_msh_path(project_path: str | Path) -> Path:
-    """Return where the mesh for a project is written by default.
-
-    Args:
-        project_path: The ``.kicad_pro`` or ``.kicad_pcb`` path.
-
-    Returns:
-        ``<project dir>/kits_output/<stem>.msh``.
-    """
-    project_path = Path(project_path)
-    return project_path.parent / OUTPUT_DIR / f"{project_path.stem}.msh"
 
 
 def _emit(obj: dict) -> None:
@@ -50,7 +37,7 @@ def _emit(obj: dict) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Mesh a KiCad project from the command line.
+    """Mesh a KITS project's board from the command line.
 
     Args:
         argv: Arguments excluding the program name; ``None`` uses ``sys.argv``.
@@ -59,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
         Process exit status: 0 on success, 1 on failure.
     """
     parser = argparse.ArgumentParser(prog="kits-mesh", description="Mesh a KiCad board for KITS")
-    parser.add_argument("project", help=".kicad_pro (or .kicad_pcb) file")
+    parser.add_argument("project", help="KITS project file (.kits)")
     parser.add_argument("-o", "--output", help="output .msh path (default: kits_output/<project>.msh)")
     parser.add_argument("--npz", help="also save the mesh arrays to this .npz file")
     parser.add_argument("--progress", action="store_true", help="report progress as JSON lines on stdout")
@@ -78,16 +65,23 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[{fraction:4.0%}] {message}", flush=True)
 
     try:
-        project = load_project(args.project)
-        config = load_config(config_path_for(project.path))
-        msh_path = Path(args.output) if args.output else default_msh_path(project.path)
+        if Path(args.project).suffix != PROJECT_SUFFIX:
+            raise ConfigError(
+                f"expected a KITS project file ({PROJECT_SUFFIX}), not {Path(args.project).name}; "
+                "create one in the KITS GUI with File > New Project"
+            )
+        kits = load_kits_project(args.project)
+        if kits.board is None:
+            raise ConfigError(f"{kits.path.name} doesn't link a KiCad board")
+        board = load_project(kits.board).board
+        msh_path = Path(args.output) if args.output else kits.msh_path
         # Fail fast on an unwritable output location (e.g. a project under
         # Program Files) rather than after minutes of meshing.
         try:
             msh_path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise MeshError(f"cannot create output folder {msh_path.parent}: {exc.strerror or exc}") from exc
-        mesh = mesh_board(project.board, config.mesh, msh_path, progress)
+        mesh = mesh_board(board, kits.mesh, msh_path, progress)
         if args.npz:
             mesh.save_npz(args.npz)
     except (BoardLoadError, ConfigError, GeometryError, MeshError, OSError) as exc:

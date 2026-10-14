@@ -100,3 +100,23 @@ def board_v10_path(tmp_path) -> Path:
     path = tmp_path / "v10.kicad_pcb"
     path.write_text(BOARD_V10, encoding="utf-8")
     return path
+
+
+def _make_kits(board: Path) -> Path:
+    from kits.project import KitsProject
+
+    project = KitsProject(path=board.with_suffix(".kits"), board=board)
+    project.save()
+    return project.path
+
+
+@pytest.fixture
+def kits_v9_path(board_v9_path) -> Path:
+    """A ``demo.kits`` project linking the KiCad 9 fixture's ``demo.kicad_pro``."""
+    return _make_kits(board_v9_path.with_suffix(".kicad_pro"))
+
+
+@pytest.fixture
+def kits_v10_path(board_v10_path) -> Path:
+    """A ``v10.kits`` project linking the KiCad 10 fixture board (which has no outline)."""
+    return _make_kits(board_v10_path)

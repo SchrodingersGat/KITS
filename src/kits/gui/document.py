@@ -1,8 +1,11 @@
-"""Application document: the currently open project, shared by all panels.
+"""Application document: the open KITS project, its linked board and its mesh.
 
 Panels never load files themselves; they listen to :class:`Document` signals.
-Later phases (config, mesh, results) hang off this same object so the GUI
-stays a consumer of the batch engine's data model.
+The document is a consumer and editor of the same project file and data
+model the batch tools use, so the GUI stays in sync with CLI runs.
+
+Edits (linking a board, changing settings) mark the project *dirty*; nothing
+is written until :meth:`Document.save` or :meth:`Document.save_as`.
 """
 
 from __future__ import annotations
@@ -11,23 +14,29 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
-from ..config import ConfigError, MeshSettings, ProjectConfig, config_path_for, load_config
-from ..ingest import Project, load_project
+from ..config import ConfigError, MeshSettings
+from ..ingest import Board, BoardLoadError, Project, load_project
 from ..mesh.model import BoardMesh
+from ..project import KitsProject, load_kits_project
 
 
 class Document(QObject):
-    """Holds the open project, its KITS config and its mesh.
+    """Holds the open KITS project, the KiCad board it links, and the board's mesh.
 
     Signals:
-        project_changed(Project | None): A project was opened, reloaded or closed.
-        config_changed(): The project config was edited.
+        project_changed(KitsProject | None): A project was created, opened or closed.
+        board_changed(Project | None): The linked KiCad board was loaded, reloaded,
+            replaced or unloaded (``None`` if no board is loaded).
+        settings_changed(): Project settings (e.g. mesh sizes) were edited.
+        dirty_changed(bool): The project gained or lost unsaved changes.
         mesh_changed(BoardMesh | None): A mesh was built, or cleared.
     """
 
-    project_changed = Signal(object)  # Project | None
-    config_changed = Signal()
-    mesh_changed = Signal(object)  # BoardMesh | None
+    project_changed = Signal(object)
+    board_changed = Signal(object)
+    settings_changed = Signal()
+    dirty_changed = Signal(bool)
+    mesh_changed = Signal(object)
 
     def __init__(self, parent=None):
         """Create an empty document with no project open.
@@ -36,123 +45,206 @@ class Document(QObject):
             parent: Optional Qt parent object.
         """
         super().__init__(parent)
-        self._project: Project | None = None
-        self._config: ProjectConfig | None = None
-        self._config_error: str | None = None
-        self._mesh: BoardMesh | None = None
+        self._project: KitsProject | None = None
+        self._kicad: Project | None = None
+        self._board_error: str | None = None
         self._board_mtime: float | None = None
+        self._mesh: BoardMesh | None = None
+        self._dirty = False
+
+    # -- state -------------------------------------------------------------------
 
     @property
-    def project(self) -> Project | None:
-        """The currently open project, or ``None`` if nothing is open."""
+    def project(self) -> KitsProject | None:
+        """The open KITS project, or ``None`` if nothing is open."""
         return self._project
 
     @property
-    def config(self) -> ProjectConfig | None:
-        """The open project's ``.kits.yaml`` config (defaults if the file is missing)."""
-        return self._config
+    def kicad(self) -> Project | None:
+        """The loaded KiCad project (board plus ``.kicad_pro`` settings), if any."""
+        return self._kicad
 
     @property
-    def config_error(self) -> str | None:
-        """Why the config file couldn't be read at open time, if it couldn't; defaults are used."""
-        return self._config_error
+    def board(self) -> Board | None:
+        """The loaded board, or ``None`` if no board is linked or it failed to load."""
+        return self._kicad.board if self._kicad else None
+
+    @property
+    def board_error(self) -> str | None:
+        """Why the linked board couldn't be loaded, if it couldn't."""
+        return self._board_error
+
+    @property
+    def dirty(self) -> bool:
+        """True if the project has changes not yet saved to its file."""
+        return self._dirty
 
     @property
     def board_changed_on_disk(self) -> bool:
-        """True if the open board file was modified (or removed) since it was loaded."""
-        if self._project is None:
+        """True if the loaded board file was modified (or removed) since it was loaded."""
+        if self._kicad is None:
             return False
         try:
-            return self._project.board.path.stat().st_mtime != self._board_mtime
+            return self._kicad.board.path.stat().st_mtime != self._board_mtime
         except OSError:
             return True
 
     @property
     def mesh(self) -> BoardMesh | None:
-        """The most recently built mesh for the open board, if any."""
+        """The most recently built mesh for the loaded board, if any."""
         return self._mesh
 
     @property
     def mesh_is_stale(self) -> bool:
-        """True if a mesh exists but was built with different settings than the current config."""
-        if self._mesh is None or self._config is None:
+        """True if a mesh exists but was built with different settings than the project's."""
+        if self._mesh is None or self._project is None:
             return False
-        return self._mesh.settings != self._config.mesh
+        return self._mesh.settings != self._project.mesh
 
-    def open(self, path: str | Path) -> Project:
-        """Load ``path``; raises :class:`~kits.ingest.BoardLoadError` on failure.
+    # -- project lifecycle -----------------------------------------------------
 
-        On failure the previously open project is kept. The project's
-        ``.kits.yaml`` is loaded too; if it is invalid, defaults are used and
-        :attr:`config_error` says why. Any existing mesh is cleared.
+    def new_project(self, path: str | Path, board_path: str | Path) -> KitsProject:
+        """Create a project file linking ``board_path`` and open it.
+
+        The board is loaded first, so nothing is written if it can't be read.
 
         Args:
-            path: A ``.kicad_pro`` or ``.kicad_pcb`` file.
+            path: Where to create the ``.kits`` file (overwritten if it exists).
+            board_path: The KiCad ``.kicad_pro`` or ``.kicad_pcb`` to link.
 
         Returns:
-            The newly loaded project.
+            The new project.
 
         Raises:
-            BoardLoadError: If the project or board cannot be loaded (propagated from the loader).
+            BoardLoadError: If the board can't be loaded.
+            ConfigError: If the project file can't be written.
         """
-        project = load_project(path)
-        try:
-            board_mtime = project.board.path.stat().st_mtime
-        except OSError:
-            board_mtime = None
-        config_path = config_path_for(project.path)
-        try:
-            self._config, self._config_error = load_config(config_path), None
-        except ConfigError as exc:
-            self._config, self._config_error = ProjectConfig(path=config_path), str(exc)
-        self._project = project
-        self._board_mtime = board_mtime
-        self._mesh = None
-        self.project_changed.emit(project)
-        self.mesh_changed.emit(None)
+        kicad = load_project(board_path)
+        project = KitsProject(path=path, board=board_path)
+        project.save()
+        self._set_project(project)
+        self._set_kicad(kicad, None)
         return project
 
-    def reload(self) -> Project | None:
-        """Re-read the open project's board from disk.
+    def open_project(self, path: str | Path) -> KitsProject:
+        """Open a ``.kits`` file and load the board it links.
+
+        A board that fails to load doesn't stop the project opening: the
+        project is shown with no board and :attr:`board_error` says why, so
+        the user can re-link it.
+
+        Args:
+            path: The project file.
 
         Returns:
-            The reloaded project, or ``None`` if nothing is open.
+            The opened project.
 
         Raises:
-            BoardLoadError: If the board can no longer be loaded (propagated from :meth:`open`).
+            ConfigError: If the project file can't be read or is invalid; the
+                previously open project is kept.
         """
-        if self._project is None:
-            return None
-        # The board path always exists; the .kicad_pro may not if a bare
-        # .kicad_pcb was opened.
-        return self.open(self._project.board.path)
+        project = load_kits_project(path)
+        self._set_project(project)
+        self._load_linked_board()
+        return project
 
     def close(self) -> None:
-        """Close the open project and emit ``project_changed(None)``."""
+        """Close the project without saving."""
         self._project = None
-        self._config = None
-        self._config_error = None
-        self._mesh = None
+        self._set_dirty(False)
         self.project_changed.emit(None)
-        self.mesh_changed.emit(None)
+        self._set_kicad(None, None)
+
+    def save(self) -> None:
+        """Write the project to its file.
+
+        Raises:
+            ConfigError: If no project is open, the settings are invalid, or the file
+                can't be written.
+        """
+        if self._project is None:
+            raise ConfigError("no project is open")
+        self._project.save()
+        self._set_dirty(False)
+
+    def save_as(self, path: str | Path) -> None:
+        """Write the project to a new file, which becomes the open project's file.
+
+        Args:
+            path: The new ``.kits`` location.
+
+        Raises:
+            ConfigError: If no project is open, the settings are invalid, or the file
+                can't be written.
+        """
+        if self._project is None:
+            raise ConfigError("no project is open")
+        self._project.save(path)
+        self._set_dirty(False)
+        self.project_changed.emit(self._project)
+
+    # -- board ---------------------------------------------------------------------
+
+    def link_board(self, board_path: str | Path) -> None:
+        """Link a different KiCad board to the open project and load it.
+
+        Args:
+            board_path: The ``.kicad_pro`` or ``.kicad_pcb`` file.
+
+        Raises:
+            ConfigError: If no project is open.
+            BoardLoadError: If the board can't be loaded; the project is unchanged.
+        """
+        if self._project is None:
+            raise ConfigError("no project is open")
+        kicad = load_project(board_path)
+        self._project.set_board(board_path)
+        self._set_dirty(True)
+        self._set_kicad(kicad, None)
+
+    def reload_board(self) -> None:
+        """Re-read the linked board from disk.
+
+        Raises:
+            BoardLoadError: If the board can no longer be loaded; the previously
+                loaded board is kept.
+        """
+        if self._project is None or self._project.board is None:
+            return
+        self._set_kicad(load_project(self._project.board), None)
+
+    def _load_linked_board(self) -> None:
+        """Load the open project's board, recording (not raising) any failure."""
+        board_path = self._project.board if self._project else None
+        if board_path is None:
+            self._set_kicad(None, "The project doesn't link a KiCad board yet.")
+            return
+        try:
+            kicad = load_project(board_path)
+        except BoardLoadError as exc:
+            self._set_kicad(None, str(exc))
+        else:
+            self._set_kicad(kicad, None)
+
+    # -- settings and mesh -----------------------------------------------------------
 
     def set_mesh_settings(self, settings: MeshSettings) -> None:
-        """Store new mesh settings and save them to the project's ``.kits.yaml``.
+        """Change the project's mesh settings (in memory; save to persist).
 
         Args:
             settings: The new settings.
 
         Raises:
-            ConfigError: If no project is open, the settings are invalid, or the file can't be written.
+            ConfigError: If no project is open or the settings are invalid.
         """
-        if self._config is None:
+        if self._project is None:
             raise ConfigError("no project is open")
         settings.validate()
-        if settings == self._config.mesh and self._config.exists:
+        if settings == self._project.mesh:
             return
-        self._config.mesh = settings
-        self._config.save()
-        self.config_changed.emit()
+        self._project.mesh = settings
+        self._set_dirty(True)
+        self.settings_changed.emit()
 
     def set_mesh(self, mesh: BoardMesh | None) -> None:
         """Replace the current mesh.
@@ -162,3 +254,42 @@ class Document(QObject):
         """
         self._mesh = mesh
         self.mesh_changed.emit(mesh)
+
+    # -- internals ---------------------------------------------------------------------
+
+    def _set_project(self, project: KitsProject) -> None:
+        """Make ``project`` the open project, with no unsaved changes.
+
+        Args:
+            project: The project.
+        """
+        self._project = project
+        self._set_dirty(False)
+        self.project_changed.emit(project)
+
+    def _set_kicad(self, kicad: Project | None, error: str | None) -> None:
+        """Replace the loaded board, clearing any mesh of the previous one.
+
+        Args:
+            kicad: The loaded KiCad project, or None.
+            error: Why no board is loaded, if ``kicad`` is None.
+        """
+        self._kicad = kicad
+        self._board_error = error
+        try:
+            self._board_mtime = kicad.board.path.stat().st_mtime if kicad else None
+        except OSError:
+            self._board_mtime = None
+        self._mesh = None
+        self.board_changed.emit(kicad)
+        self.mesh_changed.emit(None)
+
+    def _set_dirty(self, dirty: bool) -> None:
+        """Update the unsaved-changes flag, emitting ``dirty_changed`` if it changed.
+
+        Args:
+            dirty: The new state.
+        """
+        if dirty != self._dirty:
+            self._dirty = dirty
+            self.dirty_changed.emit(dirty)

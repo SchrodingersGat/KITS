@@ -40,7 +40,8 @@ def _size_spinbox() -> QDoubleSpinBox:
 class MeshPanel(QWidget):
     """Edits the project's mesh settings and triggers mesh builds.
 
-    Settings are saved to the project's ``.kits.yaml`` as soon as they change.
+    Edited settings are stored in the open project and written by File > Save
+    (building a mesh saves first, since the mesher reads the project file).
 
     Signals:
         build_requested(): The user asked to build (or rebuild) the mesh.
@@ -54,7 +55,7 @@ class MeshPanel(QWidget):
         """Create the panel.
 
         Args:
-            document: The application document whose config and mesh are shown.
+            document: The application document whose project settings and mesh are shown.
             parent: Optional Qt parent widget.
         """
         super().__init__(parent)
@@ -100,7 +101,8 @@ class MeshPanel(QWidget):
         layout.addStretch(1)
 
         document.project_changed.connect(self._load_settings)
-        document.config_changed.connect(self._refresh)
+        document.board_changed.connect(self._refresh)
+        document.settings_changed.connect(self._refresh)
         document.mesh_changed.connect(self._refresh)
         self._load_settings()
 
@@ -127,8 +129,8 @@ class MeshPanel(QWidget):
         Args:
             *_args: Ignored signal arguments.
         """
-        config = self._document.config
-        settings = config.mesh if config else MeshSettings()
+        project = self._document.project
+        settings = project.mesh if project else MeshSettings()
         for box, value in ((self.max_size, settings.max_size_mm), (self.min_size, settings.min_size_mm)):
             box.blockSignals(True)
             box.setValue(value)
@@ -137,12 +139,12 @@ class MeshPanel(QWidget):
         self._refresh()
 
     def _on_size_changed(self, _value: float) -> None:
-        """Validate and save edited sizes to the project config.
+        """Validate edited sizes and store them in the project (unsaved until File > Save).
 
         Args:
             _value: The new spin box value (both boxes are re-read).
         """
-        if self._document.config is None:
+        if self._document.project is None:
             return
         try:
             self._document.set_mesh_settings(self.settings())
@@ -160,17 +162,17 @@ class MeshPanel(QWidget):
             *_args: Ignored signal arguments.
         """
         doc = self._document
-        board = doc.project.board if doc.project else None
+        board = doc.board
         valid = self.settings_error.isHidden()
         can_build = board is not None and board.has_outline and valid and not self._busy
         self.build_button.setEnabled(can_build)
         self.build_button.setText("Rebuild mesh" if doc.mesh else "Build mesh")
         for box in (self.max_size, self.min_size):
-            box.setEnabled(doc.config is not None and not self._busy)
+            box.setEnabled(doc.project is not None and not self._busy)
 
         style, lines = "", []
         if board is None:
-            lines.append("No board open.")
+            lines.append("No board loaded." if doc.project else "No project open.")
         elif not board.has_outline:
             style = _WARNING_STYLE
             lines.append("The board has no Edge.Cuts outline, so it can't be meshed.")
@@ -185,8 +187,5 @@ class MeshPanel(QWidget):
             if doc.mesh_is_stale:
                 style = _WARNING_STYLE
                 lines.append("Settings changed since this mesh was built; rebuild to apply them.")
-        if doc.config_error:
-            style = _WARNING_STYLE
-            lines.append(f"Config file problem (using defaults): {doc.config_error}")
         self.status.setStyleSheet(style)
         self.status.setText("\n".join(lines))
