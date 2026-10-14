@@ -14,16 +14,21 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
 )
 
 from .. import __version__
+from ..config import ConfigError
 from ..ingest import BoardLoadError, Project
 from ..ingest.kicad import BOARD_SUFFIX, PROJECT_SUFFIX
+from ..mesh.model import BoardMesh
 from .board_info import BoardInfoPanel
 from .board_scene import BoardScene
 from .board_view import BoardView
 from .document import Document
 from .layer_panel import LayerPanel
+from .mesh_job import MeshJob
+from .mesh_panel import MeshPanel
 from .settings import AppSettings
 from .settings_dialog import SettingsDialog
 
@@ -31,6 +36,7 @@ log = logging.getLogger(__name__)
 
 _FILE_FILTER = "KiCad project (*.kicad_pro);;KiCad board (*.kicad_pcb);;All files (*)"
 _LAST_DIR_KEY = "paths/last_open_dir"
+_PROGRESS_STEPS = 1000
 
 
 class MainWindow(QMainWindow):
@@ -47,14 +53,18 @@ class MainWindow(QMainWindow):
         self.document = document or Document(self)
         self.settings = settings or AppSettings(parent=self)
         self.scene: BoardScene | None = None
+        self._mesh_job: MeshJob | None = None
+        self._mesh_progress: QProgressDialog | None = None
 
         self.view = BoardView()
         self.setCentralWidget(self.view)
 
         self.layer_panel = LayerPanel()
         self.info_panel = BoardInfoPanel()
+        self.mesh_panel = MeshPanel(self.document)
         self._layer_dock = self._add_dock("Layers", self.layer_panel, Qt.DockWidgetArea.LeftDockWidgetArea)
         self._info_dock = self._add_dock("Board", self.info_panel, Qt.DockWidgetArea.RightDockWidgetArea)
+        self._mesh_dock = self._add_dock("Mesh", self.mesh_panel, Qt.DockWidgetArea.RightDockWidgetArea)
 
         self._cursor_label = QLabel()
         self.statusBar().addPermanentWidget(self._cursor_label)
@@ -63,6 +73,9 @@ class MainWindow(QMainWindow):
         self._create_menus()
 
         self.document.project_changed.connect(self._on_project_changed)
+        self.document.mesh_changed.connect(self._on_mesh_changed)
+        self.mesh_panel.build_requested.connect(self.build_mesh)
+        self.mesh_panel.show_mesh_toggled.connect(self.show_mesh_action.setChecked)
         self.layer_panel.visibility_changed.connect(self._on_layer_visibility)
         self.layer_panel.active_layer_changed.connect(self._on_active_layer)
         self.view.cursor_moved.connect(self._on_cursor_moved)
@@ -131,7 +144,19 @@ class MainWindow(QMainWindow):
         self.cursor_action.setChecked(self.settings.cursor_visible)
         self.cursor_action.toggled.connect(self._on_cursor_toggled)
         self.preferences_action = action("&Preferences…", self.open_preferences, "Ctrl+,")
-        self._board_actions = [self.reload_action, self.fit_action, self.zoom_in_action, self.zoom_out_action]
+        self.build_mesh_action = action("&Build mesh", self.build_mesh, "Ctrl+B", False)
+        self.show_mesh_action = QAction("Show &mesh", self)
+        self.show_mesh_action.setCheckable(True)
+        self.show_mesh_action.setChecked(True)
+        self.show_mesh_action.setShortcut(Qt.Key.Key_M)
+        self.show_mesh_action.toggled.connect(self._on_show_mesh_toggled)
+        self._board_actions = [
+            self.reload_action,
+            self.fit_action,
+            self.zoom_in_action,
+            self.zoom_out_action,
+            self.build_mesh_action,
+        ]
 
     def _create_menus(self) -> None:
         """Populate the File, Edit and View menus."""
@@ -154,6 +179,11 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
         view_menu.addAction(self._layer_dock.toggleViewAction())
         view_menu.addAction(self._info_dock.toggleViewAction())
+        view_menu.addAction(self._mesh_dock.toggleViewAction())
+
+        mesh_menu = self.menuBar().addMenu("&Mesh")
+        mesh_menu.addAction(self.build_mesh_action)
+        mesh_menu.addAction(self.show_mesh_action)
 
     # -- settings --------------------------------------------------------------
 
@@ -284,6 +314,135 @@ class MainWindow(QMainWindow):
             if path.suffix in (PROJECT_SUFFIX, BOARD_SUFFIX):
                 return path
         return None
+
+    # -- meshing ---------------------------------------------------------------
+
+    def build_mesh(self) -> None:
+        """Mesh the open board in a child process, showing a cancellable progress dialog.
+
+        The panel's settings are saved to the project's ``.kits.yaml`` first (the
+        mesher reads them from there). If the board file changed on disk since it
+        was loaded, it is reloaded so the mesh matches what is displayed.
+        """
+        project = self.document.project
+        if project is None or self._mesh_job is not None:
+            return
+        if not project.board.has_outline:
+            QMessageBox.warning(self, "Cannot build mesh", "The board has no Edge.Cuts outline.")
+            return
+        try:
+            self.document.set_mesh_settings(self.mesh_panel.settings())
+        except ConfigError as exc:
+            QMessageBox.warning(self, "Cannot build mesh", f"Could not save the mesh settings: {exc}")
+            return
+        if self.document.board_changed_on_disk:
+            if not self.reload():
+                return
+            self.statusBar().showMessage("The board changed on disk and was reloaded before meshing.", 5000)
+            project = self.document.project
+
+        job = MeshJob(project.board.path, self)
+        dialog = QProgressDialog("Starting mesher…", "Cancel", 0, _PROGRESS_STEPS, self)
+        dialog.setWindowTitle("Building mesh")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setValue(0)
+        dialog.canceled.connect(job.cancel)
+        job.progress.connect(self._on_mesh_progress)
+        job.succeeded.connect(self._on_mesh_built)
+        job.failed.connect(self._on_mesh_failed)
+        job.cancelled.connect(self._on_mesh_cancelled)
+
+        self._mesh_job, self._mesh_progress = job, dialog
+        self.mesh_panel.set_busy(True)
+        self.build_mesh_action.setEnabled(False)
+        job.start()
+        dialog.show()
+
+    @property
+    def mesh_job_running(self) -> bool:
+        """Whether a mesh build is in progress."""
+        return self._mesh_job is not None
+
+    def _on_mesh_progress(self, message: str, fraction: float) -> None:
+        """Update the progress dialog.
+
+        Args:
+            message: Current meshing step.
+            fraction: Overall completion, 0 to 1.
+        """
+        if self._mesh_progress is not None:
+            self._mesh_progress.setLabelText(message)
+            self._mesh_progress.setValue(round(fraction * _PROGRESS_STEPS))
+
+    def _finish_mesh_job(self) -> None:
+        """Close the progress dialog and release the finished job."""
+        if self._mesh_progress is not None:
+            self._mesh_progress.close()
+            self._mesh_progress.deleteLater()
+        if self._mesh_job is not None:
+            self._mesh_job.deleteLater()
+        self._mesh_job = self._mesh_progress = None
+        self.mesh_panel.set_busy(False)
+        self.build_mesh_action.setEnabled(self.document.project is not None)
+
+    def _on_mesh_built(self, mesh: BoardMesh) -> None:
+        """Store a freshly built mesh in the document.
+
+        Args:
+            mesh: The mesh loaded from the child process's output.
+        """
+        self._finish_mesh_job()
+        self.document.set_mesh(mesh)
+        self.statusBar().showMessage(
+            f"Mesh built: {mesh.num_triangles:,} triangles on {len(mesh.layers)} layers", 5000
+        )
+
+    def _on_mesh_failed(self, message: str) -> None:
+        """Report a failed mesh build.
+
+        Args:
+            message: Why meshing failed.
+        """
+        self._finish_mesh_job()
+        QMessageBox.critical(self, "Meshing failed", message)
+
+    def _on_mesh_cancelled(self) -> None:
+        """Note a cancelled mesh build; the previous mesh (if any) is kept."""
+        self._finish_mesh_job()
+        self.statusBar().showMessage("Meshing cancelled", 5000)
+
+    def _on_mesh_changed(self, mesh: BoardMesh | None) -> None:
+        """Show the document's current mesh as an overlay.
+
+        Args:
+            mesh: The new mesh, or None if it was cleared.
+        """
+        if self.scene is not None:
+            self.scene.set_mesh(mesh)
+            self.scene.set_mesh_visible(self.show_mesh_action.isChecked())
+
+    def _on_show_mesh_toggled(self, checked: bool) -> None:
+        """Show or hide the mesh overlay, keeping the panel checkbox in sync.
+
+        Args:
+            checked: New state of the "Show mesh" action.
+        """
+        self.mesh_panel.show_mesh.setChecked(checked)
+        if self.scene is not None:
+            self.scene.set_mesh_visible(checked)
+
+    def closeEvent(self, event) -> None:
+        """Kill any running mesher process before the window closes.
+
+        Args:
+            event: The close event.
+        """
+        if self._mesh_job is not None:
+            self._mesh_job.cancel()
+        super().closeEvent(event)
 
     # -- document updates ------------------------------------------------------
 

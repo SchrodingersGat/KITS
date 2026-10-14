@@ -187,6 +187,7 @@ def test_crosshair_follows_mouse_and_toggles(app, board_v9_path):
     window = MainWindow()
     window._layer_dock.hide()
     window._info_dock.hide()
+    window._mesh_dock.hide()
     window.resize(800, 600)
     window.show()
     assert window.open_path(board_v9_path)
@@ -216,3 +217,107 @@ def test_crosshair_follows_mouse_and_toggles(app, board_v9_path):
     dialog.accept()
     assert view.cursor_visible and window.cursor_action.isChecked()
     window.close()
+
+
+# -- meshing -------------------------------------------------------------------
+
+
+def _wait_until(app, condition, timeout=60.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            raise TimeoutError("condition not met")
+        app.processEvents()
+        time.sleep(0.01)
+
+
+def test_mesh_panel_saves_settings_and_validates(app, board_v9_path):
+    from kits.config import config_path_for, load_config
+
+    window = MainWindow()
+    assert window.open_path(board_v9_path.with_suffix(".kicad_pro"))
+    panel = window.mesh_panel
+    assert panel.build_button.isEnabled()
+
+    panel.max_size.setValue(2.5)
+    config_file = config_path_for(board_v9_path)
+    assert load_config(config_file).mesh.max_size_mm == 2.5
+
+    panel.min_size.setValue(3.0)  # larger than max: rejected, not saved
+    assert not panel.settings_error.isHidden()
+    assert not panel.build_button.isEnabled()
+    assert load_config(config_file).mesh.min_size_mm == 0.1
+
+    panel.min_size.setValue(0.2)
+    assert panel.settings_error.isHidden() and panel.build_button.isEnabled()
+
+
+def test_build_mesh_in_child_process_shows_overlay(app, board_v9_path):
+    window = MainWindow()
+    window.show()
+    assert window.open_path(board_v9_path.with_suffix(".kicad_pro"))
+    window.mesh_panel.max_size.setValue(2.0)
+
+    window.build_mesh()
+    assert window.mesh_job_running
+    assert not window.mesh_panel.build_button.isEnabled()
+    _wait_until(app, lambda: not window.mesh_job_running)
+
+    mesh = window.document.mesh
+    assert mesh is not None and mesh.settings.max_size_mm == 2.0
+    assert mesh.msh_path.is_file()
+    assert window.mesh_panel.build_button.text() == "Rebuild mesh"
+
+    scene = window.scene
+    assert scene.mesh_layers == ["F.Cu", "In1.Cu", "B.Cu"]
+    # Only the active layer's mesh is drawn.
+    assert scene.mesh_overlay_visible("F.Cu") and not scene.mesh_overlay_visible("B.Cu")
+    scene.set_active_layer("B.Cu")
+    assert scene.mesh_overlay_visible("B.Cu") and not scene.mesh_overlay_visible("F.Cu")
+    window.show_mesh_action.trigger()
+    assert not scene.mesh_overlay_visible("B.Cu")
+    assert not window.mesh_panel.show_mesh.isChecked()
+
+    # Changing settings marks the mesh stale; rebuilding replaces it.
+    window.mesh_panel.max_size.setValue(3.0)
+    assert window.document.mesh_is_stale
+    window.build_mesh()
+    _wait_until(app, lambda: not window.mesh_job_running)
+    assert window.document.mesh.settings.max_size_mm == 3.0
+    assert not window.document.mesh_is_stale
+    window.close()
+
+
+def test_cancel_mesh_job_keeps_previous_mesh(app, board_v9_path):
+    window = MainWindow()
+    assert window.open_path(board_v9_path)
+    window.build_mesh()
+    window._mesh_job.cancel()
+    _wait_until(app, lambda: not window.mesh_job_running)
+    assert window.document.mesh is None
+    assert "cancelled" in window.statusBar().currentMessage()
+
+
+def test_build_mesh_without_outline_warns(app, board_v10_path, monkeypatch):
+    warnings = []
+    monkeypatch.setattr("kits.gui.main_window.QMessageBox.warning", lambda *a: warnings.append(a))
+    window = MainWindow()
+    assert window.open_path(board_v10_path)
+    assert not window.mesh_panel.build_button.isEnabled()
+    window.build_mesh()
+    assert warnings and not window.mesh_job_running
+
+
+def test_mesh_failure_is_reported(app, board_v9_path, monkeypatch):
+    errors = []
+    monkeypatch.setattr("kits.gui.main_window.QMessageBox.critical", lambda *a: errors.append(a))
+    window = MainWindow()
+    assert window.open_path(board_v9_path)
+    # Corrupt the board after loading: the child re-reads it and fails.
+    board_v9_path.write_text("(kicad_pcb (version 1)", encoding="utf-8")
+    window.document._board_mtime = board_v9_path.stat().st_mtime  # skip the auto-reload
+    window.build_mesh()
+    _wait_until(app, lambda: not window.mesh_job_running)
+    assert errors and "Malformed" in errors[0][2]

@@ -14,6 +14,7 @@ import itertools
 import math
 from dataclasses import dataclass
 
+import numpy as np
 from PySide6.QtCore import QLineF, QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from ..ingest.geometry import arc_points
 from ..ingest.model import EDGE_CUTS, Board, Pad
+from ..mesh.model import BoardMesh, LayerMesh
 from . import colors
 from .settings import DEFAULT_GRID_SPACING_MM
 from .shapes import (
@@ -47,6 +49,8 @@ MODEL_ROLE = 0
 
 _Z_ZONE, _Z_GRAPHIC, _Z_TRACK, _Z_PAD = 0, 1, 2, 3
 _EDGE_CUTS_PX = 1.5
+_Z_MESH_OVERLAY = 1000  # above all board layers
+_MESH_TILES = 16  # overlay tiles per axis
 _GRID_MIN_PX = 8  # never draw grid lines closer than this on screen
 _GRID_ORIGIN_PX = 8  # half-size of the origin marker
 
@@ -161,6 +165,9 @@ class BoardScene(QGraphicsScene):
         super().__init__(parent)
         self.board = board
         self.layers: dict[str, DisplayLayer] = {}
+        self._active_layer: str | None = None
+        self._mesh_overlays: dict[str, LayerItem] = {}
+        self._mesh_visible = True
         self._grid_spacing = DEFAULT_GRID_SPACING_MM
         self._grid_visible = True
         self.setBackgroundBrush(colors.BACKGROUND)
@@ -180,6 +187,7 @@ class BoardScene(QGraphicsScene):
             visible: Whether the layer is shown.
         """
         self.layers[name].item.setVisible(visible)
+        self._update_mesh_visibility()
 
     def set_active_layer(self, name: str | None) -> None:
         """Draw ``name`` above the other copper layers (like KiCad's active layer).
@@ -194,6 +202,102 @@ class BoardScene(QGraphicsScene):
             self.layers[layer_name].item.setZValue(z)
         if name in copper:
             self.layers[name].item.setZValue(len(copper))
+        self._active_layer = name if name in copper else (copper[0] if copper else None)
+        self._update_mesh_visibility()
+
+    @property
+    def active_layer(self) -> str | None:
+        """The copper layer drawn on top, whose mesh is shown; F.Cu unless another was chosen."""
+        return self._active_layer
+
+    # -- mesh overlay ----------------------------------------------------------
+
+    def set_mesh(self, mesh: BoardMesh | None) -> None:
+        """Replace the mesh overlay.
+
+        One overlay is built per meshed copper layer; only the active layer's
+        overlay is shown, since every layer's mesh covers the whole board.
+
+        Args:
+            mesh: The board mesh, or None to remove the overlay.
+        """
+        for overlay in self._mesh_overlays.values():
+            self.removeItem(overlay)
+        self._mesh_overlays = {}
+        if mesh is not None:
+            for lm in mesh.layers:
+                if lm.layer in self.layers:
+                    self._mesh_overlays[lm.layer] = self._build_mesh_overlay(lm)
+        self._update_mesh_visibility()
+
+    def set_mesh_visible(self, visible: bool) -> None:
+        """Show or hide the mesh overlay.
+
+        Args:
+            visible: Whether the active layer's mesh is drawn.
+        """
+        self._mesh_visible = visible
+        self._update_mesh_visibility()
+
+    @property
+    def mesh_layers(self) -> list[str]:
+        """Copper layers that currently have a mesh overlay."""
+        return list(self._mesh_overlays)
+
+    def mesh_overlay_visible(self, layer: str) -> bool:
+        """Whether a layer's mesh overlay is currently drawn.
+
+        Args:
+            layer: Copper layer name.
+
+        Returns:
+            True if the overlay exists and is visible.
+        """
+        overlay = self._mesh_overlays.get(layer)
+        return overlay is not None and overlay.isVisible()
+
+    def _update_mesh_visibility(self) -> None:
+        """Show only the active layer's overlay, and only while that layer is visible."""
+        for name, overlay in self._mesh_overlays.items():
+            overlay.setVisible(
+                self._mesh_visible and name == self._active_layer and self.layers[name].item.isVisible()
+            )
+
+    def _build_mesh_overlay(self, lm: LayerMesh) -> LayerItem:
+        """Create the overlay items for one layer's mesh.
+
+        Edges are split into a grid of tiles, one path item per tile and region,
+        so a partial repaint (e.g. the crosshair moving) only redraws nearby tiles.
+
+        Args:
+            lm: The layer mesh.
+
+        Returns:
+            The overlay container, already added to the scene.
+        """
+        container = LayerItem()
+        container.setZValue(_Z_MESH_OVERLAY)
+        self.addItem(container)
+        edges, is_copper = lm.edges()
+        if not len(edges):
+            return container
+        p0, p1 = lm.nodes[edges[:, 0]], lm.nodes[edges[:, 1]]
+        mid = (p0 + p1) / 2
+        lo, hi = mid.min(axis=0), mid.max(axis=0)
+        span = np.maximum(hi - lo, 1e-9)
+        cell = np.minimum(((mid - lo) / span * _MESH_TILES).astype(int), _MESH_TILES - 1)
+        key = (cell[:, 0] * _MESH_TILES + cell[:, 1]) * 2 + is_copper
+        order = np.argsort(key, kind="stable")
+        bounds = np.flatnonzero(np.diff(key[order])) + 1
+        for group in np.split(order, bounds):
+            path = QPainterPath()
+            for (x0, y0), (x1, y1) in zip(p0[group].tolist(), p1[group].tolist(), strict=True):
+                path.moveTo(x0, y0)
+                path.lineTo(x1, y1)
+            item = QGraphicsPathItem(path, container)
+            color = colors.MESH_COPPER if is_copper[group[0]] else colors.MESH_BARE
+            item.setPen(_cosmetic_pen(color, 1))
+        return container
 
     def board_rect(self) -> QRectF:
         """Board bounding box in scene coordinates (mm).

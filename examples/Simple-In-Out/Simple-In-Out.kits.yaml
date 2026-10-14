@@ -1,0 +1,3 @@
+mesh:
+  max_size_mm: 0.25
+  min_size_mm: 0.01

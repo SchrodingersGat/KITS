@@ -12,6 +12,8 @@ HOLES = QColor(BACKGROUND).lighter(130)
 GRID = QColor(58, 76, 100)
 GRID_ORIGIN = QColor(220, 220, 220)
 CURSOR = QColor(160, 170, 185, 110)  # muted, translucent crosshair
+MESH_COPPER = QColor(255, 255, 255, 150)  # mesh edges in copper
+MESH_BARE = QColor(120, 150, 190, 110)  # mesh edges in bare board
 ZONE_DARKEN = 160  # zones drawn this much darker than tracks on the same layer
 
 _FRONT = QColor(200, 52, 52)

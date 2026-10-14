@@ -21,6 +21,9 @@ htmlcov/
 Thumbs.db
 .DS_Store
 
+# KITS output (meshes, results)
+kits_output/
+
 # Kicad Files
 *.lck
 *.kicad_pcb-bak
