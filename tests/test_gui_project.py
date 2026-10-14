@@ -560,7 +560,7 @@ def test_layers_panel_overlay_toggles(app, window, strip_kits):
     window.solve()
     _wait(app, lambda: not window.solve_job_running)
     boxes = window.layer_panel.overlay_boxes
-    assert list(boxes) == ["Mesh", "Results", "Current sources", "Grid"]
+    assert list(boxes) == ["Mesh", "Results", "Current sources", "Markers", "Grid"]
     assert all(box.isChecked() for box in boxes.values())
     scene = window.scene
 
@@ -618,3 +618,81 @@ def test_log_scale_option(app, window, strip_kits):
     panel.log_scale.setChecked(True)
     panel.mode.setCurrentIndex(panel.mode.findData(DisplayMode.TEMPERATURE))
     assert not panel.log_scale.isEnabled() and not window.scene.results_log  # temperature stays linear
+
+
+def test_markers(app, window, strip_kits):
+    from PySide6.QtCore import QPointF
+
+    from kits.gui.field_display import DisplayMode
+
+    assert window.open_path(strip_kits)
+    window.build_mesh()
+    _wait(app, lambda: not window.mesh_job_running)
+    doc, scene, panel = window.document, window.scene, window.solve_panel
+
+    window._on_board_clicked(QPointF(25.0, 5.0))  # no results yet: no marker
+    assert doc.markers == []
+
+    window.solve()
+    _wait(app, lambda: not window.solve_job_running)
+    window._on_board_clicked(QPointF(25.0, 5.0))
+    window._on_board_clicked(QPointF(80.0, 80.0))  # off the board: marker without a value
+    assert doc.markers == [(25.0, 5.0), (80.0, 80.0)]
+    labels = scene.marker_labels
+    assert labels[0].endswith("A/mm²") and labels[1] == "—"
+    assert panel.markers_table.rowCount() == 2
+    assert panel.markers_table.item(0, 2).text() == labels[0]
+
+    # Labels follow the display mode.
+    panel.mode.setCurrentIndex(panel.mode.findData(DisplayMode.TEMPERATURE))
+    assert scene.marker_labels[0].endswith("°C") and panel.markers_table.item(0, 2).text().endswith("°C")
+
+    # Toggle: action, Layers checkbox and panel checkbox stay in sync.
+    window.show_markers_action.trigger()
+    assert not scene.markers_visible and not panel.show_markers.isChecked()
+    assert not window.layer_panel.overlay_boxes["Markers"].isChecked()
+    panel.show_markers.setChecked(True)
+    assert scene.markers_visible and window.show_markers_action.isChecked()
+
+    # Remove the selected marker, then clear.
+    panel.markers_table.selectRow(0)
+    panel.remove_selected_markers()
+    assert doc.markers == [(80.0, 80.0)] and panel.markers_table.rowCount() == 1
+    panel.clear_markers_button.click()
+    assert doc.markers == [] and scene.marker_labels == []
+
+    # Hiding the results overlay stops clicks adding markers.
+    window.show_results_action.trigger()
+    window._on_board_clicked(QPointF(25.0, 5.0))
+    assert doc.markers == []
+    window.show_results_action.trigger()
+
+    # Markers are cleared by new results and by a new mesh.
+    window._on_board_clicked(QPointF(25.0, 5.0))
+    window.solve()
+    _wait(app, lambda: not window.solve_job_running)
+    assert doc.markers == []
+    window._on_board_clicked(QPointF(25.0, 5.0))
+    window.build_mesh()
+    _wait(app, lambda: not window.mesh_job_running)
+    assert doc.markers == [] and panel.markers_table.rowCount() == 0
+
+
+def test_double_click_pad_leaves_no_marker(app, window, strip_kits):
+    from PySide6.QtCore import QPointF
+
+    assert window.open_path(strip_kits)
+    window.build_mesh()
+    _wait(app, lambda: not window.mesh_job_running)
+    window.solve()
+    _wait(app, lambda: not window.solve_job_running)
+    pos = QPointF(7, 5)
+    assert window.scene.pad_at(pos) == ("P1", "1")
+    window._on_board_clicked(pos)  # first click of the double-click
+    assert len(window.document.markers) == 1
+    window._on_board_double_clicked(pos)
+    assert window.document.markers == []
+
+    window._on_board_clicked(QPointF(25.0, 5.0))  # double-click off a pad keeps its one marker
+    window._on_board_double_clicked(QPointF(25.0, 5.0))
+    assert window.document.markers == [(25.0, 5.0)]

@@ -17,6 +17,7 @@ MESH_BARE = QColor(120, 150, 190, 110)  # mesh edges in bare board
 SELECTION = QColor(255, 255, 255)  # selected pad outline
 SOURCE = QColor(46, 204, 113)  # current into the board
 SINK = QColor(255, 140, 26)  # current out of the board
+MARKER = QColor(80, 220, 255)  # result probe markers
 ZONE_DARKEN = 160  # zones drawn this much darker than tracks on the same layer
 
 _FRONT = QColor(200, 52, 52)

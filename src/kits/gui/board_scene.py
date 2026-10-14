@@ -37,6 +37,7 @@ from .field_display import (
     FieldProbe,
     color_indices,
     colormap,
+    format_value,
     supports_log,
     triangle_values,
     value_range,
@@ -67,6 +68,8 @@ _Z_MESH_OVERLAY = 1000  # above all board layers
 _RESULTS_ALPHA = 235
 _Z_SOURCES = 1100  # current source markers, above the mesh
 _Z_SELECTION = 1200  # selected pad outline, on top of everything
+_Z_MARKERS = 1300  # result probe markers
+_MARKER_RADIUS_PX = 6
 _LABEL_GAP_PX = 4  # gap between a pad and its current label, screen pixels
 # Data role holding a pad's (footprint ref, pad number) on its copper and hole items,
 # for picking pads with the mouse.
@@ -199,6 +202,10 @@ class BoardScene(QGraphicsScene):
         self._results_visible = True
         self._results_overlays: dict[str, LayerItem] = {}
         self._probes: dict[str, FieldProbe] = {}
+        self._marker_points: list[tuple[float, float]] = []
+        self._marker_labels: list[str] = []
+        self._markers_visible = True
+        self._marker_items: LayerItem | None = None
         self._mesh_visible = True
         self._grid_spacing = DEFAULT_GRID_SPACING_MM
         self._grid_visible = True
@@ -236,6 +243,8 @@ class BoardScene(QGraphicsScene):
             self.layers[name].item.setZValue(len(copper))
         self._active_layer = name if name in copper else (copper[0] if copper else None)
         self._update_mesh_visibility()
+        if self._marker_points:
+            self._rebuild_markers()
 
     @property
     def active_layer(self) -> str | None:
@@ -446,6 +455,7 @@ class BoardScene(QGraphicsScene):
         if results is not None:
             self._results_range = value_range(results, self._results_mode, self.results_log)
         self._update_results_visibility()
+        self._rebuild_markers()
 
     def set_results_visible(self, visible: bool) -> None:
         """Show or hide the results overlay.
@@ -465,6 +475,100 @@ class BoardScene(QGraphicsScene):
     def results_range(self) -> tuple[float, float]:
         """Colour scale limits of the current results overlay, in display units."""
         return self._results_range
+
+    # -- result markers -----------------------------------------------------------------
+
+    def set_markers(self, points: list[tuple[float, float]]) -> None:
+        """Draw numbered probe markers, each labelled with the displayed value under it.
+
+        Labels follow the active layer and display mode (like the overlay) and are
+        refreshed when either changes.
+
+        Args:
+            points: Marker positions in board millimetres, in numbering order.
+        """
+        self._marker_points = list(points)
+        self._rebuild_markers()
+
+    def set_markers_visible(self, visible: bool) -> None:
+        """Show or hide the markers.
+
+        Args:
+            visible: Whether markers are drawn. Kept when markers are redrawn.
+        """
+        self._markers_visible = visible
+        if self._marker_items is not None:
+            self._marker_items.setVisible(visible)
+
+    @property
+    def markers_visible(self) -> bool:
+        """Whether markers are drawn."""
+        return self._markers_visible
+
+    @property
+    def marker_labels(self) -> list[str]:
+        """Each marker's current value text (``"—"`` where nothing is defined)."""
+        return list(self._marker_labels)
+
+    def _value_text(self, x: float, y: float) -> str:
+        """The displayed quantity at a point on the active layer, formatted.
+
+        Unlike :meth:`probe`, this ignores whether the overlay is currently shown.
+
+        Args:
+            x: X in board millimetres.
+            y: Y in board millimetres.
+
+        Returns:
+            e.g. ``"23.8 A/mm²"``, or ``"—"`` if there is no value there.
+        """
+        layer = self._active_layer
+        if self._results is None or layer is None or self._results.layer(layer) is None:
+            return "—"
+        if layer not in self._probes:
+            self._probes[layer] = FieldProbe(self._results.layer(layer))
+        value = self._probes[layer].value_at(x, y, self._results_mode)
+        return "—" if value is None else format_value(value, self._results_mode)
+
+    def _rebuild_markers(self) -> None:
+        """Redraw the markers and recompute their labels."""
+        if self._marker_items is not None:
+            self.removeItem(self._marker_items)
+            self._marker_items = None
+        self._marker_labels = [self._value_text(x, y) for x, y in self._marker_points]
+        if not self._marker_points:
+            return
+        self._marker_items = LayerItem()
+        self._marker_items.setZValue(_Z_MARKERS)
+        self._marker_items.setVisible(self._markers_visible)
+        self.addItem(self._marker_items)
+        r = _MARKER_RADIUS_PX
+        symbol = QPainterPath()
+        symbol.addEllipse(QPointF(0, 0), r, r)
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            symbol.moveTo(dx * (r - 3), dy * (r - 3))
+            symbol.lineTo(dx * (r + 4), dy * (r + 4))
+        font = QFont()
+        font.setBold(True)
+        for number, ((x, y), text) in enumerate(
+            zip(self._marker_points, self._marker_labels, strict=True), 1
+        ):
+            for color, width in ((QColor(0, 0, 0), 4.0), (colors.MARKER, 2.0)):  # outline, then marker
+                item = QGraphicsPathItem(symbol, self._marker_items)
+                item.setPen(_cosmetic_pen(color, width))
+                item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+                item.setPos(x, y)
+            label = QGraphicsSimpleTextItem(f"{number}: {text}")
+            label.setFont(font)
+            label.setBrush(QColor(255, 255, 255))
+            bounds = label.boundingRect()
+            box = QGraphicsRectItem(bounds.adjusted(-3, -1, 3, 1), self._marker_items)
+            box.setBrush(QColor(20, 20, 20, 200))
+            box.setPen(_cosmetic_pen(colors.MARKER, 1))
+            box.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+            box.setTransform(box.transform().translate(r + 6, -bounds.height() - r))
+            box.setPos(x, y)
+            label.setParentItem(box)
 
     def probe(self, pos: QPointF) -> tuple[str, DisplayMode, float] | None:
         """The displayed result value under a point, as shown by the overlay.

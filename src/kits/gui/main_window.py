@@ -104,6 +104,7 @@ class MainWindow(QMainWindow):
         self._mesh_dock.raise_()
 
         self._last_cursor: QPointF | None = None
+        self._click_marker: int | None = None  # marker added by the latest click
         self._probe_label = QLabel()
         self._probe_label.setToolTip("Solved value under the cursor, on the active layer")
         self.statusBar().addPermanentWidget(self._probe_label)
@@ -116,6 +117,7 @@ class MainWindow(QMainWindow):
             ("Mesh", self.show_mesh_action),
             ("Results", self.show_results_action),
             ("Current sources", self.show_sources_action),
+            ("Markers", self.show_markers_action),
             ("Grid", self.grid_action),
         ):
             self.layer_panel.add_overlay_toggle(label, act)
@@ -129,6 +131,8 @@ class MainWindow(QMainWindow):
         self.solve_panel.mode_changed.connect(self._on_display_mode_changed)
         self.solve_panel.log_scale_toggled.connect(lambda _on: self._on_display_mode_changed())
         self.solve_panel.show_results_toggled.connect(self.show_results_action.setChecked)
+        self.solve_panel.show_markers_toggled.connect(self.show_markers_action.setChecked)
+        self.document.markers_changed.connect(self._show_markers)
         self.sources_panel.show_sources_toggled.connect(self.show_sources_action.setChecked)
         self.mesh_panel.build_requested.connect(self.build_mesh)
         self.mesh_panel.show_mesh_toggled.connect(self.show_mesh_action.setChecked)
@@ -238,6 +242,7 @@ class MainWindow(QMainWindow):
         self.show_mesh_action = toggle("Show &mesh", True, self._on_show_mesh_toggled, Qt.Key.Key_M)
         self.solve_action = action("&Solve", self.solve, Qt.Key.Key_F9, False)
         self.show_results_action = toggle("Show &results", True, self._on_show_results_toggled, Qt.Key.Key_R)
+        self.show_markers_action = toggle("Show mar&kers", True, self._on_show_markers_toggled, Qt.Key.Key_K)
         self.show_sources_action = toggle(
             "Show current &sources", True, self._on_show_sources_toggled, Qt.Key.Key_S
         )
@@ -300,6 +305,8 @@ class MainWindow(QMainWindow):
         solve_menu = self.menuBar().addMenu("&Solve")
         solve_menu.addAction(self.solve_action)
         solve_menu.addAction(self.show_results_action)
+        solve_menu.addAction(self.show_markers_action)
+        solve_menu.addAction("Clear markers", self.document.clear_markers)
 
     # -- settings --------------------------------------------------------------
 
@@ -845,6 +852,7 @@ class MainWindow(QMainWindow):
                 self.solve_panel.set_legend(
                     self.solve_panel.display_mode, *self.scene.results_range, self.scene.results_log
                 )
+        self._show_markers()
         self._update_probe()
 
     def _on_display_mode_changed(self, mode=None) -> None:
@@ -858,6 +866,7 @@ class MainWindow(QMainWindow):
         if self.scene is not None and self.document.results is not None:
             self.scene.set_results(self.document.results, mode, self.solve_panel.log_scale_selected)
             self.solve_panel.set_legend(mode, *self.scene.results_range, self.scene.results_log)
+        self._show_markers()
         self._update_probe()
 
     def _on_show_results_toggled(self, checked: bool) -> None:
@@ -986,6 +995,7 @@ class MainWindow(QMainWindow):
         self._selected_pad = None
         self.sources_panel.set_selected_pad(None)
         self._show_sources()
+        self._show_markers()
         self._update_state()
 
     def _update_state(self, *_args) -> None:
@@ -1071,6 +1081,7 @@ class MainWindow(QMainWindow):
         """
         if self.scene is not None:
             self.scene.set_active_layer(name)
+        self._show_markers()
         self._update_probe()
 
     # -- pad selection and current sources --------------------------------------
@@ -1092,13 +1103,16 @@ class MainWindow(QMainWindow):
         return self._selected_pad
 
     def _on_board_clicked(self, pos) -> None:
-        """Select the pad under a left click (or clear the selection on empty board).
+        """Add a result marker (while results are shown) and select the pad under a left click.
 
         Args:
             pos: Scene position of the click, in millimetres.
         """
         if self.scene is None:
             return
+        self._click_marker = None
+        if self.document.results is not None and self.scene.results_overlay_visible(self.scene.active_layer):
+            self._click_marker = self.document.add_marker(pos.x(), pos.y())
         key = self.scene.pad_at(pos)
         self.select_pad(key)
         if key is not None:
@@ -1120,6 +1134,10 @@ class MainWindow(QMainWindow):
         key = self.scene.pad_at(pos)
         if key is None:
             return
+        # The first click of the double-click added a marker; this gesture is about the pad.
+        if self._click_marker is not None and self._click_marker == len(self.document.markers) - 1:
+            self.document.remove_markers([self._click_marker])
+        self._click_marker = None
         self.select_pad(key)
         self._sources_dock.show()
         self._sources_dock.raise_()
@@ -1146,6 +1164,32 @@ class MainWindow(QMainWindow):
         self.sources_panel.show_sources.setChecked(checked)
         if self.scene is not None:
             self.scene.set_sources_visible(checked)
+
+    def _on_show_markers_toggled(self, checked: bool) -> None:
+        """Show or hide the result markers, keeping the panel checkbox in sync.
+
+        Args:
+            checked: New state of the "Show markers" action.
+        """
+        self.solve_panel.show_markers.setChecked(checked)
+        if self.scene is not None:
+            self.scene.set_markers_visible(checked)
+
+    def _show_markers(self, *_args) -> None:
+        """Redraw the markers and refresh the Markers list (values follow the display mode).
+
+        Args:
+            *_args: Ignored signal arguments.
+        """
+        points = self.document.markers
+        rows = []
+        if self.scene is not None:
+            self.scene.set_markers_visible(self.show_markers_action.isChecked())
+            self.scene.set_markers(points)
+            for (x, y), value in zip(points, self.scene.marker_labels, strict=True):
+                gx, gy = self.scene.to_grid_coords(x, y)
+                rows.append((f"{gx:.3f}, {gy:.3f}", value))
+        self.solve_panel.set_markers(rows)
 
     def _show_sources(self, *_args) -> None:
         """Redraw the current source markers on the board.

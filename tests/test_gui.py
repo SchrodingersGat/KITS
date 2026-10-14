@@ -354,3 +354,25 @@ def test_board_panel_shows_copper_weights(app, kits_v9_path, kits_v10_path):
     rows = [[table.item(r, c).text() for c in range(3)] for r in range(table.rowCount())]
     assert rows == [["F.Cu", "copper (assumed)", "0.035"], ["B.Cu", "copper (assumed)", "0.035"]]
     assert not panel._stackup_note.isHidden() and "Physical Stackup" in panel._stackup_note.text()
+
+
+def test_document_markers(app):
+    from kits.gui.document import Document
+
+    doc = Document()
+    changes = []
+    doc.markers_changed.connect(lambda: changes.append(doc.markers))
+    assert doc.add_marker(1, 2) == 0 and doc.add_marker(3, 4) == 1 and doc.add_marker(5, 6) == 2
+    doc.markers.append((9, 9))  # a copy: can't be changed from outside
+    assert doc.markers == [(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)]
+    doc.remove_markers([0, 2, 7])
+    assert doc.markers == [(3.0, 4.0)]
+    doc.remove_markers([5])  # nothing removed: no signal
+    assert len(changes) == 4
+    doc.set_results(None)  # new (or cleared) results clear markers
+    assert doc.markers == [] and len(changes) == 5
+    doc.clear_markers()  # already empty: no signal
+    assert len(changes) == 5
+    doc.add_marker(0, 0)
+    doc.set_mesh(None)
+    assert doc.markers == []

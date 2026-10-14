@@ -34,6 +34,7 @@ class Document(QObject):
         dirty_changed(bool): The project gained or lost unsaved changes.
         mesh_changed(BoardMesh | None): A mesh was built, or cleared.
         results_changed(SolveResults | None): A solve finished, or results were cleared.
+        markers_changed(): Result markers were added, removed or cleared.
     """
 
     project_changed = Signal(object)
@@ -43,6 +44,7 @@ class Document(QObject):
     dirty_changed = Signal(bool)
     mesh_changed = Signal(object)
     results_changed = Signal(object)
+    markers_changed = Signal()
 
     def __init__(self, parent=None):
         """Create an empty document with no project open.
@@ -59,6 +61,7 @@ class Document(QObject):
         self._dirty = False
         self._mesh_notice: str | None = None
         self._mesh_from_file = False
+        self._markers: list[tuple[float, float]] = []
         self._board_hash: str | None = None
         self._results: SolveResults | None = None
         self._results_notice: str | None = None
@@ -140,7 +143,7 @@ class Document(QObject):
         return self._results.staleness(*current)
 
     def set_results(self, results: SolveResults | None) -> None:
-        """Replace the current results.
+        """Replace the current results (clearing any markers on the old ones).
 
         Args:
             results: Newly computed results, or None to clear them.
@@ -148,7 +151,50 @@ class Document(QObject):
         self._results = results
         self._results_from_file = False
         self._results_notice = None
+        self.clear_markers()
         self.results_changed.emit(results)
+
+    # -- result markers -------------------------------------------------------------
+
+    @property
+    def markers(self) -> list[tuple[float, float]]:
+        """Result probe markers, as board positions in millimetres (a copy)."""
+        return list(self._markers)
+
+    def add_marker(self, x: float, y: float) -> int:
+        """Add a result probe marker.
+
+        Markers aren't saved with the project; they are cleared whenever the mesh
+        or results change, since their values would no longer apply.
+
+        Args:
+            x: X in board millimetres.
+            y: Y in board millimetres.
+
+        Returns:
+            The new marker's index.
+        """
+        self._markers.append((float(x), float(y)))
+        self.markers_changed.emit()
+        return len(self._markers) - 1
+
+    def remove_markers(self, indices) -> None:
+        """Remove markers by index.
+
+        Args:
+            indices: Indices into :attr:`markers`; out-of-range ones are ignored.
+        """
+        drop = set(indices)
+        kept = [m for i, m in enumerate(self._markers) if i not in drop]
+        if len(kept) != len(self._markers):
+            self._markers = kept
+            self.markers_changed.emit()
+
+    def clear_markers(self) -> None:
+        """Remove all markers."""
+        if self._markers:
+            self._markers = []
+            self.markers_changed.emit()
 
     def reload_saved_mesh(self) -> None:
         """Load the project's saved mesh if it is current and differs from the one shown.
@@ -158,6 +204,7 @@ class Document(QObject):
         mesh, notice = self._load_saved_mesh()
         if mesh is not None and (self._mesh is None or self._mesh.fingerprint != mesh.fingerprint):
             self._mesh, self._mesh_notice, self._mesh_from_file = mesh, None, True
+            self.clear_markers()
             self.mesh_changed.emit(mesh)
 
     def _results_fingerprints(self) -> tuple[MeshFingerprint, str]:
@@ -460,6 +507,7 @@ class Document(QObject):
         self._mesh = mesh
         self._mesh_from_file = False
         self._mesh_notice = None
+        self.clear_markers()
         self.mesh_changed.emit(mesh)
 
     # -- internals ---------------------------------------------------------------------
@@ -491,6 +539,7 @@ class Document(QObject):
             self._board_hash = board_hash(kicad.board.path) if kicad else None
         except OSError:
             self._board_hash = None
+        self.clear_markers()
         self.board_changed.emit(kicad)
         self._mesh, self._mesh_notice = self._load_saved_mesh()
         self._mesh_from_file = self._mesh is not None

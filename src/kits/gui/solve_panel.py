@@ -5,16 +5,20 @@ from __future__ import annotations
 import dataclasses
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QLinearGradient, QPainter, QPixmap
+from PySide6.QtGui import QKeySequence, QLinearGradient, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -104,12 +108,14 @@ class SolvePanel(QWidget):
         mode_changed(DisplayMode): The displayed quantity changed.
         log_scale_toggled(bool): The log colour scale option changed.
         show_results_toggled(bool): The results overlay was toggled.
+        show_markers_toggled(bool): The markers were toggled.
     """
 
     solve_requested = Signal()
     mode_changed = Signal(object)
     log_scale_toggled = Signal(bool)
     show_results_toggled = Signal(bool)
+    show_markers_toggled = Signal(bool)
 
     def __init__(self, document: Document, parent=None):
         """Create the panel.
@@ -199,6 +205,7 @@ class SolvePanel(QWidget):
         layout.addWidget(self.log_scale)
         layout.addWidget(self.show_results)
         layout.addWidget(self.legend)
+        layout.addWidget(self._build_markers_group())
         layout.addWidget(self.settings_group)
         layout.addStretch(1)
 
@@ -273,6 +280,64 @@ class SolvePanel(QWidget):
         """
         self._busy = busy
         self.refresh()
+
+    def _build_markers_group(self) -> QGroupBox:
+        """Create the Markers list with its buttons and show/hide checkbox.
+
+        Returns:
+            The group box.
+        """
+        self.show_markers = QCheckBox("Show markers")
+        self.show_markers.setChecked(True)
+        self.show_markers.setToolTip("Show the result markers on the board (K)")
+        self.show_markers.toggled.connect(self.show_markers_toggled)
+        self.markers_hint = QLabel("Click the board to add a marker.")
+        self.markers_hint.setEnabled(False)
+        self.markers_table = QTableWidget(0, 3)
+        self.markers_table.setHorizontalHeaderLabels(["#", "Position (mm)", "Value"])
+        self.markers_table.verticalHeader().setVisible(False)
+        self.markers_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.markers_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.markers_table.setMaximumHeight(160)
+        header = self.markers_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        QShortcut(QKeySequence.StandardKey.Delete, self.markers_table, self.remove_selected_markers)
+        self.remove_markers_button = QPushButton("Remove")
+        self.remove_markers_button.clicked.connect(self.remove_selected_markers)
+        self.clear_markers_button = QPushButton("Clear all")
+        self.clear_markers_button.clicked.connect(self._document.clear_markers)
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.remove_markers_button)
+        buttons.addWidget(self.clear_markers_button)
+        group = QGroupBox("Markers")
+        column = QVBoxLayout(group)
+        column.addWidget(self.markers_hint)
+        column.addWidget(self.markers_table)
+        column.addLayout(buttons)
+        column.addWidget(self.show_markers)
+        self.set_markers([])
+        return group
+
+    def set_markers(self, rows: list[tuple[str, str]]) -> None:
+        """List the markers.
+
+        Args:
+            rows: ``(position, value)`` texts per marker, in numbering order.
+        """
+        self.markers_table.setRowCount(len(rows))
+        for row, (position, value) in enumerate(rows):
+            for col, text in enumerate((str(row + 1), position, value)):
+                self.markers_table.setItem(row, col, QTableWidgetItem(text))
+        self.markers_table.setVisible(bool(rows))
+        self.remove_markers_button.setEnabled(bool(rows))
+        self.clear_markers_button.setEnabled(bool(rows))
+
+    def remove_selected_markers(self) -> None:
+        """Remove the markers selected in the list."""
+        rows = {index.row() for index in self.markers_table.selectionModel().selectedRows()}
+        self._document.remove_markers(rows)
 
     @property
     def log_scale_selected(self) -> bool:
