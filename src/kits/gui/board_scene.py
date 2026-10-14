@@ -30,7 +30,9 @@ from ..config import CurrentSource
 from ..ingest.geometry import arc_points
 from ..ingest.model import EDGE_CUTS, Board, Pad
 from ..mesh.model import BoardMesh, LayerMesh
+from ..solve.results import LayerResult, SolveResults
 from . import colors
+from .field_display import DisplayMode, color_indices, colormap, triangle_values, value_range
 from .settings import DEFAULT_GRID_SPACING_MM
 from .shapes import (
     circle_path,
@@ -52,7 +54,9 @@ MODEL_ROLE = 0
 
 _Z_ZONE, _Z_GRAPHIC, _Z_TRACK, _Z_PAD = 0, 1, 2, 3
 _EDGE_CUTS_PX = 1.5
+_Z_RESULTS_OVERLAY = 950  # solved fields, above the board, below the mesh
 _Z_MESH_OVERLAY = 1000  # above all board layers
+_RESULTS_ALPHA = 235
 _Z_SOURCES = 1100  # current source markers, above the mesh
 _Z_SELECTION = 1200  # selected pad outline, on top of everything
 _LABEL_GAP_PX = 4  # gap between a pad and its current label, screen pixels
@@ -179,6 +183,11 @@ class BoardScene(QGraphicsScene):
         self._pad_items: dict[tuple[str, str], list[QGraphicsPathItem]] = {}
         self._source_markers: LayerItem | None = None
         self._selection: LayerItem | None = None
+        self._results: SolveResults | None = None
+        self._results_mode = DisplayMode.CURRENT_DENSITY
+        self._results_range = (0.0, 1.0)
+        self._results_visible = True
+        self._results_overlays: dict[str, LayerItem] = {}
         self._mesh_visible = True
         self._grid_spacing = DEFAULT_GRID_SPACING_MM
         self._grid_visible = True
@@ -383,8 +392,113 @@ class BoardScene(QGraphicsScene):
         overlay = self._mesh_overlays.get(layer)
         return overlay is not None and overlay.isVisible()
 
+    # -- results overlay --------------------------------------------------------------
+
+    def set_results(self, results: SolveResults | None, mode: DisplayMode | None = None) -> None:
+        """Show solve results, coloured by one quantity.
+
+        As with the mesh, only the active layer's overlay is drawn. Overlays are
+        built when a layer is first shown and kept until the results or mode change.
+
+        Args:
+            results: The results, or None to remove the overlay.
+            mode: Quantity to colour by; keeps the current mode if omitted.
+        """
+        for overlay in self._results_overlays.values():
+            self.removeItem(overlay)
+        self._results_overlays = {}
+        self._results = results
+        if mode is not None:
+            self._results_mode = mode
+        if results is not None:
+            self._results_range = value_range(results, self._results_mode)
+        self._update_results_visibility()
+
+    def set_results_visible(self, visible: bool) -> None:
+        """Show or hide the results overlay.
+
+        Args:
+            visible: Whether the active layer's results are drawn.
+        """
+        self._results_visible = visible
+        self._update_results_visibility()
+
+    @property
+    def results_range(self) -> tuple[float, float]:
+        """Colour scale limits of the current results overlay, in display units."""
+        return self._results_range
+
+    def results_overlay_visible(self, layer: str) -> bool:
+        """Whether a layer's results overlay is currently drawn.
+
+        Args:
+            layer: Copper layer name.
+
+        Returns:
+            True if the overlay exists and is visible.
+        """
+        overlay = self._results_overlays.get(layer)
+        return overlay is not None and overlay.isVisible()
+
+    def _update_results_visibility(self) -> None:
+        """Build (if needed) and show only the active layer's results overlay."""
+        show = self._results is not None and self._results_visible and self._active_layer is not None
+        if show and self._active_layer in self.layers:
+            show = self.layers[self._active_layer].item.isVisible()
+        if show and self._active_layer not in self._results_overlays:
+            layer = self._results.layer(self._active_layer)
+            if layer is not None:
+                self._results_overlays[self._active_layer] = self._build_results_overlay(layer)
+        for name, overlay in self._results_overlays.items():
+            overlay.setVisible(show and name == self._active_layer)
+
+    def _build_results_overlay(self, layer: LayerResult) -> LayerItem:
+        """Create filled, colour-binned triangles for one layer's results.
+
+        Triangles are grouped by colour and by tile (as for the mesh overlay), so
+        each group is one path item and partial repaints stay cheap.
+
+        Args:
+            layer: The layer's results.
+
+        Returns:
+            The overlay container, already added to the scene.
+        """
+        container = LayerItem()
+        container.setZValue(_Z_RESULTS_OVERLAY)
+        self.addItem(container)
+        values, shown = triangle_values(layer, self._results_mode)
+        tris = layer.triangles[shown]
+        if not len(tris):
+            return container
+        colors_ = colormap(self._results_mode)
+        index = color_indices(values[shown], *self._results_range, steps=len(colors_))
+        corners = layer.nodes[tris]  # (M, 3, 2)
+        centroid = corners.mean(axis=1)
+        lo, hi = centroid.min(axis=0), centroid.max(axis=0)
+        cell = np.minimum(
+            ((centroid - lo) / np.maximum(hi - lo, 1e-9) * _MESH_TILES).astype(int), _MESH_TILES - 1
+        )
+        key = (cell[:, 0] * _MESH_TILES + cell[:, 1]) * len(colors_) + index
+        order = np.argsort(key, kind="stable")
+        bounds = np.flatnonzero(np.diff(key[order])) + 1
+        for group in np.split(order, bounds):
+            path = QPainterPath()
+            for (x0, y0), (x1, y1), (x2, y2) in corners[group].tolist():
+                path.moveTo(x0, y0)
+                path.lineTo(x1, y1)
+                path.lineTo(x2, y2)
+                path.closeSubpath()
+            base = colors_[int(index[group[0]])]
+            fill = QColor(base.red(), base.green(), base.blue(), _RESULTS_ALPHA)
+            item = QGraphicsPathItem(path, container)
+            item.setBrush(fill)
+            item.setPen(_cosmetic_pen(fill, 1))  # hairline closes antialiasing seams between triangles
+        return container
+
     def _update_mesh_visibility(self) -> None:
         """Show only the active layer's overlay, and only while that layer is visible."""
+        self._update_results_visibility()
         for name, overlay in self._mesh_overlays.items():
             overlay.setVisible(
                 self._mesh_visible and name == self._active_layer and self.layers[name].item.isVisible()

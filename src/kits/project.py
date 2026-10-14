@@ -93,6 +93,11 @@ class KitsProject:
         """Where the mesh arrays and their input fingerprints are saved for reloading."""
         return saved_mesh_path_for(self.msh_path)
 
+    @property
+    def results_path(self) -> Path:
+        """Where solve results (fields per layer, with input fingerprints) are saved."""
+        return self.output_dir / f"{self.name}.results.npz"
+
     def board_reference(self) -> str | None:
         """The board path as written to the file: relative to the project if possible.
 

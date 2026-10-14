@@ -36,6 +36,8 @@ from .mesh_job import MeshJob
 from .mesh_panel import MeshPanel
 from .settings import AppSettings
 from .settings_dialog import SettingsDialog
+from .solve_job import SolveJob
+from .solve_panel import SolvePanel
 from .sources_panel import SourcesPanel
 from .start_page import NoBoardPage, StartPage
 
@@ -63,6 +65,8 @@ class MainWindow(QMainWindow):
         self.settings = settings or AppSettings(parent=self)
         self.scene: BoardScene | None = None
         self._mesh_job: MeshJob | None = None
+        self._solve_job: SolveJob | None = None
+        self._solve_progress: QProgressDialog | None = None
         self._mesh_progress: QProgressDialog | None = None
 
         self.view = BoardView()
@@ -77,6 +81,7 @@ class MainWindow(QMainWindow):
         self.info_panel = BoardInfoPanel()
         self.mesh_panel = MeshPanel(self.document)
         self.sources_panel = SourcesPanel(self.document)
+        self.solve_panel = SolvePanel(self.document)
         self._selected_pad: tuple[str, str] | None = None
         self._layer_dock = self._add_dock("Layers", self.layer_panel, Qt.DockWidgetArea.LeftDockWidgetArea)
         self._info_dock = self._add_dock("Board", self.info_panel, Qt.DockWidgetArea.RightDockWidgetArea)
@@ -86,6 +91,9 @@ class MainWindow(QMainWindow):
         )
         self.tabifyDockWidget(self._info_dock, self._sources_dock)
         self._sources_dock.raise_()
+        self._solve_dock = self._add_dock("Solve", self.solve_panel, Qt.DockWidgetArea.RightDockWidgetArea)
+        self.tabifyDockWidget(self._mesh_dock, self._solve_dock)
+        self._mesh_dock.raise_()
 
         self._cursor_label = QLabel()
         self.statusBar().addPermanentWidget(self._cursor_label)
@@ -97,6 +105,10 @@ class MainWindow(QMainWindow):
         self.document.board_changed.connect(self._on_board_changed)
         self.document.dirty_changed.connect(self._update_title)
         self.document.mesh_changed.connect(self._on_mesh_changed)
+        self.document.results_changed.connect(self._on_results_changed)
+        self.solve_panel.solve_requested.connect(self.solve)
+        self.solve_panel.mode_changed.connect(self._on_display_mode_changed)
+        self.solve_panel.show_results_toggled.connect(self.show_results_action.setChecked)
         self.mesh_panel.build_requested.connect(self.build_mesh)
         self.mesh_panel.show_mesh_toggled.connect(self.show_mesh_action.setChecked)
         self.layer_panel.visibility_changed.connect(self._on_layer_visibility)
@@ -203,6 +215,8 @@ class MainWindow(QMainWindow):
         )
         self.build_mesh_action = action("&Build mesh", self.build_mesh, "Ctrl+B", False)
         self.show_mesh_action = toggle("Show &mesh", True, self._on_show_mesh_toggled, Qt.Key.Key_M)
+        self.solve_action = action("&Solve", self.solve, Qt.Key.Key_F9, False)
+        self.show_results_action = toggle("Show &results", True, self._on_show_results_toggled, Qt.Key.Key_R)
         self._project_actions = [
             self.save_action,
             self.save_as_action,
@@ -215,6 +229,7 @@ class MainWindow(QMainWindow):
             self.zoom_in_action,
             self.zoom_out_action,
             self.build_mesh_action,
+            self.solve_action,
         ]
 
     def _create_menus(self) -> None:
@@ -251,10 +266,15 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self._info_dock.toggleViewAction())
         view_menu.addAction(self._mesh_dock.toggleViewAction())
         view_menu.addAction(self._sources_dock.toggleViewAction())
+        view_menu.addAction(self._solve_dock.toggleViewAction())
 
         mesh_menu = self.menuBar().addMenu("&Mesh")
         mesh_menu.addAction(self.build_mesh_action)
         mesh_menu.addAction(self.show_mesh_action)
+
+        solve_menu = self.menuBar().addMenu("&Solve")
+        solve_menu.addAction(self.solve_action)
+        solve_menu.addAction(self.show_results_action)
 
     # -- settings --------------------------------------------------------------
 
@@ -390,8 +410,7 @@ class MainWindow(QMainWindow):
         """
         if not self.maybe_save():
             return False
-        if self._mesh_job is not None:
-            self._mesh_job.cancel()
+        self._cancel_jobs()
         self.document.close()
         return True
 
@@ -623,7 +642,7 @@ class MainWindow(QMainWindow):
         it was loaded, it is reloaded so the mesh matches what is displayed.
         """
         doc = self.document
-        if doc.project is None or doc.board is None or self._mesh_job is not None:
+        if doc.project is None or doc.board is None or self._mesh_job or self._solve_job:
             return
         if not doc.board.has_outline:
             QMessageBox.warning(self, "Cannot build mesh", "The board has no Edge.Cuts outline.")
@@ -655,8 +674,7 @@ class MainWindow(QMainWindow):
         job.cancelled.connect(self._on_mesh_cancelled)
 
         self._mesh_job, self._mesh_progress = job, dialog
-        self.mesh_panel.set_busy(True)
-        self.build_mesh_action.setEnabled(False)
+        self._update_state()
         job.start()
         dialog.show()
 
@@ -684,8 +702,140 @@ class MainWindow(QMainWindow):
         if self._mesh_job is not None:
             self._mesh_job.deleteLater()
         self._mesh_job = self._mesh_progress = None
-        self.mesh_panel.set_busy(False)
         self._update_state()
+
+    # -- solving ------------------------------------------------------------------
+
+    def solve(self) -> None:
+        """Solve current flow and temperature in a child process, with a progress dialog.
+
+        The project is saved first (the solver reads it from disk). The solver
+        reuses the saved mesh if it is current, otherwise it meshes the board too.
+        """
+        doc = self.document
+        if doc.project is None or doc.board is None or self._mesh_job or self._solve_job:
+            return
+        sources = doc.current_sources
+        if not doc.board.has_outline:
+            QMessageBox.warning(self, "Cannot solve", "The board has no Edge.Cuts outline.")
+            return
+        if not sources:
+            QMessageBox.warning(self, "Cannot solve", "Add current sources to pads before solving.")
+            return
+        if abs(sum(s.current_a for s in sources)) > 1e-9:
+            QMessageBox.warning(self, "Cannot solve", "Current sources and sinks must sum to zero.")
+            return
+        if doc.dirty and not self.save():
+            return
+        if doc.board_changed_on_disk:
+            if not self.reload_board():
+                return
+            self.statusBar().showMessage("The board changed on disk and was reloaded before solving.", 5000)
+
+        job = SolveJob(doc.project.path, self)
+        dialog = QProgressDialog("Starting solver…", "Cancel", 0, _PROGRESS_STEPS, self)
+        dialog.setWindowTitle("Solving")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setValue(0)
+        dialog.canceled.connect(job.cancel)
+        job.progress.connect(self._on_solve_progress)
+        job.succeeded.connect(self._on_solved)
+        job.failed.connect(self._on_solve_failed)
+        job.cancelled.connect(self._on_solve_cancelled)
+
+        self._solve_job, self._solve_progress = job, dialog
+        self._update_state()
+        job.start()
+        dialog.show()
+
+    @property
+    def solve_job_running(self) -> bool:
+        """Whether a solve is in progress."""
+        return self._solve_job is not None
+
+    def _on_solve_progress(self, message: str, fraction: float) -> None:
+        """Update the solve progress dialog.
+
+        Args:
+            message: Current step.
+            fraction: Overall completion, 0 to 1.
+        """
+        if self._solve_progress is not None:
+            self._solve_progress.setLabelText(message)
+            self._solve_progress.setValue(round(fraction * _PROGRESS_STEPS))
+
+    def _finish_solve_job(self) -> None:
+        """Close the solve progress dialog and release the finished job."""
+        if self._solve_progress is not None:
+            self._solve_progress.close()
+            self._solve_progress.deleteLater()
+        if self._solve_job is not None:
+            self._solve_job.deleteLater()
+        self._solve_job = self._solve_progress = None
+        self._update_state()
+
+    def _on_solved(self, results) -> None:
+        """Show new results, and pick up the mesh the solver may have built.
+
+        Args:
+            results: The :class:`~kits.solve.results.SolveResults` loaded from the child's output.
+        """
+        self._finish_solve_job()
+        self.document.reload_saved_mesh()
+        self.document.set_results(results)
+        self._solve_dock.raise_()
+        self.statusBar().showMessage(
+            f"Solved: {results.total_power_w:.4g} W, max {results.max_temperature_c:.1f} °C", 8000
+        )
+
+    def _on_solve_failed(self, message: str) -> None:
+        """Report a failed solve.
+
+        Args:
+            message: Why solving failed.
+        """
+        self._finish_solve_job()
+        QMessageBox.critical(self, "Solve failed", message)
+
+    def _on_solve_cancelled(self) -> None:
+        """Note a cancelled solve; previous results (if any) are kept."""
+        self._finish_solve_job()
+        self.statusBar().showMessage("Solve cancelled", 5000)
+
+    def _on_results_changed(self, results) -> None:
+        """Show (or clear) the results overlay and its legend.
+
+        Args:
+            results: The new results, or None.
+        """
+        if self.scene is not None:
+            self.scene.set_results(results, self.solve_panel.display_mode)
+            self.scene.set_results_visible(self.show_results_action.isChecked())
+            if results is not None:
+                self.solve_panel.set_legend(self.solve_panel.display_mode, *self.scene.results_range)
+
+    def _on_display_mode_changed(self, mode) -> None:
+        """Recolour the results overlay for a different quantity.
+
+        Args:
+            mode: The :class:`~kits.gui.field_display.DisplayMode` to show.
+        """
+        if self.scene is not None and self.document.results is not None:
+            self.scene.set_results(self.document.results, mode)
+            self.solve_panel.set_legend(mode, *self.scene.results_range)
+
+    def _on_show_results_toggled(self, checked: bool) -> None:
+        """Show or hide the results overlay, keeping the panel checkbox in sync.
+
+        Args:
+            checked: New state of the "Show results" action.
+        """
+        self.solve_panel.show_results.setChecked(checked)
+        if self.scene is not None:
+            self.scene.set_results_visible(checked)
 
     def _on_mesh_built(self, mesh: BoardMesh) -> None:
         """Store a freshly built mesh in the document.
@@ -746,9 +896,14 @@ class MainWindow(QMainWindow):
         if not self.maybe_save():
             event.ignore()
             return
-        if self._mesh_job is not None:
-            self._mesh_job.cancel()
+        self._cancel_jobs()
         super().closeEvent(event)
+
+    def _cancel_jobs(self) -> None:
+        """Kill any running mesher or solver process."""
+        for job in (self._mesh_job, self._solve_job):
+            if job is not None:
+                job.cancel()
 
     # -- document updates ------------------------------------------------------
 
@@ -824,7 +979,11 @@ class MainWindow(QMainWindow):
             act.setEnabled(doc.project is not None)
         for act in self._board_actions:
             act.setEnabled(doc.board is not None)
-        self.build_mesh_action.setEnabled(doc.board is not None and self._mesh_job is None)
+        idle = self._mesh_job is None and self._solve_job is None
+        self.build_mesh_action.setEnabled(doc.board is not None and idle)
+        self.solve_action.setEnabled(doc.board is not None and idle)
+        self.mesh_panel.set_busy(not idle)
+        self.solve_panel.set_busy(not idle)
         self._update_title()
 
     def _update_title(self, *_args) -> None:

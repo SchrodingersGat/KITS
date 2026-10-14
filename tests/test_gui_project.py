@@ -355,3 +355,112 @@ def test_hidden_layers_and_missing_pads(window, kits_v9_path):
 
     window.scene.set_layer_visible("F.Cu", False)
     assert window.scene.pad_at(QPointF(10, 21)) is None  # SMD pad on a hidden layer can't be picked
+
+
+# -- solving -------------------------------------------------------------------------
+
+
+def _wait(app, condition, timeout=120.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            raise TimeoutError("condition not met")
+        app.processEvents()
+        time.sleep(0.01)
+
+
+@pytest.fixture
+def strip_kits(tmp_path):
+    """The solver gate's strip board as a project with +5 A / -5 A sources."""
+    from kits.config import CurrentSource
+
+    from .test_solve import _HEADER, _pad, _strip
+
+    board = tmp_path / "strip.kicad_pcb"
+    board.write_text(_HEADER + _strip("F.Cu") + _pad("P1", 7, "F.Cu") + _pad("P2", 43, "F.Cu") + ")\n")
+    project = KitsProject(
+        tmp_path / "strip.kits",
+        board=board,
+        current_sources=[CurrentSource("P1", "1", 5.0), CurrentSource("P2", "1", -5.0)],
+    )
+    project.save()
+    return project.path
+
+
+def test_solve_in_child_process_shows_overlay_and_reloads(app, window, strip_kits):
+    from kits.gui.field_display import DisplayMode
+
+    assert window.open_path(strip_kits)
+    panel = window.solve_panel
+    assert panel.solve_button.isEnabled() and window.solve_action.isEnabled()
+    assert window.document.results is None and not panel.legend.isVisibleTo(panel)
+
+    window.solve()
+    assert window.solve_job_running and not panel.solve_button.isEnabled()
+    assert not window.build_mesh_action.isEnabled()  # no meshing while solving
+    _wait(app, lambda: not window.solve_job_running)
+
+    results = window.document.results
+    assert results is not None and results.total_power_w > 0
+    assert window.document.mesh is not None  # the mesh the solver built is picked up
+    scene = window.scene
+    assert scene.results_overlay_visible("F.Cu")
+    assert "Joule power" in panel.status.text() and "P1.1" in panel.status.text()
+    assert panel.legend_high.text().startswith("≥") and "A/mm²" in panel.legend_high.text()
+
+    # Display modes rescale the overlay; the legend follows.
+    panel.mode.setCurrentIndex(panel.mode.findData(DisplayMode.TEMPERATURE))
+    low, high = scene.results_range
+    assert 25 <= low < high and "°C" in panel.legend_high.text()
+    panel.mode.setCurrentIndex(panel.mode.findData(DisplayMode.VOLTAGE))
+    assert scene.results_range[0] == pytest.approx(0.0, abs=1e-9)
+
+    # Toggle like the mesh; only the active layer is shown.
+    window.show_results_action.trigger()
+    assert not scene.results_overlay_visible("F.Cu") and not panel.show_results.isChecked()
+    window.show_results_action.trigger()
+    scene.set_active_layer("B.Cu")
+    assert not scene.results_overlay_visible("F.Cu")
+
+    # Reopening reloads the saved results; editing a source makes them stale.
+    window.close_project()
+    assert window.open_path(strip_kits)
+    assert window.document.results_from_file and window.scene.results_overlay_visible("F.Cu")
+    window.document.set_source_current("P1", "1", 6.0)
+    window.document.set_source_current("P2", "1", -6.0)
+    assert "current sources" in window.document.results_staleness
+    assert "solve again" in panel.status.text()
+
+
+def test_solve_disabled_without_balanced_sources(window, strip_kits, monkeypatch):
+    warnings = []
+    monkeypatch.setattr("kits.gui.main_window.QMessageBox.warning", lambda *a: warnings.append(a))
+    assert window.open_path(strip_kits)
+    window.document.set_source_current("P2", "1", -4.0)
+    assert not window.solve_panel.solve_button.isEnabled()
+    assert "sum to zero" in window.solve_panel.status.text()
+    window.solve()
+    assert warnings and not window.solve_job_running
+
+
+def test_solve_failure_is_reported(app, window, strip_kits, monkeypatch):
+    errors = []
+    monkeypatch.setattr("kits.gui.main_window.QMessageBox.critical", lambda *a: errors.append(a))
+    assert window.open_path(strip_kits)
+    window.document.remove_current_source("P2", "1")
+    window.document.add_current_source("Q9", "1", -5.0)  # no such pad
+    window.solve()
+    _wait(app, lambda: not window.solve_job_running)
+    assert errors and "Q9.1" in errors[0][2]
+
+
+def test_sources_table_leaves_no_stale_editors(window, strip_kits):
+    from PySide6.QtWidgets import QDoubleSpinBox
+
+    assert window.open_path(strip_kits)  # refreshes the table more than once
+    window.show()
+    table = window.sources_panel.table
+    visible = [s for s in table.viewport().findChildren(QDoubleSpinBox) if s.isVisible()]
+    assert len(visible) == table.rowCount() == 2

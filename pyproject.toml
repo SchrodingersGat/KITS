@@ -17,6 +17,7 @@ dev = ["pytest>=8", "ruff", "pre-commit"]
 [project.scripts]
 kits-gui = "kits.gui.app:main"
 kits-mesh = "kits.mesh.cli:main"
+kits-solve = "kits.solve.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

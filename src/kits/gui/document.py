@@ -16,8 +16,11 @@ from PySide6.QtCore import QObject, Signal
 
 from ..config import ConfigError, CurrentSource, MeshSettings
 from ..ingest import Board, BoardLoadError, Project, load_project
+from ..mesh.fingerprint import MeshFingerprint, board_hash, settings_hash
 from ..mesh.model import BoardMesh, load_saved_mesh
 from ..project import KitsProject, load_kits_project
+from ..solve.results import SolveResults, inputs_hash, load_saved_results
+from ..solve.solver import SolveSettings
 
 
 class Document(QObject):
@@ -31,6 +34,7 @@ class Document(QObject):
         sources_changed(): Current sources were added, edited or removed.
         dirty_changed(bool): The project gained or lost unsaved changes.
         mesh_changed(BoardMesh | None): A mesh was built, or cleared.
+        results_changed(SolveResults | None): A solve finished, or results were cleared.
     """
 
     project_changed = Signal(object)
@@ -39,6 +43,7 @@ class Document(QObject):
     sources_changed = Signal()
     dirty_changed = Signal(bool)
     mesh_changed = Signal(object)
+    results_changed = Signal(object)
 
     def __init__(self, parent=None):
         """Create an empty document with no project open.
@@ -55,6 +60,11 @@ class Document(QObject):
         self._dirty = False
         self._mesh_notice: str | None = None
         self._mesh_from_file = False
+        self._board_hash: str | None = None
+        self._results: SolveResults | None = None
+        self._results_notice: str | None = None
+        self._results_from_file = False
+        self.solve_settings = SolveSettings()
 
     # -- state -------------------------------------------------------------------
 
@@ -107,6 +117,70 @@ class Document(QObject):
     def mesh_from_file(self) -> bool:
         """True if the current mesh was reloaded from the project's saved mesh file."""
         return self._mesh is not None and self._mesh_from_file
+
+    @property
+    def results(self) -> SolveResults | None:
+        """The most recent solve results for the loaded board, if any."""
+        return self._results
+
+    @property
+    def results_notice(self) -> str | None:
+        """Why the project's saved results weren't loaded (out of date or unreadable), if they weren't."""
+        return self._results_notice
+
+    @property
+    def results_from_file(self) -> bool:
+        """True if the current results were reloaded from the project's saved results file."""
+        return self._results is not None and self._results_from_file
+
+    @property
+    def results_staleness(self) -> str | None:
+        """Why the current results no longer match the project, or None if they do (or there are none)."""
+        if self._results is None or self._project is None or self._board_hash is None:
+            return None
+        current = self._results_fingerprints()
+        return self._results.staleness(*current)
+
+    def set_results(self, results: SolveResults | None) -> None:
+        """Replace the current results.
+
+        Args:
+            results: Newly computed results, or None to clear them.
+        """
+        self._results = results
+        self._results_from_file = False
+        self._results_notice = None
+        self.results_changed.emit(results)
+
+    def reload_saved_mesh(self) -> None:
+        """Load the project's saved mesh if it is current and differs from the one shown.
+
+        Used after a solve, which builds and saves a mesh if there wasn't a current one.
+        """
+        mesh, notice = self._load_saved_mesh()
+        if mesh is not None and (self._mesh is None or self._mesh.fingerprint != mesh.fingerprint):
+            self._mesh, self._mesh_notice, self._mesh_from_file = mesh, None, True
+            self.mesh_changed.emit(mesh)
+
+    def _results_fingerprints(self) -> tuple[MeshFingerprint, str]:
+        """Fingerprints of the current board, mesh settings, sources and solver settings.
+
+        Returns:
+            ``(mesh_fingerprint, inputs_hash)`` to compare saved results against.
+        """
+        mesh_fp = MeshFingerprint(settings=settings_hash(self._project.mesh), board=self._board_hash)
+        return mesh_fp, inputs_hash(self._project.current_sources, self.solve_settings)
+
+    def _load_saved_results(self) -> tuple[SolveResults | None, str | None]:
+        """Load the project's saved results if they match the current inputs.
+
+        Returns:
+            ``(results, None)`` if current, ``(None, reason)`` if out of date or
+            unreadable, else ``(None, None)``.
+        """
+        if self._project is None or self._kicad is None or self._board_hash is None:
+            return None, None
+        return load_saved_results(self._project.results_path, *self._results_fingerprints())
 
     @property
     def mesh_is_stale(self) -> bool:
@@ -393,10 +467,17 @@ class Document(QObject):
             self._board_mtime = kicad.board.path.stat().st_mtime if kicad else None
         except OSError:
             self._board_mtime = None
+        try:
+            self._board_hash = board_hash(kicad.board.path) if kicad else None
+        except OSError:
+            self._board_hash = None
         self.board_changed.emit(kicad)
         self._mesh, self._mesh_notice = self._load_saved_mesh()
         self._mesh_from_file = self._mesh is not None
         self.mesh_changed.emit(self._mesh)
+        self._results, self._results_notice = self._load_saved_results()
+        self._results_from_file = self._results is not None
+        self.results_changed.emit(self._results)
 
     def _load_saved_mesh(self) -> tuple[BoardMesh | None, str | None]:
         """Load the project's saved mesh if it matches the loaded board and current settings.

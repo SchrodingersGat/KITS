@@ -151,6 +151,13 @@ class SourcesPanel(QWidget):
         board = self._document.board
         sources = self._document.current_sources
         self.table.blockSignals(True)
+        # Replaced cell widgets are only deleted once control returns to the event
+        # loop; until then they'd still be drawn (at the table's left edge). Hide them.
+        for row in range(self.table.rowCount()):
+            old = self.table.cellWidget(row, 2)
+            if old is not None:
+                self.table.removeCellWidget(row, 2)
+                old.hide()
         self.table.setRowCount(len(sources))
         for row, source in enumerate(sources):
             pads = board.find_pads(source.ref, source.pad) if board is not None else []

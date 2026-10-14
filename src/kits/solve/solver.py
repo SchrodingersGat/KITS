@@ -24,6 +24,7 @@ from dataclasses import dataclass
 import numpy as np
 import scipy.sparse as sp
 import shapely
+from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import spsolve
 
 from ..ingest.model import Board, is_copper_layer
@@ -304,6 +305,7 @@ class LayeredModel:
             elif e.current is not None:
                 rhs[nodes] += e.current * weights
 
+        _check_connectivity(k, rhs, fixed, electrode_nodes)
         voltage = _solve_with_fixed(k, rhs, fixed, values)
 
         residual = k @ voltage - rhs  # current into the board at fixed nodes
@@ -381,6 +383,44 @@ class LayeredModel:
 
 
 # -- helpers ---------------------------------------------------------------------------
+
+
+def _check_connectivity(
+    k: sp.csr_matrix,
+    rhs: np.ndarray,
+    fixed: np.ndarray,
+    electrode_nodes: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]],
+) -> None:
+    """Reject current that has no copper path to a fixed-voltage pad.
+
+    Each piece of connected copper (layers joined by barrels) that receives
+    current must either contain a fixed-voltage electrode or have its injected
+    currents sum to zero; otherwise the current has nowhere to go.
+
+    Args:
+        k: Global conductance matrix (without regularisation).
+        rhs: Injected nodal currents.
+        fixed: True at fixed-voltage nodes.
+        electrode_nodes: Nodes of each electrode, keyed ``(ref, pad)``.
+
+    Raises:
+        SolveError: If some current can't reach a sink.
+    """
+    _, component = connected_components(k, directed=False)
+    injected = np.bincount(component, weights=rhs)
+    grounded = np.zeros(len(injected), dtype=bool)
+    grounded[component[fixed]] = True
+    scale = max(np.abs(rhs).sum(), 1e-30)
+    for c in np.flatnonzero(~grounded & (np.abs(injected) > 1e-9 * scale)):
+        pads = sorted(
+            f"{ref}.{pad}"
+            for (ref, pad), (nodes, _) in electrode_nodes.items()
+            if (component[nodes] == c).any()
+        )
+        raise SolveError(
+            f"no copper path balances the current at {', '.join(pads)} "
+            f"({injected[c]:+.4g} A would have nowhere to go); check the sources are on connected copper"
+        )
 
 
 def _solve_with_fixed(k: sp.csr_matrix, rhs: np.ndarray, fixed: np.ndarray, values: np.ndarray) -> np.ndarray:
