@@ -192,3 +192,16 @@ def test_ambient_shifts_temperature_uniformly(strip_board):
     model.settings = SolveSettings(ambient_c=60.0)
     t_hot = model.solve_thermal(dc).temperature["F.Cu"]
     np.testing.assert_allclose(t_hot - t_cool, 35.0, atol=1e-9)
+
+
+def test_copper_weight_from_stackup_sets_sheet_resistance(tmp_path):
+    # Same strip, 2 oz copper in the stackup: exactly half the resistance.
+    header = _HEADER.replace(
+        '(layer "F.Cu" (type "copper") (thickness 0.035))', '(layer "F.Cu" (type "copper") (thickness 0.07))'
+    )
+    path = tmp_path / "heavy.kicad_pcb"
+    path.write_text(header + _strip("F.Cu") + _pad("P1", 7, "F.Cu") + _pad("P2", 43, "F.Cu") + ")\n")
+    dc = _model(load_board(path)).solve_dc(
+        [Electrode("P1", "1", voltage=1.0), Electrode("P2", "1", voltage=0.0)]
+    )
+    assert dc.resistance(("P1", "1"), ("P2", "1")) == pytest.approx(R_SQUARE * 32 / 6 / 2, rel=1e-6)

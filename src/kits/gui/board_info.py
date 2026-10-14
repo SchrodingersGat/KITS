@@ -15,9 +15,11 @@ from PySide6.QtWidgets import (
 )
 
 from ..ingest import Project
+from ..ingest.model import COPPER_MM_PER_OZ, format_copper_weight, is_copper_layer
 
-_STACKUP_COLUMNS = ["Layer", "Type", "Thickness (mm)", "Material", "εr"]
+_STACKUP_COLUMNS = ["Layer", "Type", "Thickness (mm)", "Weight", "Material", "εr"]
 _WARNING_COLOR = "#e0a030"
+_WARNING_STYLE = f"color: {_WARNING_COLOR};"
 
 
 def _size(bbox) -> str:
@@ -84,8 +86,14 @@ class BoardInfoPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.addLayout(form)
+        self._stackup_note = QLabel()
+        self._stackup_note.setWordWrap(True)
+        self._stackup_note.setStyleSheet(_WARNING_STYLE)
+        self._stackup_note.hide()
+
         layout.addWidget(QLabel("Stackup:"))
         layout.addWidget(self._stackup, 1)
+        layout.addWidget(self._stackup_note)
 
     def set_project(self, project: Project | None) -> None:
         """Show the summary for ``project``, flagging a missing board outline.
@@ -99,6 +107,7 @@ class BoardInfoPanel(QWidget):
                 label.setStyleSheet("")
                 label.setToolTip("")
             self._stackup.setRowCount(0)
+            self._stackup_note.hide()
             return
 
         b = project.board
@@ -133,14 +142,70 @@ class BoardInfoPanel(QWidget):
                 + (f"\nCopper extent: {_size(copper)}" if copper else "")
             )
 
-        self._stackup.setRowCount(len(b.stackup))
-        for row, layer in enumerate(b.stackup):
+        self._fill_stackup(b)
+
+    def _fill_stackup(self, board) -> None:
+        """Fill the stackup table, with copper weights, and flag assumed copper thickness.
+
+        Copper layers the board's stackup doesn't describe (e.g. a board whose
+        Physical Stackup was never set up in KiCad) are listed with the default
+        thickness the solver assumes, marked "assumed".
+
+        Args:
+            board: The loaded board.
+        """
+        copper = board.copper_thicknesses()
+        rows = []
+        for layer in board.stackup:
+            weight, tip = "", ""
+            if is_copper_layer(layer.name) and layer.thickness_mm:
+                weight = format_copper_weight(layer.thickness_mm)
+                microns, oz = layer.thickness_mm * 1000, layer.thickness_mm / COPPER_MM_PER_OZ
+                tip = f"{microns:.3g} µm ({oz:.3g} oz at 35 µm/oz)"
+            kind = layer.type if layer.sublayers == 1 else f"{layer.type} ×{layer.sublayers}"
+            if layer.sublayers > 1:
+                tip = f"{layer.sublayers} sheets; thickness is their total"
             cells = [
                 layer.name,
-                layer.type,
+                kind,
                 _fmt(layer.thickness_mm),
+                weight,
                 layer.material or "",
                 _fmt(layer.epsilon_r),
             ]
+            rows.append((cells, tip, False))
+        assumed = [name for name, (_t, from_stackup) in copper.items() if not from_stackup]
+        for name in assumed:
+            thickness = copper[name][0]
+            cells = [name, "copper (assumed)", _fmt(thickness), format_copper_weight(thickness), "", ""]
+            rows.append((cells, "Not in the board's stackup; the solver assumes this thickness", True))
+
+        self._stackup.setRowCount(len(rows))
+        for row, (cells, tip, is_assumed) in enumerate(rows):
             for col, text in enumerate(cells):
-                self._stackup.setItem(row, col, QTableWidgetItem(text))
+                item = QTableWidgetItem(text)
+                if tip:
+                    item.setToolTip(tip)
+                if is_assumed:
+                    item.setForeground(Qt.GlobalColor.darkYellow)
+                self._stackup.setItem(row, col, item)
+
+        if assumed:
+            which = "this board's copper" if len(assumed) == len(copper) else ", ".join(assumed)
+            thickness = copper[assumed[0]][0]
+            self._stackup_note.setText(
+                f"The board file has no stackup thickness for {which}: assuming "
+                f"{format_copper_weight(thickness)} ({thickness * 1000:g} µm). "
+                "Set it in KiCad under Board Setup → Physical Stackup."
+            )
+            self._stackup_note.show()
+        else:
+            self._stackup_note.hide()
+
+        weights = list(dict.fromkeys(format_copper_weight(t) for t, _ in copper.values()))
+        self._labels["Copper layers"].setText(f"{len(copper)} ({', '.join(weights)})")
+        self._labels["Copper layers"].setToolTip(
+            "\n".join(
+                f"{name}: {format_copper_weight(t)}, {t * 1000:.3g} µm" for name, (t, _) in copper.items()
+            )
+        )

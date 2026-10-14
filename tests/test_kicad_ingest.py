@@ -161,3 +161,49 @@ def test_kicad_demo_projects_load(project):
     assert b.copper_layers
     assert b.footprints
     assert b.bounding_box() is not None
+
+
+def test_dielectric_sublayers_are_summed(tmp_path):
+    board = tmp_path / "sub.kicad_pcb"
+    board.write_text(
+        """(kicad_pcb (version 20241229) (generator "pcbnew")
+  (general (thickness 0.31))
+  (layers (0 "F.Cu" signal) (2 "B.Cu" signal))
+  (setup (stackup
+    (layer "F.Cu" (type "copper") (thickness 0.018))
+    (layer "dielectric 1" (type "prepreg") (thickness 0.1) (material "PR1080") (epsilon_r 3.9) addsublayer
+      (thickness 0.07) (material "PR1080") (epsilon_r 3.9) addsublayer (thickness 0.07))
+    (layer "B.Cu" (type "copper") (thickness 0.035))))
+)
+""",
+        encoding="utf-8",
+    )
+    b = load_board(board)
+    dielectric = b.stackup[1]
+    assert dielectric.thickness_mm == pytest.approx(0.24)
+    assert dielectric.sublayers == 3
+    assert dielectric.material == "PR1080"
+    assert b.copper_thicknesses() == {"F.Cu": (0.018, True), "B.Cu": (0.035, True)}
+
+
+def test_copper_thickness_defaults_without_stackup(board_v10_path):
+    b = load_board(board_v10_path)
+    assert b.stackup == []
+    assert b.copper_thicknesses() == {"F.Cu": (0.035, False), "B.Cu": (0.035, False)}
+
+
+@pytest.mark.parametrize(
+    "thickness, label",
+    [
+        (0.035, "1 oz"),
+        (0.018, "½ oz"),
+        (0.0175, "½ oz"),
+        (0.07, "2 oz"),
+        (0.105, "3 oz"),
+        (0.0152, "0.434 oz"),
+    ],
+)
+def test_copper_weight_names(thickness, label):
+    from kits.ingest.model import format_copper_weight
+
+    assert format_copper_weight(thickness) == label

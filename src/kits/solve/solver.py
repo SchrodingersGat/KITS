@@ -28,7 +28,7 @@ from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import spsolve
 
 from ..config import SolveSettings
-from ..ingest.model import Board, is_copper_layer
+from ..ingest.model import Board
 from ..mesh.geometry import board_holes, pad_area
 from ..mesh.model import BoardMesh
 from .fem import (
@@ -45,7 +45,6 @@ from .fem import (
     sheet_matrix,
 )
 
-DEFAULT_COPPER_THICKNESS_MM = 0.035
 # Leakage to 0 V, relative to the mean diagonal, so copper islands not connected
 # to any electrode stay solvable. Small enough not to affect driven currents.
 _LEAKAGE = 1e-12
@@ -148,7 +147,7 @@ class LayeredModel:
             offset += lm.num_nodes
         self.size = offset
         self.by_name = {lf.layer: lf for lf in self.layers}
-        self.copper_thickness = _copper_thickness(board, [lf.layer for lf in self.layers])
+        self.copper_thickness = {name: t * MM for name, (t, _) in board.copper_thicknesses().items()}
         self.holes = [h for h in board_holes(board, mesh.settings) if h.plated]
 
     # -- geometry helpers ----------------------------------------------------------
@@ -444,17 +443,3 @@ def _triangle_areas(nodes: np.ndarray, t: np.ndarray) -> np.ndarray:
     """
     a, b, c = nodes[t[0]], nodes[t[1]], nodes[t[2]]
     return 0.5 * np.abs((b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (c[:, 0] - a[:, 0]) * (b[:, 1] - a[:, 1]))
-
-
-def _copper_thickness(board: Board, layers: list[str]) -> dict[str, float]:
-    """Copper thickness of each layer from the stackup, in metres.
-
-    Args:
-        board: The board.
-        layers: Copper layer names.
-
-    Returns:
-        Thickness per layer; :data:`DEFAULT_COPPER_THICKNESS_MM` where the stackup has none.
-    """
-    stack = {s.name: s.thickness_mm for s in board.stackup if is_copper_layer(s.name) and s.thickness_mm}
-    return {name: stack.get(name, DEFAULT_COPPER_THICKNESS_MM) * MM for name in layers}

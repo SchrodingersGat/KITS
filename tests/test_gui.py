@@ -336,3 +336,21 @@ def test_mesh_failure_is_reported(app, board_v9_path, monkeypatch, kits_v9_path)
     window.build_mesh()
     _wait_until(app, lambda: not window.mesh_job_running)
     assert errors and "Malformed" in errors[0][2]
+
+
+def test_board_panel_shows_copper_weights(app, kits_v9_path, kits_v10_path):
+    window = MainWindow()
+    assert window.open_path(kits_v9_path)
+    panel = window.info_panel
+    table = panel._stackup
+    rows = {table.item(r, 0).text(): r for r in range(table.rowCount())}
+    assert table.item(rows["F.Cu"], 3).text() == "1 oz"
+    assert table.item(rows["dielectric 1"], 3).text() == ""
+    assert panel._labels["Copper layers"].text() == "3 (1 oz)"
+    assert panel._stackup_note.isHidden()
+
+    # No stackup in the file: the solver's assumed thickness is shown and flagged.
+    assert window.open_path(kits_v10_path)
+    rows = [[table.item(r, c).text() for c in range(3)] for r in range(table.rowCount())]
+    assert rows == [["F.Cu", "copper (assumed)", "0.035"], ["B.Cu", "copper (assumed)", "0.035"]]
+    assert not panel._stackup_note.isHidden() and "Physical Stackup" in panel._stackup_note.text()

@@ -18,6 +18,42 @@ Polygon = list[Point]
 
 EDGE_CUTS = "Edge.Cuts"
 
+# Copper weight convention used by KiCad's stackup presets: 1 oz/ft² = 35 µm.
+COPPER_MM_PER_OZ = 0.035
+DEFAULT_COPPER_THICKNESS_MM = COPPER_MM_PER_OZ  # used when the board has no stackup entry
+# Nominal copper weights (oz) that thicknesses are rounded to for display.
+_NOMINAL_WEIGHTS_OZ = (0.25, 1 / 3, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0)
+_NOMINAL_TOLERANCE = 0.08  # within 8% of a nominal weight counts as that weight
+
+
+def copper_weight_oz(thickness_mm: float) -> float:
+    """Copper weight in ounces per square foot for a thickness (35 µm per oz).
+
+    Args:
+        thickness_mm: Copper thickness in millimetres.
+
+    Returns:
+        The weight in oz.
+    """
+    return thickness_mm / COPPER_MM_PER_OZ
+
+
+def format_copper_weight(thickness_mm: float) -> str:
+    """Copper weight for display, using the nominal name when close (e.g. 18 µm → "½ oz").
+
+    Args:
+        thickness_mm: Copper thickness in millimetres.
+
+    Returns:
+        e.g. ``"1 oz"``, ``"½ oz"``, ``"2 oz"``, or ``"1.29 oz"`` for a non-standard thickness.
+    """
+    oz = copper_weight_oz(thickness_mm)
+    for nominal in _NOMINAL_WEIGHTS_OZ:
+        if abs(oz - nominal) <= _NOMINAL_TOLERANCE * nominal:
+            names = {0.25: "¼", 1 / 3: "⅓", 0.5: "½", 1.5: "1½", 2.5: "2½"}
+            return f"{names.get(nominal, f'{nominal:g}')} oz"
+    return f"{oz:.3g} oz"
+
 
 def is_copper_layer(name: str) -> bool:
     """True if ``name`` is a copper layer name (ends with ``.Cu``).
@@ -65,7 +101,18 @@ class Layer:
 
 @dataclass
 class StackupLayer:
-    """One entry of the physical stackup (copper, dielectric, mask, ...)."""
+    """One entry of the physical stackup (copper, dielectric, mask, ...).
+
+    Attributes:
+        name: Layer name, e.g. ``"F.Cu"`` or ``"dielectric 1"``.
+        type: KiCad layer type, e.g. ``"copper"``, ``"core"``, ``"prepreg"``.
+        thickness_mm: Total thickness (all sub-layers), or None if not given.
+        material: Material of the first sub-layer, e.g. ``"FR4"``.
+        epsilon_r: Relative permittivity of the first sub-layer.
+        loss_tangent: Loss tangent of the first sub-layer.
+        sublayers: Number of sub-layers KiCad stacked into this entry (dielectrics
+            made of several prepreg sheets are written as one entry with ``addsublayer``).
+    """
 
     name: str
     type: str
@@ -73,6 +120,7 @@ class StackupLayer:
     material: str | None = None
     epsilon_r: float | None = None
     loss_tangent: float | None = None
+    sublayers: int = 1
 
 
 @dataclass
@@ -231,6 +279,20 @@ class Board:
         """Copper layer names in physical order, top to bottom."""
         names = [layer.name for layer in self.layers if layer.is_copper]
         return sorted(names, key=copper_sort_key)
+
+    def copper_thicknesses(self) -> dict[str, tuple[float, bool]]:
+        """Thickness of each copper layer, and whether it came from the stackup.
+
+        Returns:
+            ``{layer: (thickness_mm, from_stackup)}`` in physical order. Layers the
+            stackup doesn't describe get :data:`DEFAULT_COPPER_THICKNESS_MM` and
+            ``from_stackup=False``.
+        """
+        stack = {s.name: s.thickness_mm for s in self.stackup if is_copper_layer(s.name) and s.thickness_mm}
+        return {
+            name: (stack[name], True) if name in stack else (DEFAULT_COPPER_THICKNESS_MM, False)
+            for name in self.copper_layers
+        }
 
     def pads(self):
         """Iterate over the pads of every footprint.

@@ -348,17 +348,23 @@ class _BoardReader:
         stackup = find(setup, "stackup") if setup else None
         if stackup is None:
             return []
-        return [
-            StackupLayer(
-                name=str(item[1]),
-                type=str(value(item, "type", "")),
-                thickness_mm=_float(item, "thickness"),
-                material=(str(m) if (m := value(item, "material")) is not None else None),
-                epsilon_r=_float(item, "epsilon_r"),
-                loss_tangent=_float(item, "loss_tangent"),
+        layers = []
+        for item in children(stackup, "layer"):
+            # A dielectric of several sheets is one entry with repeated
+            # (thickness ...) children separated by "addsublayer"; sum them.
+            thicknesses = [float(t[1]) for t in children(item, "thickness") if len(t) > 1]
+            layers.append(
+                StackupLayer(
+                    name=str(item[1]),
+                    type=str(value(item, "type", "")),
+                    thickness_mm=sum(thicknesses) if thicknesses else None,
+                    material=(str(m) if (m := value(item, "material")) is not None else None),
+                    epsilon_r=_float(item, "epsilon_r"),
+                    loss_tangent=_float(item, "loss_tangent"),
+                    sublayers=max(1, len(thicknesses)),
+                )
             )
-            for item in children(stackup, "layer")
-        ]
+        return layers
 
     def _expand_layers(self, names) -> list[str]:
         """Copper layers named by ``names``, expanding ``*.Cu`` / ``F&B.Cu``.
