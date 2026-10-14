@@ -90,7 +90,10 @@ def _configure(settings: MeshSettings) -> None:
 def _refine_around_holes(
     geom: LayerGeometry, point_tags: dict[tuple[float, float], int], settings: MeshSettings
 ) -> None:
-    """Grade element size from each hole's edge segment length up to the max size.
+    """Grade element size up to the max size around holes and concave copper corners.
+
+    Corners (where current crowds) start at ``settings.corner_size_mm``; holes
+    start at their edge segment length.
 
     Hole edges are much finer than the surrounding copper outlines, and with
     boundary-size propagation off (see :func:`_configure`) gmsh would fill the
@@ -99,12 +102,12 @@ def _refine_around_holes(
     mounting hole doesn't get a tiny-via-sized field.
 
     Also lowers ``Mesh.MeshSizeMin`` to the finest hole segment for this layer:
-    ``min_circle_points`` takes precedence over the minimum size.
+    ``min_circle_points`` and the corner size take precedence over the minimum size.
 
     Must be called on the current gmsh model after ``synchronize()``.
 
     Args:
-        geom: The layer geometry, including its hole outlines.
+        geom: The layer geometry, including its hole outlines and corners.
         point_tags: gmsh point tags keyed by rounded coordinates, as created for the faces.
         settings: Mesh settings.
     """
@@ -118,6 +121,11 @@ def _refine_around_holes(
             tag = point_tags.get((round(x, _COORD_DECIMALS), round(y, _COORD_DECIMALS)))
             if tag is not None:
                 groups[segment].append(tag)
+    if settings.corner_size_mm > 0:
+        for x, y in geom.corners:
+            tag = point_tags.get((round(x, _COORD_DECIMALS), round(y, _COORD_DECIMALS)))
+            if tag is not None:
+                groups[settings.corner_size_mm].append(tag)
     if not groups:
         return
 

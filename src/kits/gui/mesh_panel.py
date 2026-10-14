@@ -82,6 +82,14 @@ class MeshPanel(QWidget):
             "Holes are cut out of the mesh; this takes precedence over the min size for small holes."
         )
         self.circle_points.valueChanged.connect(self._on_size_changed)
+        self.corner_size = _size_spinbox()
+        self.corner_size.setMinimum(0.0)
+        self.corner_size.setSpecialValueText("Off")
+        self.corner_size.setToolTip(
+            "Element size at concave copper corners (e.g. where a track joins a pour), where\n"
+            "current crowds. Graded back to the max size within about a millimetre. 0 = off."
+        )
+        self.corner_size.valueChanged.connect(self._on_size_changed)
 
         self.build_button = QPushButton("Build mesh")
         self.build_button.clicked.connect(self.build_requested)
@@ -100,6 +108,7 @@ class MeshPanel(QWidget):
         form.addRow("Max size:", self.max_size)
         form.addRow("Min size:", self.min_size)
         form.addRow("Hole points:", self.circle_points)
+        form.addRow("Corner size:", self.corner_size)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -135,6 +144,7 @@ class MeshPanel(QWidget):
             max_size_mm=self.max_size.value(),
             min_size_mm=self.min_size.value(),
             min_circle_points=self.circle_points.value(),
+            corner_size_mm=self.corner_size.value(),
         )
 
     def _load_settings(self, *_args) -> None:
@@ -149,6 +159,7 @@ class MeshPanel(QWidget):
             (self.max_size, settings.max_size_mm),
             (self.min_size, settings.min_size_mm),
             (self.circle_points, settings.min_circle_points),
+            (self.corner_size, settings.corner_size_mm),
         )
         for box, value in values:
             box.blockSignals(True)
@@ -186,7 +197,7 @@ class MeshPanel(QWidget):
         can_build = board is not None and board.has_outline and valid and not self._busy
         self.build_button.setEnabled(can_build)
         self.build_button.setText("Rebuild mesh" if doc.mesh else "Build mesh")
-        for box in (self.max_size, self.min_size, self.circle_points):
+        for box in (self.max_size, self.min_size, self.circle_points, self.corner_size):
             box.setEnabled(doc.project is not None and not self._busy)
 
         style, lines = "", []

@@ -14,7 +14,12 @@ def test_round_trip_with_relative_board_path(tmp_path):
 
     data = yaml.safe_load(project.path.read_text(encoding="utf-8"))
     assert data["board"] == "../boards/b.kicad_pro"  # relative, POSIX separators
-    assert data["mesh"] == {"max_size_mm": 0.5, "min_size_mm": 0.05, "min_circle_points": 36}
+    assert data["mesh"] == {
+        "max_size_mm": 0.5,
+        "min_size_mm": 0.05,
+        "min_circle_points": 36,
+        "corner_size_mm": 0.1,
+    }
 
     loaded = load_kits_project(project.path)
     assert loaded.board == board.absolute()
@@ -200,3 +205,14 @@ def test_invalid_solve_settings_are_rejected(tmp_path, text, match):
     path.write_text(text, encoding="utf-8")
     with pytest.raises(ConfigError, match=match):
         load_kits_project(path)
+
+
+@pytest.mark.parametrize("value, ok", [(0, True), (0.05, True), (1.0, True), (-0.1, False), (2.0, False)])
+def test_corner_size_validation(tmp_path, value, ok):
+    path = tmp_path / "p.kits"
+    path.write_text(f"mesh:\n  max_size_mm: 1.0\n  corner_size_mm: {value}\n", encoding="utf-8")
+    if ok:
+        assert load_kits_project(path).mesh.corner_size_mm == value
+    else:
+        with pytest.raises(ConfigError, match="corner size"):
+            load_kits_project(path)

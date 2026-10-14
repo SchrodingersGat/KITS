@@ -13,6 +13,7 @@ from dataclasses import dataclass
 DEFAULT_MESH_MAX_SIZE_MM = 1.0
 DEFAULT_MESH_MIN_SIZE_MM = 0.1
 DEFAULT_MIN_CIRCLE_POINTS = 36
+DEFAULT_CORNER_SIZE_MM = 0.1
 MIN_CIRCLE_POINTS_RANGE = (8, 1000)
 
 
@@ -31,11 +32,15 @@ class MeshSettings:
             force smaller elements locally.
         min_circle_points: Minimum number of mesh nodes around each drill hole
             edge. Takes precedence over ``min_size_mm`` for small holes.
+        corner_size_mm: Element size at concave copper corners (where current
+            crowds), graded back to ``max_size_mm`` nearby; 0 turns corner
+            refinement off. Takes precedence over ``min_size_mm`` there.
     """
 
     max_size_mm: float = DEFAULT_MESH_MAX_SIZE_MM
     min_size_mm: float = DEFAULT_MESH_MIN_SIZE_MM
     min_circle_points: int = DEFAULT_MIN_CIRCLE_POINTS
+    corner_size_mm: float = DEFAULT_CORNER_SIZE_MM
 
     def validate(self) -> None:
         """Check the sizes are positive and ordered, and the circle point count is in range.
@@ -44,6 +49,8 @@ class MeshSettings:
             ConfigError: If a size is not positive, the minimum exceeds the maximum, or
                 ``min_circle_points`` is not an integer in :data:`MIN_CIRCLE_POINTS_RANGE`.
         """
+        if not (0 <= self.corner_size_mm <= self.max_size_mm):
+            raise ConfigError("corner size must be between 0 (off) and the max size")
         lo, hi = MIN_CIRCLE_POINTS_RANGE
         if not isinstance(self.min_circle_points, int) or not lo <= self.min_circle_points <= hi:
             raise ConfigError(f"min circle points must be a whole number from {lo} to {hi}")
@@ -64,6 +71,7 @@ class MeshSettings:
             "max_size_mm": self.max_size_mm,
             "min_size_mm": self.min_size_mm,
             "min_circle_points": self.min_circle_points,
+            "corner_size_mm": self.corner_size_mm,
         }
 
     @classmethod
@@ -88,6 +96,7 @@ class MeshSettings:
                 max_size_mm=float(data.get("max_size_mm", DEFAULT_MESH_MAX_SIZE_MM)),
                 min_size_mm=float(data.get("min_size_mm", DEFAULT_MESH_MIN_SIZE_MM)),
                 min_circle_points=_whole_number(data.get("min_circle_points", DEFAULT_MIN_CIRCLE_POINTS)),
+                corner_size_mm=float(data.get("corner_size_mm", DEFAULT_CORNER_SIZE_MM)),
             )
         except (TypeError, ValueError) as exc:
             raise ConfigError(f"invalid mesh setting: {exc}") from exc

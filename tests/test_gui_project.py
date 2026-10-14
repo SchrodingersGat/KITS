@@ -583,3 +583,14 @@ def test_layers_panel_overlay_toggles(app, window, strip_kits):
     assert boxes["Current sources"].isChecked()
     window.settings.grid_visible = True
     assert boxes["Grid"].isChecked()
+
+
+def test_mesh_panel_corner_size(window, kits_v9_path):
+    assert window.open_path(kits_v9_path)
+    box = window.mesh_panel.corner_size
+    assert box.value() == pytest.approx(0.1)
+    box.setValue(0.0)
+    assert box.text() == "Off"
+    assert window.document.project.mesh.corner_size_mm == 0.0 and window.document.dirty
+    assert window.save()
+    assert load_kits_project(kits_v9_path).mesh.corner_size_mm == 0.0

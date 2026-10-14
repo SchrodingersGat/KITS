@@ -1,8 +1,9 @@
 board: Thin-Strip.kicad_pro
 mesh:
   max_size_mm: 0.1
-  min_size_mm: 0.1
+  min_size_mm: 0.01
   min_circle_points: 36
+  corner_size_mm: 0.02
 ambient_temperature_c: 25.0
 materials:
   copper:

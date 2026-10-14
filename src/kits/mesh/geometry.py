@@ -23,7 +23,9 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+import numpy as np
 import shapely
+import shapely.geometry.polygon
 from shapely import affinity
 from shapely.geometry import LineString, Point, Polygon, box
 from shapely.geometry.base import BaseGeometry
@@ -38,6 +40,9 @@ SNAP_GRID_MM = 1e-4
 # Simplification tolerance as a fraction of the minimum mesh size.
 SIMPLIFY_FRACTION = 0.1
 _QUAD_SEGS = 8  # segments per quarter circle when buffering round shapes
+# A copper outline vertex turning by at least this much (inwards) is a corner
+# to refine around; faceted arcs and hole edges turn far less per vertex.
+CORNER_MIN_TURN_DEG = 60.0
 
 
 class GeometryError(ValueError):
@@ -68,12 +73,15 @@ class LayerGeometry:
         pad_edges: Pad outlines running through copper, to be embedded as mesh
             edges so each pad's area is resolved exactly (pads are where current
             enters). Kept a tolerance away from copper and hole edges.
+        corners: Concave copper corners (see :func:`concave_copper_corners`), where
+            current crowds and the mesh is refined.
     """
 
     layer: str
     faces: list[Face] = field(default_factory=list)
     holes: list[Polygon] = field(default_factory=list)
     pad_edges: list[LineString] = field(default_factory=list)
+    corners: list[tuple[float, float]] = field(default_factory=list)
 
     @property
     def copper_area(self) -> float:
@@ -516,6 +524,44 @@ def pad_edge_lines(board: Board, layer: str, faces: list[Face], tolerance: float
     return [g for g in lines if isinstance(g, LineString) and g.length > tolerance]
 
 
+def concave_copper_corners(
+    faces: list[Face], min_turn_deg: float = CORNER_MIN_TURN_DEG
+) -> list[tuple[float, float]]:
+    """Concave (re-entrant) corners of the copper outline.
+
+    At a concave corner copper wraps around the corner, e.g. where a track
+    joins a wider pour or on the inside of a track bend. Current crowds there
+    (the density is singular at a sharp corner), so the mesh is refined around
+    them. Convex corners, where current thins out, are ignored, and so are the
+    shallow vertices of faceted arcs and hole edges (below ``min_turn_deg``).
+
+    Args:
+        faces: A layer's partition (see :func:`partition_layer`).
+        min_turn_deg: Smallest change of direction, in degrees, that counts as a corner.
+
+    Returns:
+        Corner positions in board millimetres, without duplicates.
+    """
+    corners: dict[tuple[float, float], None] = {}
+    min_turn = math.radians(min_turn_deg)
+    for face in faces:
+        if not face.is_copper:
+            continue
+        polygon = shapely.geometry.polygon.orient(face.polygon, sign=1.0)  # copper on the left
+        for ring in (polygon.exterior, *polygon.interiors):
+            pts = np.asarray(ring.coords)[:-1]
+            if len(pts) < 3:
+                continue
+            incoming = pts - np.roll(pts, 1, axis=0)
+            outgoing = np.roll(pts, -1, axis=0) - pts
+            cross = incoming[:, 0] * outgoing[:, 1] - incoming[:, 1] * outgoing[:, 0]
+            dot = (incoming * outgoing).sum(axis=1)
+            turn = np.arctan2(cross, dot)  # > 0 left (convex), < 0 right (concave)
+            for x, y in pts[turn <= -min_turn]:
+                corners[(float(x), float(y))] = None
+    return list(corners)
+
+
 def extract_layers(
     board: Board,
     settings: MeshSettings,
@@ -551,6 +597,7 @@ def extract_layers(
                 faces=faces,
                 holes=layer_holes,
                 pad_edges=pad_edge_lines(board, layer, faces, settings.min_size_mm),
+                corners=concave_copper_corners(faces),
             )
         )
     return layers

@@ -323,3 +323,58 @@ def test_cli_reports_unwritable_output_before_meshing(kits_v9_path, tmp_path, ca
     (record,) = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert "cannot create output folder" in record["error"]
     assert not calls  # failed before any meshing
+
+
+# -- corner refinement ---------------------------------------------------------------
+
+
+def test_concave_copper_corners():
+    from shapely.geometry import Point, Polygon
+
+    from kits.mesh.geometry import Face, concave_copper_corners
+
+    # A narrow track (y 4..6) running into a wider pour (y 0..10): the two inside
+    # corners at x=10 are concave; the pour's outer corners and the track end are convex.
+    step = Polygon([(0, 4), (10, 4), (10, 0), (20, 0), (20, 10), (10, 10), (10, 6), (0, 6)])
+    assert sorted(concave_copper_corners([Face(step, True)])) == [(10.0, 4.0), (10.0, 6.0)]
+    # Same shape traversed the other way round gives the same corners.
+    assert sorted(concave_copper_corners([Face(Polygon(step.exterior.coords[::-1]), True)])) == [
+        (10.0, 4.0),
+        (10.0, 6.0),
+    ]
+    # Bare-board faces, faceted holes and arcs don't count.
+    assert concave_copper_corners([Face(step, False)]) == []
+    with_hole = Polygon(
+        [(0, 0), (20, 0), (20, 20), (0, 20)], [list(Point(10, 10).buffer(1, quad_segs=9).exterior.coords)]
+    )
+    assert concave_copper_corners([Face(with_hole, True)]) == []
+
+
+def test_corner_refinement_puts_small_elements_at_corners(tmp_path):
+    from kits.ingest import load_board
+
+    from .test_solve import _HEADER
+
+    # Narrow track into a wide pour, as one zone polygon.
+    pts = "(xy 5 4) (xy 25 4) (xy 25 1) (xy 45 1) (xy 45 9) (xy 25 9) (xy 25 6) (xy 5 6)"
+    zone = (
+        f'  (zone (net 1) (net_name "N") (layer "F.Cu") (polygon (pts {pts}))'
+        f' (filled_polygon (layer "F.Cu") (pts {pts})))\n'
+    )
+    path = tmp_path / "step.kicad_pcb"
+    path.write_text(_HEADER + zone + ")\n")
+    board = load_board(path)
+
+    def edge_near_corner(settings):
+        lm = mesh_board(board, settings).layer("F.Cu")
+        edges, _ = lm.edges()
+        corner = int(np.argmin(np.linalg.norm(lm.nodes - [25, 4], axis=1)))
+        assert np.linalg.norm(lm.nodes[corner] - [25, 4]) < 1e-6  # the corner is a node
+        touching = edges[(edges == corner).any(axis=1)]
+        lengths = np.linalg.norm(lm.nodes[touching[:, 0]] - lm.nodes[touching[:, 1]], axis=1)
+        return lengths.max(), lm.num_triangles
+
+    coarse, n_off = edge_near_corner(MeshSettings(max_size_mm=1.0, min_size_mm=0.1, corner_size_mm=0))
+    fine, n_on = edge_near_corner(MeshSettings(max_size_mm=1.0, min_size_mm=0.1, corner_size_mm=0.05))
+    assert fine < 0.15 < coarse
+    assert n_on > n_off
