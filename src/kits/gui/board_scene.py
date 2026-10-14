@@ -16,14 +16,17 @@ from dataclasses import dataclass
 
 import numpy as np
 from PySide6.QtCore import QLineF, QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsLineItem,
     QGraphicsPathItem,
+    QGraphicsRectItem,
     QGraphicsScene,
+    QGraphicsSimpleTextItem,
 )
 
+from ..config import CurrentSource
 from ..ingest.geometry import arc_points
 from ..ingest.model import EDGE_CUTS, Board, Pad
 from ..mesh.model import BoardMesh, LayerMesh
@@ -50,6 +53,12 @@ MODEL_ROLE = 0
 _Z_ZONE, _Z_GRAPHIC, _Z_TRACK, _Z_PAD = 0, 1, 2, 3
 _EDGE_CUTS_PX = 1.5
 _Z_MESH_OVERLAY = 1000  # above all board layers
+_Z_SOURCES = 1100  # current source markers, above the mesh
+_Z_SELECTION = 1200  # selected pad outline, on top of everything
+_LABEL_GAP_PX = 4  # gap between a pad and its current label, screen pixels
+# Data role holding a pad's (footprint ref, pad number) on its copper and hole items,
+# for picking pads with the mouse.
+PAD_KEY_ROLE = 1
 _MESH_TILES = 16  # overlay tiles per axis
 _GRID_MIN_PX = 8  # never draw grid lines closer than this on screen
 _GRID_ORIGIN_PX = 8  # half-size of the origin marker
@@ -167,6 +176,9 @@ class BoardScene(QGraphicsScene):
         self.layers: dict[str, DisplayLayer] = {}
         self._active_layer: str | None = None
         self._mesh_overlays: dict[str, LayerItem] = {}
+        self._pad_items: dict[tuple[str, str], list[QGraphicsPathItem]] = {}
+        self._source_markers: LayerItem | None = None
+        self._selection: LayerItem | None = None
         self._mesh_visible = True
         self._grid_spacing = DEFAULT_GRID_SPACING_MM
         self._grid_visible = True
@@ -209,6 +221,121 @@ class BoardScene(QGraphicsScene):
     def active_layer(self) -> str | None:
         """The copper layer drawn on top, whose mesh is shown; F.Cu unless another was chosen."""
         return self._active_layer
+
+    # -- pads: picking, selection and current sources ------------------------------
+
+    def pad_at(self, pos: QPointF) -> tuple[str, str] | None:
+        """The pad (with copper) drawn topmost at a scene position.
+
+        Hidden layers are ignored.
+
+        Args:
+            pos: Scene position in millimetres.
+
+        Returns:
+            ``(ref, pad number)``, or None if there is no pad there.
+        """
+        for item in self.items(pos):  # topmost first
+            key = item.data(PAD_KEY_ROLE)
+            if key is not None and item.isVisible():
+                return tuple(key)
+        return None
+
+    def has_pad(self, key: tuple[str, str]) -> bool:
+        """Whether a pad with copper exists on the board.
+
+        Args:
+            key: ``(ref, pad number)``.
+
+        Returns:
+            True if the scene has copper items for it.
+        """
+        return tuple(key) in self._pad_items
+
+    def set_selected_pad(self, key: tuple[str, str] | None) -> None:
+        """Outline the selected pad (every pad with that reference and number).
+
+        Args:
+            key: ``(ref, pad number)``, or None to clear the selection.
+        """
+        if self._selection is not None:
+            self.removeItem(self._selection)
+            self._selection = None
+        if key is None or tuple(key) not in self._pad_items:
+            return
+        self._selection = LayerItem()
+        self._selection.setZValue(_Z_SELECTION)
+        self.addItem(self._selection)
+        for pad_item in self._pad_items[tuple(key)]:
+            outline = self._pad_copy(pad_item, self._selection)
+            outline.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+            outline.setPen(_cosmetic_pen(colors.SELECTION, 2.5))
+
+    def set_sources(self, sources: list[CurrentSource]) -> None:
+        """Mark pads that have current sources: tinted pad plus a current label.
+
+        Sources (current into the board) are tinted green, sinks orange. Labels
+        keep a fixed on-screen size. Sources on pads missing from the board are
+        skipped.
+
+        Args:
+            sources: The project's current sources.
+        """
+        if self._source_markers is not None:
+            self.removeItem(self._source_markers)
+        self._source_markers = LayerItem()
+        self._source_markers.setZValue(_Z_SOURCES)
+        self.addItem(self._source_markers)
+        font = QFont()
+        font.setBold(True)
+        for source in sources:
+            items = self._pad_items.get(source.key)
+            if not items:
+                continue
+            color = colors.SOURCE if source.current_a >= 0 else colors.SINK
+            for pad_item in items:
+                tint = self._pad_copy(pad_item, self._source_markers)
+                tint.setBrush(QColor(color.red(), color.green(), color.blue(), 150))
+                tint.setPen(_cosmetic_pen(color, 1.5))
+            label = QGraphicsSimpleTextItem(f"{source.current_a:+g} A")
+            label.setFont(font)
+            label.setBrush(QColor(255, 255, 255))
+            text = label.boundingRect()
+            # Screen-pixel box just right of the pad, vertically centred on it.
+            box = QGraphicsRectItem(text.adjusted(-3, -1, 3, 1), self._source_markers)
+            box.setBrush(QColor(color.red(), color.green(), color.blue(), 220))
+            box.setPen(QPen(Qt.PenStyle.NoPen))
+            box.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+            box.setTransform(box.transform().translate(_LABEL_GAP_PX + 3, -text.height() / 2))
+            pad_bounds = items[0].sceneBoundingRect()
+            for pad_item in items[1:]:
+                pad_bounds = pad_bounds.united(pad_item.sceneBoundingRect())
+            box.setPos(QPointF(pad_bounds.right(), pad_bounds.center().y()))
+            box.setToolTip(f"{source.label}: {source.current_a:+g} A")
+            label.setParentItem(box)
+
+    @property
+    def source_marker_count(self) -> int:
+        """Number of current labels currently drawn (one per placed source)."""
+        if self._source_markers is None:
+            return 0
+        return sum(isinstance(i, QGraphicsRectItem) for i in self._source_markers.childItems())
+
+    @staticmethod
+    def _pad_copy(pad_item: QGraphicsPathItem, parent: QGraphicsItem) -> QGraphicsPathItem:
+        """Create an item with a pad's shape, position and rotation under ``parent``.
+
+        Args:
+            pad_item: The pad's copper item.
+            parent: Container for the copy.
+
+        Returns:
+            The new item (no pen or brush set yet).
+        """
+        copy = QGraphicsPathItem(pad_item.path(), parent)
+        copy.setPos(pad_item.pos())
+        copy.setRotation(pad_item.rotation())
+        return copy
 
     # -- mesh overlay ----------------------------------------------------------
 
@@ -588,6 +715,8 @@ class BoardScene(QGraphicsScene):
             item.setZValue(_Z_PAD)
             item.setToolTip(tip)
             item.setData(MODEL_ROLE, pad)
+            item.setData(PAD_KEY_ROLE, (pad.footprint_ref, pad.number))
+            self._pad_items.setdefault((pad.footprint_ref, pad.number), []).append(item)
 
         if pad.drill is not None and pad.drill.width > 0:
             hole = QGraphicsPathItem(drill_path(pad.drill), hole_layer)
@@ -596,3 +725,5 @@ class BoardScene(QGraphicsScene):
             hole.setPos(*pad.position)
             hole.setRotation(-pad.rotation)
             hole.setToolTip(tip)
+            if parent is not None:  # clicking a plated hole picks its pad
+                hole.setData(PAD_KEY_ROLE, (pad.footprint_ref, pad.number))

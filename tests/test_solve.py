@@ -152,3 +152,20 @@ def test_two_layer_thermal_conserves_energy(two_layer_board):
     thermal = model.solve_thermal(dc)
     assert dc.barrel_heat.sum() > 0
     assert thermal.convected_power == pytest.approx(dc.total_power, rel=1e-9)
+
+
+def test_electrode_covers_every_pad_with_the_number(tmp_path):
+    # A footprint with two separate pads both numbered "1" (like split thermal pads):
+    # current entering "P1.1" must use both.
+    split = """  (footprint "T:P" (layer "F.Cu") (at 7 5)
+    (property "Reference" "P1")
+    (pad "1" smd rect (at 0 -1.5) (size 4 3) (layers "F.Cu") (net 1 "N"))
+    (pad "1" smd rect (at 0 1.5) (size 4 3) (layers "F.Cu") (net 1 "N")))
+"""
+    path = tmp_path / "split.kicad_pcb"
+    path.write_text(_HEADER + _strip("F.Cu") + split + _pad("P2", 43, "F.Cu") + ")\n")
+    board = load_board(path)
+    assert len(board.find_pads("P1", "1")) == 2
+    dc = _model(board).solve_dc([Electrode("P1", "1", voltage=1.0), Electrode("P2", "1", voltage=0.0)])
+    # Together the two halves span the full strip width, so the strip result is unchanged.
+    assert dc.resistance(("P1", "1"), ("P2", "1")) == pytest.approx(R_SQUARE * 32 / 6, rel=1e-6)

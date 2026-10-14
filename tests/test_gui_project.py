@@ -272,3 +272,86 @@ def test_mesh_panel_edits_hole_points(window, kits_v9_path):
     assert window.document.project.mesh.min_circle_points == 48 and window.document.dirty
     assert window.save()
     assert load_kits_project(kits_v9_path).mesh.min_circle_points == 48
+
+
+# -- current sources ---------------------------------------------------------------
+
+
+def test_document_source_editing_marks_project_dirty(window, kits_v9_path):
+    from kits.config import ConfigError, CurrentSource
+
+    doc = window.document
+    assert window.open_path(kits_v9_path)
+    doc.add_current_source("R1", "1", 2.0)
+    assert doc.dirty and doc.current_sources == [CurrentSource("R1", "1", 2.0)]
+    with pytest.raises(ConfigError, match="already"):
+        doc.add_current_source("R1", "1", 3.0)
+    doc.set_source_current("R1", "1", -4.0)
+    assert doc.current_source("R1", "1").current_a == -4.0
+    doc.remove_current_source("R1", "1")
+    assert doc.current_sources == []
+    with pytest.raises(ConfigError):
+        doc.remove_current_source("R1", "1")
+
+
+def test_click_double_click_edit_and_remove_sources(app, window, kits_v9_path):
+    from PySide6.QtCore import QPointF
+
+    assert window.open_path(kits_v9_path)
+    panel, scene = window.sources_panel, window.scene
+    smd, th = QPointF(10, 21), QPointF(10.6, 19)  # R1 pad 1 (SMD), R1 pad 2 (TH, off-centre of the hole)
+
+    # Click selects a pad; empty board clears the selection.
+    window._on_board_clicked(smd)
+    assert window.selected_pad == ("R1", "1")
+    assert "R1 pad 1" in panel.selected_label.text() and panel.add_button.isEnabled()
+    window._on_board_clicked(QPointF(35, 5))
+    assert window.selected_pad is None and not panel.add_button.isEnabled()
+
+    # Double-click adds a source with the default current; again just selects it.
+    window._on_board_double_clicked(smd)
+    window._on_board_double_clicked(smd)
+    assert window.document.current_sources[0].key == ("R1", "1")
+    assert len(window.document.current_sources) == 1 and window.document.dirty
+    assert scene.source_marker_count == 1
+    assert "net: +1 A" in panel.total_label.text() and "sum to zero" in panel.total_label.text()
+
+    # Add a sink on the TH pad via the button, then edit it in the table.
+    window._on_board_clicked(th)
+    assert window.selected_pad == ("R1", "2")
+    panel.add_selected_pad()
+    row = panel._row_of(("R1", "2"))
+    panel.table.cellWidget(row, 2).setValue(-1.0)
+    assert window.document.current_source("R1", "2").current_a == -1.0
+    assert "sum to zero" not in panel.total_label.text()
+    assert scene.source_marker_count == 2
+    assert panel.table.item(row, 1).text() == "+5V"
+
+    # Selecting a row highlights its pad; Remove deletes it.
+    panel.table.selectRow(panel._row_of(("R1", "1")))
+    assert window.selected_pad == ("R1", "1")
+    panel.remove_selected_rows()
+    assert [s.key for s in window.document.current_sources] == [("R1", "2")]
+    assert scene.source_marker_count == 1
+
+    assert window.save()
+    assert [s.to_dict() for s in load_kits_project(kits_v9_path).current_sources] == [
+        {"ref": "R1", "pad": "2", "current_a": -1.0}
+    ]
+
+
+def test_hidden_layers_and_missing_pads(window, kits_v9_path):
+    from PySide6.QtCore import QPointF
+
+    project = load_kits_project(kits_v9_path)
+    from kits.config import CurrentSource
+
+    project.current_sources = [CurrentSource("U99", "3", 1.0)]
+    project.save()
+    assert window.open_path(kits_v9_path)
+    panel = window.sources_panel
+    assert panel.table.item(0, 1).text() == "pad not found"
+    assert window.scene.source_marker_count == 0  # nothing to draw
+
+    window.scene.set_layer_visible("F.Cu", False)
+    assert window.scene.pad_at(QPointF(10, 21)) is None  # SMD pad on a hidden layer can't be picked

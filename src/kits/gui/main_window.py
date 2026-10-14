@@ -36,6 +36,7 @@ from .mesh_job import MeshJob
 from .mesh_panel import MeshPanel
 from .settings import AppSettings
 from .settings_dialog import SettingsDialog
+from .sources_panel import SourcesPanel
 from .start_page import NoBoardPage, StartPage
 
 log = logging.getLogger(__name__)
@@ -75,9 +76,16 @@ class MainWindow(QMainWindow):
         self.layer_panel = LayerPanel()
         self.info_panel = BoardInfoPanel()
         self.mesh_panel = MeshPanel(self.document)
+        self.sources_panel = SourcesPanel(self.document)
+        self._selected_pad: tuple[str, str] | None = None
         self._layer_dock = self._add_dock("Layers", self.layer_panel, Qt.DockWidgetArea.LeftDockWidgetArea)
         self._info_dock = self._add_dock("Board", self.info_panel, Qt.DockWidgetArea.RightDockWidgetArea)
         self._mesh_dock = self._add_dock("Mesh", self.mesh_panel, Qt.DockWidgetArea.RightDockWidgetArea)
+        self._sources_dock = self._add_dock(
+            "Current Sources", self.sources_panel, Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.tabifyDockWidget(self._info_dock, self._sources_dock)
+        self._sources_dock.raise_()
 
         self._cursor_label = QLabel()
         self.statusBar().addPermanentWidget(self._cursor_label)
@@ -94,6 +102,10 @@ class MainWindow(QMainWindow):
         self.layer_panel.visibility_changed.connect(self._on_layer_visibility)
         self.layer_panel.active_layer_changed.connect(self._on_active_layer)
         self.view.cursor_moved.connect(self._on_cursor_moved)
+        self.view.clicked.connect(self._on_board_clicked)
+        self.view.double_clicked.connect(self._on_board_double_clicked)
+        self.sources_panel.pad_selected.connect(self._on_source_row_selected)
+        self.document.sources_changed.connect(self._show_sources)
         self.start_page.new_requested.connect(self.new_project)
         self.start_page.open_requested.connect(self.open_project_dialog)
         self.start_page.recent_requested.connect(self.open_path)
@@ -238,6 +250,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self._layer_dock.toggleViewAction())
         view_menu.addAction(self._info_dock.toggleViewAction())
         view_menu.addAction(self._mesh_dock.toggleViewAction())
+        view_menu.addAction(self._sources_dock.toggleViewAction())
 
         mesh_menu = self.menuBar().addMenu("&Mesh")
         mesh_menu.addAction(self.build_mesh_action)
@@ -781,6 +794,9 @@ class MainWindow(QMainWindow):
             self.layer_panel.set_layers([])
 
         self.info_panel.set_project(kicad)
+        self._selected_pad = None
+        self.sources_panel.set_selected_pad(None)
+        self._show_sources()
         self._update_state()
 
     def _update_state(self, *_args) -> None:
@@ -861,6 +877,79 @@ class MainWindow(QMainWindow):
         """
         if self.scene is not None:
             self.scene.set_active_layer(name)
+
+    # -- pad selection and current sources --------------------------------------
+
+    def select_pad(self, key: tuple[str, str] | None) -> None:
+        """Select a pad on the board and in the Current Sources panel.
+
+        Args:
+            key: ``(ref, pad)``, or None to clear the selection.
+        """
+        self._selected_pad = tuple(key) if key is not None else None
+        if self.scene is not None:
+            self.scene.set_selected_pad(self._selected_pad)
+        self.sources_panel.set_selected_pad(self._selected_pad)
+
+    @property
+    def selected_pad(self) -> tuple[str, str] | None:
+        """The pad selected on the board, as ``(ref, pad)``."""
+        return self._selected_pad
+
+    def _on_board_clicked(self, pos) -> None:
+        """Select the pad under a left click (or clear the selection on empty board).
+
+        Args:
+            pos: Scene position of the click, in millimetres.
+        """
+        if self.scene is None:
+            return
+        key = self.scene.pad_at(pos)
+        self.select_pad(key)
+        if key is not None:
+            pads = self.document.board.find_pads(*key)
+            net = next((p.net for p in pads if p.net), None)
+            on_net = f" on net {net}" if net else ""
+            self.statusBar().showMessage(
+                f"{key[0]} pad {key[1]}{on_net} — double-click or 'Add selected pad' to set a current", 5000
+            )
+
+    def _on_board_double_clicked(self, pos) -> None:
+        """Add (or go to) a current source on the double-clicked pad.
+
+        Args:
+            pos: Scene position of the double-click, in millimetres.
+        """
+        if self.scene is None:
+            return
+        key = self.scene.pad_at(pos)
+        if key is None:
+            return
+        self.select_pad(key)
+        self._sources_dock.show()
+        self._sources_dock.raise_()
+        self.sources_panel.add_selected_pad()
+
+    def _on_source_row_selected(self, key: tuple[str, str] | None) -> None:
+        """Highlight the pad of the row selected in the Current Sources panel.
+
+        Args:
+            key: ``(ref, pad)`` of the selected row, or None.
+        """
+        if key is None:
+            return
+        self._selected_pad = tuple(key)
+        if self.scene is not None:
+            self.scene.set_selected_pad(self._selected_pad)
+
+    def _show_sources(self, *_args) -> None:
+        """Redraw the current source markers on the board.
+
+        Args:
+            *_args: Ignored signal arguments.
+        """
+        if self.scene is not None:
+            self.scene.set_sources(self.document.current_sources)
 
     def _on_cursor_moved(self, x: float, y: float) -> None:
         """Show the cursor position, relative to the grid origin, in the status bar.

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 
-from ..config import ConfigError, MeshSettings
+from ..config import ConfigError, CurrentSource, MeshSettings
 from ..ingest import Board, BoardLoadError, Project, load_project
 from ..mesh.model import BoardMesh, load_saved_mesh
 from ..project import KitsProject, load_kits_project
@@ -28,6 +28,7 @@ class Document(QObject):
         board_changed(Project | None): The linked KiCad board was loaded, reloaded,
             replaced or unloaded (``None`` if no board is loaded).
         settings_changed(): Project settings (e.g. mesh sizes) were edited.
+        sources_changed(): Current sources were added, edited or removed.
         dirty_changed(bool): The project gained or lost unsaved changes.
         mesh_changed(BoardMesh | None): A mesh was built, or cleared.
     """
@@ -35,6 +36,7 @@ class Document(QObject):
     project_changed = Signal(object)
     board_changed = Signal(object)
     settings_changed = Signal()
+    sources_changed = Signal()
     dirty_changed = Signal(bool)
     mesh_changed = Signal(object)
 
@@ -239,6 +241,103 @@ class Document(QObject):
             self._set_kicad(kicad, None)
 
     # -- settings and mesh -----------------------------------------------------------
+
+    @property
+    def current_sources(self) -> list[CurrentSource]:
+        """The open project's current sources (a copy; use the methods below to edit)."""
+        return list(self._project.current_sources) if self._project else []
+
+    def current_source(self, ref: str, pad: str) -> CurrentSource | None:
+        """Return the source on a pad, if there is one.
+
+        Args:
+            ref: Footprint reference.
+            pad: Pad number.
+
+        Returns:
+            The source, or None.
+        """
+        return next((s for s in self.current_sources if s.key == (ref, str(pad))), None)
+
+    def add_current_source(self, ref: str, pad: str, current_a: float) -> CurrentSource:
+        """Add a current source on a pad (in memory; save to persist).
+
+        Args:
+            ref: Footprint reference.
+            pad: Pad number.
+            current_a: Current into the board in amperes (negative for a sink).
+
+        Returns:
+            The new source.
+
+        Raises:
+            ConfigError: If no project is open, the pad already has a source, or the values are invalid.
+        """
+        project = self._require_project()
+        source = CurrentSource(ref, str(pad), float(current_a))
+        source.validate()
+        if self.current_source(ref, pad) is not None:
+            raise ConfigError(f"pad {source.label} already has a current source")
+        project.current_sources.append(source)
+        self._sources_edited()
+        return source
+
+    def set_source_current(self, ref: str, pad: str, current_a: float) -> None:
+        """Change the current of an existing source.
+
+        Args:
+            ref: Footprint reference.
+            pad: Pad number.
+            current_a: New current in amperes.
+
+        Raises:
+            ConfigError: If there is no such source or the current is invalid.
+        """
+        project = self._require_project()
+        for i, source in enumerate(project.current_sources):
+            if source.key == (ref, str(pad)):
+                updated = CurrentSource(source.ref, source.pad, float(current_a))
+                updated.validate()
+                if updated != source:
+                    project.current_sources[i] = updated
+                    self._sources_edited()
+                return
+        raise ConfigError(f"pad {ref}.{pad} has no current source")
+
+    def remove_current_source(self, ref: str, pad: str) -> None:
+        """Remove the source on a pad.
+
+        Args:
+            ref: Footprint reference.
+            pad: Pad number.
+
+        Raises:
+            ConfigError: If there is no such source.
+        """
+        project = self._require_project()
+        remaining = [s for s in project.current_sources if s.key != (ref, str(pad))]
+        if len(remaining) == len(project.current_sources):
+            raise ConfigError(f"pad {ref}.{pad} has no current source")
+        project.current_sources = remaining
+        self._sources_edited()
+
+    def _require_project(self) -> KitsProject:
+        """Return the open project.
+
+        Returns:
+            The project.
+
+        Raises:
+            ConfigError: If no project is open.
+        """
+        if self._project is None:
+            raise ConfigError("no project is open")
+        return self._project
+
+    def _sources_edited(self) -> None:
+        """Mark the project dirty and announce the change."""
+        self._set_dirty(True)
+        self.sources_changed.emit()
 
     def set_mesh_settings(self, settings: MeshSettings) -> None:
         """Change the project's mesh settings (in memory; save to persist).

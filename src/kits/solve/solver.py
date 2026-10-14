@@ -26,7 +26,7 @@ import scipy.sparse as sp
 import shapely
 from scipy.sparse.linalg import spsolve
 
-from ..ingest.model import Board, Pad, is_copper_layer
+from ..ingest.model import Board, is_copper_layer
 from ..mesh.geometry import board_holes, pad_area
 from ..mesh.model import BoardMesh
 from .fem import (
@@ -198,11 +198,14 @@ class LayeredModel:
         Raises:
             SolveError: If the pad doesn't exist or has no meshed copper.
         """
-        pad = _find_pad(self.board, electrode.ref, electrode.pad)
-        area = pad_area(pad).buffer(1e-6)
+        pads = [p for p in self.board.find_pads(electrode.ref, electrode.pad) if p.layers]
+        if not pads:
+            raise SolveError(f"no pad {electrode.ref}.{electrode.pad} with copper on the board")
+        area = shapely.union_all([pad_area(p) for p in pads]).buffer(1e-6)
+        pad_layers = {layer for p in pads for layer in p.layers}
         nodes, weights = [], []
         for lf in self.layers:
-            if lf.layer not in pad.layers:
+            if lf.layer not in pad_layers:
                 continue
             t = lf.mesh.t[:, lf.copper]
             centroids = lf.nodes_mm[t].mean(axis=0)
@@ -405,26 +408,6 @@ def _solve_with_fixed(k: sp.csr_matrix, rhs: np.ndarray, fixed: np.ndarray, valu
     k_fc = k[free][:, fixed]
     x[free] = spsolve(k_ff, rhs[free] - k_fc @ x[fixed])
     return x
-
-
-def _find_pad(board: Board, ref: str, number: str) -> Pad:
-    """Look up a pad by footprint reference and pad number.
-
-    Args:
-        board: The board.
-        ref: Footprint reference.
-        number: Pad number.
-
-    Returns:
-        The first matching pad.
-
-    Raises:
-        SolveError: If there is no such pad.
-    """
-    for pad in board.pads():
-        if pad.footprint_ref == ref and pad.number == str(number):
-            return pad
-    raise SolveError(f"no pad {ref}.{number} on the board")
 
 
 def _triangle_areas(nodes: np.ndarray, t: np.ndarray) -> np.ndarray:

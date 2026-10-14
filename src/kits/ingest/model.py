@@ -241,6 +241,22 @@ class Board:
         for fp in self.footprints:
             yield from fp.pads
 
+    def find_pads(self, ref: str, number: str) -> list[Pad]:
+        """All pads of footprint ``ref`` numbered ``number``.
+
+        Footprints can repeat a pad number (e.g. several thermal pads all
+        numbered "9"); they are electrically one pad, so all are returned.
+
+        Args:
+            ref: Footprint reference, e.g. ``"U1"``.
+            number: Pad number, e.g. ``"9"``.
+
+        Returns:
+            The matching pads, possibly empty.
+        """
+        number = str(number)
+        return [p for fp in self.footprints if fp.reference == ref for p in fp.pads if p.number == number]
+
     def outline_graphics(self) -> list[Graphic]:
         """Return the graphics on the Edge.Cuts layer (the board outline)."""
         return [g for g in self.graphics if g.layer == EDGE_CUTS]

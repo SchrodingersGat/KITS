@@ -195,6 +195,7 @@ def test_crosshair_follows_mouse_and_toggles(app, board_v9_path, kits_v9_path):
     window._layer_dock.hide()
     window._info_dock.hide()
     window._mesh_dock.hide()
+    window._sources_dock.hide()
     window.resize(800, 600)
     window.show()
     assert window.open_path(kits_v9_path)

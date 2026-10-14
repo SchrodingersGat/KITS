@@ -6,7 +6,7 @@ left free for selection / click-to-edit tools.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QLineF, QPoint, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QLineF, QPoint, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QMouseEvent, QPainter, QPalette, QPen, QWheelEvent
 from PySide6.QtWidgets import QGraphicsView
 
@@ -26,6 +26,8 @@ class BoardView(QGraphicsView):
     """
 
     cursor_moved = Signal(float, float)  # board coordinates, mm
+    clicked = Signal(QPointF)  # left click, scene position (mm)
+    double_clicked = Signal(QPointF)  # left double-click, scene position (mm)
 
     def __init__(self, parent=None):
         """Configure rendering, anchors and mouse tracking.
@@ -197,7 +199,7 @@ class BoardView(QGraphicsView):
     # -- pan / cursor tracking ---------------------------------------------
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        """Start a pan on middle/right press; pass other buttons to the base class.
+        """Start a pan on middle/right press; report left clicks via :attr:`clicked`.
 
         Args:
             event: The mouse press event.
@@ -208,6 +210,18 @@ class BoardView(QGraphicsView):
             event.accept()
             return
         super().mousePressEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton and self.scene() is not None:
+            self.clicked.emit(self.mapToScene(event.position().toPoint()))
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        """Report left double-clicks via :attr:`double_clicked`.
+
+        Args:
+            event: The mouse double-click event.
+        """
+        super().mouseDoubleClickEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton and self.scene() is not None:
+            self.double_clicked.emit(self.mapToScene(event.position().toPoint()))
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         """Pan while dragging, move the crosshair and emit :attr:`cursor_moved`.

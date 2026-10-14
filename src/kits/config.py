@@ -6,6 +6,7 @@ stored in its section of the ``.kits`` YAML file.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 DEFAULT_MESH_MAX_SIZE_MM = 1.0
@@ -91,6 +92,104 @@ class MeshSettings:
             raise ConfigError(f"invalid mesh setting: {exc}") from exc
         settings.validate()
         return settings
+
+
+@dataclass
+class CurrentSource:
+    """A current fed into (or drawn out of) the board at a pad.
+
+    Attributes:
+        ref: Footprint reference, e.g. ``"J1"``.
+        pad: Pad number, e.g. ``"1"``. Every pad of the footprint with this number
+            is included (footprints may repeat a number, e.g. thermal pads).
+        current_a: Current into the board in amperes; negative for a sink.
+    """
+
+    ref: str
+    pad: str
+    current_a: float
+
+    @property
+    def key(self) -> tuple[str, str]:
+        """``(ref, pad)``, unique within a project."""
+        return (self.ref, self.pad)
+
+    @property
+    def label(self) -> str:
+        """Short display name, e.g. ``"J1.1"``."""
+        return f"{self.ref}.{self.pad}"
+
+    def validate(self) -> None:
+        """Check the reference, pad and current.
+
+        Raises:
+            ConfigError: If the reference or pad is empty or the current isn't finite.
+        """
+        if not self.ref or not self.pad:
+            raise ConfigError("a current source needs a footprint reference and a pad number")
+        if not math.isfinite(self.current_a):
+            raise ConfigError(f"current for {self.label} must be a finite number")
+
+    def to_dict(self) -> dict:
+        """Return the YAML representation.
+
+        Returns:
+            Mapping with ``ref``, ``pad`` and ``current_a``.
+        """
+        return {"ref": self.ref, "pad": self.pad, "current_a": self.current_a}
+
+    @classmethod
+    def from_dict(cls, data) -> CurrentSource:
+        """Build a source from one entry of the ``current_sources:`` list.
+
+        Args:
+            data: The parsed entry.
+
+        Returns:
+            The validated source.
+
+        Raises:
+            ConfigError: If the entry is malformed.
+        """
+        if not isinstance(data, dict):
+            raise ConfigError("each current source must be a mapping with ref, pad and current_a")
+        try:
+            source = cls(
+                ref=str(data["ref"]),
+                pad=str(data["pad"]),
+                current_a=float(data["current_a"]),
+            )
+        except KeyError as exc:
+            raise ConfigError(f"current source is missing {exc.args[0]!r}") from exc
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"invalid current source: {exc}") from exc
+        source.validate()
+        return source
+
+
+def current_sources_from_list(data) -> list[CurrentSource]:
+    """Parse the ``current_sources:`` section.
+
+    Args:
+        data: The parsed list, or None if the section is absent.
+
+    Returns:
+        The sources, in file order.
+
+    Raises:
+        ConfigError: If the section isn't a list, an entry is invalid, or a pad appears twice.
+    """
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        raise ConfigError("'current_sources' must be a list")
+    sources = [CurrentSource.from_dict(item) for item in data]
+    seen = set()
+    for source in sources:
+        if source.key in seen:
+            raise ConfigError(f"pad {source.label} has more than one current source")
+        seen.add(source.key)
+    return sources
 
 
 def _whole_number(value) -> int:

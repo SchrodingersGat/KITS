@@ -14,6 +14,9 @@ GRID_ORIGIN = QColor(220, 220, 220)
 CURSOR = QColor(160, 170, 185, 110)  # muted, translucent crosshair
 MESH_COPPER = QColor(255, 255, 255, 150)  # mesh edges in copper
 MESH_BARE = QColor(120, 150, 190, 110)  # mesh edges in bare board
+SELECTION = QColor(255, 255, 255)  # selected pad outline
+SOURCE = QColor(46, 204, 113)  # current into the board
+SINK = QColor(255, 140, 26)  # current out of the board
 ZONE_DARKEN = 160  # zones drawn this much darker than tracks on the same layer
 
 _FRONT = QColor(200, 52, 52)

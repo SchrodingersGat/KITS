@@ -93,3 +93,49 @@ def test_save_rejects_invalid_settings(tmp_path):
 def test_default_project_path(tmp_path):
     assert default_project_path(tmp_path / "board.kicad_pro") == tmp_path / "board.kits"
     assert default_project_path(tmp_path / "board.kicad_pcb") == tmp_path / "board.kits"
+
+
+def test_current_sources_round_trip(tmp_path):
+    from kits.config import CurrentSource
+
+    path = tmp_path / "p.kits"
+    path.write_text(
+        "current_sources:\n  - {ref: J1, pad: 1, current_a: 10}\n  - {ref: J2, pad: '1', current_a: -10.5}\n",
+        encoding="utf-8",
+    )
+    project = load_kits_project(path)
+    assert project.current_sources == [CurrentSource("J1", "1", 10.0), CurrentSource("J2", "1", -10.5)]
+    project.save()
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert data["current_sources"] == [
+        {"ref": "J1", "pad": "1", "current_a": 10.0},
+        {"ref": "J2", "pad": "1", "current_a": -10.5},
+    ]
+    assert load_kits_project(path).current_sources == project.current_sources
+
+
+@pytest.mark.parametrize(
+    "text, match",
+    [
+        ("current_sources: 3\n", "must be a list"),
+        ("current_sources:\n  - {ref: J1, pad: 1}\n", "missing 'current_a'"),
+        ("current_sources:\n  - {ref: J1, pad: 1, current_a: lots}\n", "invalid current source"),
+        ("current_sources:\n  - {ref: J1, pad: 1, current_a: .nan}\n", "finite"),
+        ("current_sources:\n  - {ref: '', pad: 1, current_a: 1}\n", "reference"),
+        (
+            "current_sources:\n  - {ref: J1, pad: 1, current_a: 1}\n  - {ref: J1, pad: '1', current_a: 2}\n",
+            "more than one",
+        ),
+    ],
+)
+def test_invalid_current_sources_are_rejected(tmp_path, text, match):
+    path = tmp_path / "p.kits"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ConfigError, match=match):
+        load_kits_project(path)
+
+
+def test_no_current_sources_key_when_empty(tmp_path):
+    project = KitsProject(tmp_path / "p.kits")
+    project.save()
+    assert "current_sources" not in yaml.safe_load(project.path.read_text(encoding="utf-8"))

@@ -3,3 +3,10 @@ mesh:
   max_size_mm: 1.0
   min_size_mm: 0.01
   min_circle_points: 36
+current_sources:
+- ref: J1
+  pad: '1'
+  current_a: 10.0
+- ref: J2
+  pad: '1'
+  current_a: -10.0
