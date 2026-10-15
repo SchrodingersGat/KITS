@@ -284,6 +284,36 @@ def footprint_body(footprint: Footprint) -> tuple[BaseGeometry, str]:
     return box(*shapely.union_all(pads).bounds), "pads"
 
 
+def mask_openings(board: Board, side: str) -> BaseGeometry | None:
+    """Where the solder mask is open (copper exposed) on one side of the board.
+
+    The mask covers the whole board except: pads exposed on that side (their
+    shape grown by the pad's mask margin, else the board's pad-to-mask
+    clearance), graphics drawn on the mask layer, and zone fills on it.
+
+    Args:
+        board: The board.
+        side: ``"F"`` or ``"B"``.
+
+    Returns:
+        The openings in board millimetres (possibly empty), or None if the board
+        has no solder mask on that side.
+    """
+    if not board.has_mask(side):
+        return None
+    layer = f"{side}.Mask"
+    parts: list[BaseGeometry] = []
+    for pad in board.pads():
+        if layer in pad.mask_layers:
+            margin = board.pad_to_mask_clearance_mm if pad.mask_margin is None else pad.mask_margin
+            shape = pad_area(pad)
+            parts.append(shape.buffer(margin, quad_segs=_QUAD_SEGS) if margin else shape)
+    parts += [graphic_area(g) for g in board.mask_graphics if g.layer == layer]
+    for zone in board.zones:
+        parts += [shapely.make_valid(Polygon(p)) for p in zone.fills.get(layer, []) if len(p) >= 3]
+    return shapely.union_all([p for p in parts if not p.is_empty])
+
+
 def board_outline(board: Board) -> BaseGeometry:
     """The board area enclosed by the Edge.Cuts outline.
 

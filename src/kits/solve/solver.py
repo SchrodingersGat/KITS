@@ -33,7 +33,7 @@ from shapely.geometry.base import BaseGeometry
 
 from ..config import HeatLoad, HeatLoadKind, ResistiveElement, SolveSettings
 from ..ingest.model import Board
-from ..mesh.geometry import board_holes, footprint_body, pad_area
+from ..mesh.geometry import board_holes, footprint_body, mask_openings, pad_area
 from ..mesh.mesher import layer_heights
 from ..mesh.model import BoardMesh
 from .elements import default_ambient_conductance
@@ -50,6 +50,9 @@ from .fem import (
     ring_links,
     sheet_matrix,
 )
+
+# KiCad's default solder mask thickness, when the stackup doesn't give one.
+DEFAULT_MASK_THICKNESS_MM = 0.01
 
 # Leakage to 0 V, relative to the mean diagonal, so copper islands not connected
 # to any electrode stay solvable. Small enough not to affect driven currents.
@@ -176,6 +179,13 @@ class LayeredModel:
         self.by_name = {lf.layer: lf for lf in self.layers}
         self.copper_thickness = {name: t * MM for name, (t, _) in board.copper_thicknesses().items()}
         self.holes = [h for h in board_holes(board, mesh.settings) if h.plated]
+        # Solder mask openings on the outer layers ({layer: area}); no entry = no mask.
+        self.mask_openings: dict[str, BaseGeometry] = {}
+        for side, lf in (("F", self.layers[0]), ("B", self.layers[-1])):
+            openings = mask_openings(board, side)
+            if openings is not None and lf.layer == f"{side}.Cu":
+                shapely.prepare(openings)
+                self.mask_openings[lf.layer] = openings
 
     # -- geometry helpers ----------------------------------------------------------
 
@@ -233,8 +243,17 @@ class LayeredModel:
             layer: shapely.union_all([pad_area(p) for p in pads if layer in p.layers])
             for layer in {layer for p in pads for layer in p.layers}
         }
-        found = self.area_nodes(areas, copper_only=True)
+        # Components only touch a pad where the solder mask is open.
+        exposed = {
+            layer: area.intersection(self.mask_openings[layer]) if layer in self.mask_openings else area
+            for layer, area in areas.items()
+        }
+        found = self.area_nodes(exposed, copper_only=True)
         if found is None:
+            if self.area_nodes(areas, copper_only=True) is not None:
+                raise SolveError(
+                    f"pad {label} is covered by solder mask (no mask opening), so nothing can connect to it"
+                )
             raise SolveError(f"pad {label} has no copper in the mesh")
         return found
 
@@ -455,6 +474,58 @@ class LayeredModel:
 
     # -- thermal -------------------------------------------------------------------------
 
+    def mask_thickness_mm(self, side: str) -> float:
+        """Solder mask thickness on one side, from the stackup.
+
+        Args:
+            side: ``"F"`` or ``"B"``.
+
+        Returns:
+            Millimetres; :data:`DEFAULT_MASK_THICKNESS_MM` if the stackup doesn't say.
+        """
+        listed = next((s.thickness_mm for s in self.board.stackup if s.name == f"{side}.Mask"), None)
+        return listed or DEFAULT_MASK_THICKNESS_MM
+
+    def masked_triangles(self, lf: LayerFEM) -> np.ndarray:
+        """Which triangles of an outer layer the solder mask covers.
+
+        Args:
+            lf: The layer.
+
+        Returns:
+            ``(M,)`` True where covered (all False if the layer has no mask).
+        """
+        openings = self.mask_openings.get(lf.layer)
+        if openings is None:
+            return np.zeros(lf.mesh.nelements, dtype=bool)
+        centroids = lf.nodes_mm[lf.mesh.t].mean(axis=0)
+        return ~shapely.contains_xy(openings, centroids[:, 0], centroids[:, 1])
+
+    def _surface_coefficient(self, lf: LayerFEM, h: float, top: bool, bottom: bool) -> np.ndarray:
+        """Convection coefficient per triangle of a layer, through the solder mask where it covers.
+
+        The mask adds a series resistance ``t / k`` per unit area:
+        ``h_eff = 1 / (1/h + t/k)``. Exposed copper and openings convect with ``h``.
+
+        Args:
+            lf: The layer.
+            h: Convection coefficient of the face(s) this layer forms, W/m²K (0 if none).
+            top: Whether the layer is the top face.
+            bottom: Whether the layer is the bottom face.
+
+        Returns:
+            ``(M,)`` W/m²K.
+        """
+        coefficient = np.full(lf.mesh.nelements, h)
+        if h <= 0 or lf.layer not in self.mask_openings:
+            return coefficient
+        side = "F" if top and lf.layer == "F.Cu" else "B" if bottom and lf.layer == "B.Cu" else None
+        if side is None:
+            return coefficient
+        resistance = self.mask_thickness_mm(side) * MM / self.settings.solder_mask_thermal_conductivity_w_mk
+        coefficient[self.masked_triangles(lf)] = 1.0 / (1.0 / h + resistance)
+        return coefficient
+
     def solve_thermal(
         self,
         dc: DCResult | None,
@@ -503,7 +574,7 @@ class LayeredModel:
             h_layer = (s.convection_top_w_m2k if i == 0 else 0.0) + (
                 s.convection_bottom_w_m2k if i == len(self.layers) - 1 else 0.0
             )
-            h = np.full(lf.mesh.nelements, h_layer)
+            h = self._surface_coefficient(lf, h_layer, i == 0, i == len(self.layers) - 1)
             convection.append(mass_matrix(lf, h))
 
         k = block_diag(sheets) + block_diag(convection)

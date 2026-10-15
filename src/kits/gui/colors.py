@@ -24,6 +24,8 @@ HEAT_SINK = QColor(66, 135, 245)  # pad held at a temperature or tied to ambient
 ELEMENT = QColor(190, 110, 255)  # resistive element terminals and link
 MESH_BUTTON = QColor(37, 99, 235)  # toolbar: Build mesh
 SOLVE_BUTTON = QColor(22, 163, 74)  # toolbar: Solve
+F_MASK = QColor(216, 100, 255, 110)  # solder mask openings, as KiCad draws them
+B_MASK = QColor(2, 255, 238, 110)
 ZONE_DARKEN = 160  # zones drawn this much darker than tracks on the same layer
 
 _FRONT = QColor(200, 52, 52)

@@ -215,6 +215,10 @@ class Pad:
     # Custom pad primitives, in the pad's local frame (before rotation).
     primitives: list[Graphic] = field(default_factory=list)
     footprint_ref: str = ""
+    # Solder mask openings: "F.Mask" / "B.Mask" if the pad is exposed on that side, and
+    # the pad's (or footprint's) mask margin, None to use the board's clearance.
+    mask_layers: list[str] = field(default_factory=list)
+    mask_margin: float | None = None
 
     @property
     def is_through_hole(self) -> bool:
@@ -282,6 +286,10 @@ class Board:
     # Thickness of copper layers the stackup doesn't list, set by the user
     # (see with_thickness_overrides); empty for a board as read from its file.
     copper_thickness_overrides: dict[str, float] = field(default_factory=dict)
+    # Solder mask: graphics drawn on F.Mask / B.Mask (openings) and the board's
+    # pad-to-mask clearance from Board Setup.
+    mask_graphics: list[Graphic] = field(default_factory=list)
+    pad_to_mask_clearance_mm: float = 0.0
 
     @property
     def copper_layers(self) -> list[str]:
@@ -303,6 +311,17 @@ class Board:
             name: (stack[name], True) if name in stack else (DEFAULT_COPPER_THICKNESS_MM, False)
             for name in self.copper_layers
         }
+
+    def has_mask(self, side: str) -> bool:
+        """Whether the board has a solder mask layer on one side.
+
+        Args:
+            side: ``"F"`` or ``"B"``.
+
+        Returns:
+            True if ``F.Mask`` / ``B.Mask`` is one of the board's layers.
+        """
+        return any(layer.name == f"{side}.Mask" for layer in self.layers)
 
     def with_thickness_overrides(self, overrides: dict[str, float]) -> Board:
         """A copy of the board with some layer thicknesses replaced.

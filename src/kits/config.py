@@ -691,6 +691,9 @@ class SolveSettings:
         convection_top_w_m2k: Heat transfer coefficient from the top surface, W/m²K.
         convection_bottom_w_m2k: Heat transfer coefficient from the bottom surface, W/m²K.
         ambient_c: Ambient temperature, °C.
+        solder_mask_thermal_conductivity_w_mk: Thermal conductivity of the solder
+            mask, W/mK; with its thickness it adds resistance to convection where
+            the mask covers the board.
     """
 
     copper_conductivity_s_m: float = 5.8e7
@@ -700,6 +703,7 @@ class SolveSettings:
     convection_top_w_m2k: float = 10.0
     convection_bottom_w_m2k: float = 10.0
     ambient_c: float = 25.0
+    solder_mask_thermal_conductivity_w_mk: float = 0.25
 
     def validate(self) -> None:
         """Check the values are physically meaningful.
@@ -716,6 +720,7 @@ class SolveSettings:
             "copper thermal conductivity": self.copper_thermal_conductivity_w_mk,
             "dielectric thermal conductivity": self.dielectric_thermal_conductivity_w_mk,
             "plating thickness": self.plating_thickness_mm,
+            "solder mask thermal conductivity": self.solder_mask_thermal_conductivity_w_mk,
         }
         for label, value in positive.items():
             if value <= 0:
@@ -742,6 +747,7 @@ class SolveSettings:
                     "plating_thickness_mm": self.plating_thickness_mm,
                 },
                 "dielectric": {"thermal_conductivity_w_mk": self.dielectric_thermal_conductivity_w_mk},
+                "solder_mask": {"thermal_conductivity_w_mk": self.solder_mask_thermal_conductivity_w_mk},
             },
             "convection": {
                 "top_w_m2k": self.convection_top_w_m2k,
@@ -768,6 +774,7 @@ class SolveSettings:
         materials = _mapping(materials, "materials")
         copper = _mapping(materials.get("copper"), "materials.copper")
         dielectric = _mapping(materials.get("dielectric"), "materials.dielectric")
+        mask = _mapping(materials.get("solder_mask"), "materials.solder_mask")
         convection = _mapping(convection, "convection")
         try:
             settings = cls(
@@ -786,6 +793,9 @@ class SolveSettings:
                     convection.get("bottom_w_m2k", defaults.convection_bottom_w_m2k)
                 ),
                 ambient_c=float(defaults.ambient_c if ambient is None else ambient),
+                solder_mask_thermal_conductivity_w_mk=float(
+                    mask.get("thermal_conductivity_w_mk", defaults.solder_mask_thermal_conductivity_w_mk)
+                ),
             )
         except (TypeError, ValueError) as exc:
             raise ConfigError(f"invalid material or environment setting: {exc}") from exc

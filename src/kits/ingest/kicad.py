@@ -42,6 +42,7 @@ BOARD_SUFFIX = ".kicad_pcb"
 
 # Footprint layers outlining the component body (kept per footprint, see Footprint.body_graphics).
 BODY_LAYERS = ("F.Fab", "B.Fab", "F.CrtYd", "B.CrtYd")
+MASK_LAYERS = ("F.Mask", "B.Mask")
 
 _GRAPHIC_KINDS = {
     "line": "line",
@@ -293,6 +294,7 @@ class _BoardReader:
             vias=[],
             zones=[],
             graphics=[],
+            pad_to_mask_clearance_mm=self._mask_clearance(),
         )
 
         for item in children(root):
@@ -328,6 +330,10 @@ class _BoardReader:
                 g = self._graphic(item)
                 if g is not None:
                     board.graphics.append(g)
+                elif str(value(item, "layer", "")) in MASK_LAYERS:
+                    mask = self._graphic(item, any_layer=True)
+                    if mask is not None:
+                        board.mask_graphics.append(mask)
 
         board.nets = list(self.nets_seen)
         return board
@@ -368,6 +374,32 @@ class _BoardReader:
                 )
             )
         return layers
+
+    def _mask_layers(self, names) -> list[str]:
+        """Solder mask layers named by a pad's layer list (``*.Mask`` expands to both).
+
+        Args:
+            names: Layer name atoms of the pad's ``(layers ...)`` node.
+
+        Returns:
+            ``"F.Mask"`` and/or ``"B.Mask"``.
+        """
+        out: list[str] = []
+        for name in map(str, names):
+            if name in ("*.Mask", "F&B.Mask"):
+                out += list(MASK_LAYERS)
+            elif name in MASK_LAYERS:
+                out.append(name)
+        return list(dict.fromkeys(out))
+
+    def _mask_clearance(self) -> float:
+        """The board's pad-to-mask clearance from ``(setup (pad_to_mask_clearance x))``.
+
+        Returns:
+            Millimetres (0 if not set, KiCad's default).
+        """
+        setup = find(self.root, "setup")
+        return _float(setup, "pad_to_mask_clearance", 0.0) if setup else 0.0
 
     def _expand_layers(self, names) -> list[str]:
         """Copper layers named by ``names``, expanding ``*.Cu`` / ``F&B.Cu``.
@@ -499,6 +531,7 @@ class _BoardReader:
         """
         pos, rot = _at(node)
         reference, value_text = "", ""
+        self._fp_mask_margin = _float(node, "solder_mask_margin", None)
         for prop in children(node, "property"):
             if len(prop) >= 3 and prop[1] == "Reference":
                 reference = str(prop[2])
@@ -530,6 +563,10 @@ class _BoardReader:
                     body = self._graphic(item, origin=pos, angle=rot, any_layer=True)
                     if body is not None:
                         fp.body_graphics.append(body)
+                elif str(value(item, "layer", "")) in MASK_LAYERS:
+                    mask = self._graphic(item, origin=pos, angle=rot, any_layer=True)
+                    if mask is not None:
+                        board.mask_graphics.append(mask)
             elif kw == "zone":
                 board.zones.append(self._zone(item))
         return fp
@@ -580,6 +617,8 @@ class _BoardReader:
             rect_delta=_xy(node, "rect_delta", (0.0, 0.0)),
             primitives=primitives,
             footprint_ref=fp.reference,
+            mask_layers=self._mask_layers(layers_node[1:] if layers_node else []),
+            mask_margin=_float(node, "solder_mask_margin", self._fp_mask_margin),
         )
 
     def _graphic(

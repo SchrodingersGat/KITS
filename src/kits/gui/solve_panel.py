@@ -98,6 +98,16 @@ _SETTING_FIELDS = (
         3,
         "Thermal conductivity of the board material (FR-4 ≈ 0.3).",
     ),
+    (
+        "solder_mask_thermal_conductivity_w_mk",
+        "Solder mask k",
+        " W/mK",
+        1.0,
+        (0.01, 10.0),
+        3,
+        "Thermal conductivity of the solder mask (LPI ≈ 0.2-0.3). With the mask thickness from the\n"
+        "stackup it adds resistance to convection where the mask covers the board.",
+    ),
 )
 
 

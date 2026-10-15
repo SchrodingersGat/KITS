@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 from ..config import CurrentSource, HeatLoad, ResistiveElement
 from ..ingest.geometry import arc_points
 from ..ingest.model import EDGE_CUTS, Board, Pad
-from ..mesh.geometry import GeometryError, board_outline, footprint_body
+from ..mesh.geometry import GeometryError, board_outline, footprint_body, mask_openings
 from ..mesh.model import BoardMesh, LayerMesh
 from ..solve.results import LayerResult, SolveResults
 from . import colors
@@ -165,6 +165,25 @@ def _cosmetic_pen(color: QColor, pixels: float) -> QPen:
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     return pen
+
+
+def _geometry_path(geom) -> QPainterPath:
+    """A filled path for a shapely (Multi)Polygon, holes included.
+
+    Args:
+        geom: The area.
+
+    Returns:
+        The path (odd-even fill, so interior rings are holes).
+    """
+    path = QPainterPath()
+    path.setFillRule(Qt.FillRule.OddEvenFill)
+    for polygon in shapely.get_parts(geom):
+        if polygon.geom_type != "Polygon" or polygon.is_empty:
+            continue
+        for ring in (polygon.exterior, *polygon.interiors):
+            path.addPath(polygon_path(list(ring.coords)))
+    return path
 
 
 def _net_tip(net: str | None) -> str:
@@ -1079,13 +1098,22 @@ class BoardScene(QGraphicsScene):
         via_layer = self._add_layer(VIAS, colors.VIAS, False, top + 1)
         hole_layer = self._add_layer(HOLES, colors.HOLES, False, top + 2)
         edge_layer = self._add_layer(EDGE_CUTS, colors.EDGE_CUTS, False, top + 3)
+        # Solder mask: drawn as its openings (exposed copper), like KiCad, above the copper.
+        for side, color, z in (("F", colors.F_MASK, top + 0.6), ("B", colors.B_MASK, top + 0.5)):
+            openings = mask_openings(board, side)
+            if openings is not None:
+                mask_layer = self._add_layer(f"{side}.Mask", color, False, z)
+                item = QGraphicsPathItem(_geometry_path(openings), mask_layer)
+                item.setPen(_no_pen())
+                item.setBrush(color)
+                item.setToolTip(f"{side}.Mask opening: copper exposed (solderable)")
 
         for zone in board.zones:
             if zone.is_rule_area:
                 continue
             for layer_name, polygons in zone.fills.items():
-                if layer_name not in self.layers:
-                    continue
+                if layer_name not in self.layers or not self.layers[layer_name].is_copper:
+                    continue  # mask zones are part of the mask layer's openings
                 color = self.layers[layer_name].color.darker(colors.ZONE_DARKEN)
                 path = QPainterPath()
                 for poly in polygons:
