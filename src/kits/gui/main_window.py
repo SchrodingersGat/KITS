@@ -37,6 +37,7 @@ from .document import Document
 from .elements_panel import ElementsPanel
 from .field_display import format_value
 from .heat_loads_panel import HeatLoadsPanel
+from .heatsinks_panel import HeatsinksPanel
 from .layer_panel import LayerPanel
 from .mesh_job import MeshJob
 from .mesh_panel import MeshPanel
@@ -95,6 +96,7 @@ class MainWindow(QMainWindow):
         self.sources_panel = SourcesPanel(self.document)
         self.heat_panel = HeatLoadsPanel(self.document)
         self.elements_panel = ElementsPanel(self.document)
+        self.heatsinks_panel = HeatsinksPanel(self.document)
         self.solve_panel = SolvePanel(self.document)
         self._selected_pad: tuple[str, str] | None = None
         self._layer_dock = self._add_dock("Layers", self.layer_panel, Qt.DockWidgetArea.LeftDockWidgetArea)
@@ -110,6 +112,10 @@ class MainWindow(QMainWindow):
         )
         self.tabifyDockWidget(self._sources_dock, self._heat_dock)
         self.tabifyDockWidget(self._heat_dock, self._elements_dock)
+        self._heatsinks_dock = self._add_dock(
+            "Heatsinks", self.heatsinks_panel, Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.tabifyDockWidget(self._elements_dock, self._heatsinks_dock)
         self._sources_dock.raise_()
         # Double-clicking a pad adds to whichever of these tabs was shown last.
         self._pad_load_dock = self._sources_dock
@@ -143,6 +149,7 @@ class MainWindow(QMainWindow):
             ("Current sources", self.show_sources_action),
             ("Heat loads", self.show_heat_loads_action),
             ("Resistive elements", self.show_elements_action),
+            ("Heatsinks", self.show_heatsinks_action),
             ("Markers", self.show_markers_action),
             ("Grid", self.grid_action),
         ):
@@ -173,6 +180,10 @@ class MainWindow(QMainWindow):
         self.sources_panel.show_sources_toggled.connect(self.show_sources_action.setChecked)
         self.heat_panel.show_heat_loads_toggled.connect(self.show_heat_loads_action.setChecked)
         self.elements_panel.show_elements_toggled.connect(self.show_elements_action.setChecked)
+        self.heatsinks_panel.show_heatsinks_toggled.connect(self.show_heatsinks_action.setChecked)
+        self.heatsinks_panel.draw_requested.connect(self.draw_heatsink)
+        self.view.rect_drawn.connect(self._on_heatsink_drawn)
+        self.view.rect_draw_cancelled.connect(lambda: self.statusBar().clearMessage())
         self.mesh_panel.build_requested.connect(self.build_mesh)
         self.mesh_panel.show_mesh_toggled.connect(self.show_mesh_action.setChecked)
         self.layer_panel.visibility_changed.connect(self._on_layer_visibility)
@@ -185,6 +196,7 @@ class MainWindow(QMainWindow):
         self.document.sources_changed.connect(self._show_sources)
         self.document.heat_loads_changed.connect(self._show_heat_loads)
         self.document.elements_changed.connect(self._show_elements)
+        self.document.heatsinks_changed.connect(self._show_heatsinks)
         self.start_page.new_requested.connect(self.new_project)
         self.start_page.open_requested.connect(self.open_project_dialog)
         self.start_page.recent_requested.connect(self.open_path)
@@ -306,6 +318,9 @@ class MainWindow(QMainWindow):
         self.show_elements_action = toggle(
             "Show resistive &elements", True, self._on_show_elements_toggled, Qt.Key.Key_E
         )
+        self.show_heatsinks_action = toggle(
+            "Show hea&tsinks", True, self._on_show_heatsinks_toggled, Qt.Key.Key_T
+        )
         self._project_actions = [
             self.save_action,
             self.save_as_action,
@@ -377,6 +392,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.show_sources_action)
         view_menu.addAction(self.show_heat_loads_action)
         view_menu.addAction(self.show_elements_action)
+        view_menu.addAction(self.show_heatsinks_action)
         view_menu.addSeparator()
         view_menu.addAction(self.toolbar.toggleViewAction())
         view_menu.addAction(self._layer_dock.toggleViewAction())
@@ -385,6 +401,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self._sources_dock.toggleViewAction())
         view_menu.addAction(self._heat_dock.toggleViewAction())
         view_menu.addAction(self._elements_dock.toggleViewAction())
+        view_menu.addAction(self._heatsinks_dock.toggleViewAction())
         view_menu.addAction(self._solve_dock.toggleViewAction())
 
         mesh_menu = self.menuBar().addMenu("&Mesh")
@@ -1092,6 +1109,7 @@ class MainWindow(QMainWindow):
         self._show_sources()
         self._show_heat_loads()
         self._show_elements()
+        self._show_heatsinks()
         self._show_markers()
         self._update_state()
 
@@ -1135,6 +1153,10 @@ class MainWindow(QMainWindow):
         )
         self.view3d.set_overlay_visible(
             self.show_mesh_action.isChecked(), self.show_results_action.isChecked()
+        )
+        self.view3d.set_heatsinks(self.document.active_heatsinks, self.show_heatsinks_action.isChecked())
+        self.view3d.set_elements(
+            self.document.active_resistive_elements, self.show_elements_action.isChecked()
         )
 
     def _zoom_to_fit(self) -> None:
@@ -1293,11 +1315,15 @@ class MainWindow(QMainWindow):
             return
         key = self.scene.pad_at(pos)
         if key is None:
+            heatsink = self.scene.heatsink_at(pos)
+            if heatsink is not None:
+                self._drop_click_marker()
+                self._heatsinks_dock.show()
+                self._heatsinks_dock.raise_()
+                self.heatsinks_panel.edit(heatsink)
             return
         # The first click of the double-click added a marker; this gesture is about the pad.
-        if self._click_marker is not None and self._click_marker == len(self.document.markers) - 1:
-            self.document.remove_markers([self._click_marker])
-        self._click_marker = None
+        self._drop_click_marker()
         self.select_pad(key)
         dock = self._pad_load_dock
         dock.show()
@@ -1351,6 +1377,56 @@ class MainWindow(QMainWindow):
         if self.scene is not None:
             self.scene.set_heat_loads_visible(checked)
 
+    def _drop_click_marker(self) -> None:
+        """Remove the marker the first click of a double-click added, if it is still the newest."""
+        if self._click_marker is not None and self._click_marker == len(self.document.markers) - 1:
+            self.document.remove_markers([self._click_marker])
+        self._click_marker = None
+
+    def draw_heatsink(self) -> None:
+        """Let the user drag a rectangle on the 2D board view for a new heatsink."""
+        if self.scene is None:
+            return
+        self.view_2d_action.setChecked(True)
+        self.view.start_rect_draw()
+        self.statusBar().showMessage("Drag a rectangle on the board for the heatsink (Esc cancels)")
+
+    def _on_heatsink_drawn(self, rect) -> None:
+        """Open the heatsink dialog for a rectangle drawn on the board.
+
+        Args:
+            rect: The rectangle, in board coordinates.
+        """
+        self.statusBar().clearMessage()
+        self._heatsinks_dock.show()
+        self._heatsinks_dock.raise_()
+        self.heatsinks_panel.add_from_rect(rect)
+
+    def _on_show_heatsinks_toggled(self, checked: bool) -> None:
+        """Show or hide the heatsinks, keeping the panel checkbox in sync.
+
+        Args:
+            checked: New state of the "Show heatsinks" action.
+        """
+        self.heatsinks_panel.show_heatsinks.setChecked(checked)
+        if self.scene is not None:
+            self.scene.set_heatsinks_visible(checked)
+        self._update_3d_overlays()
+
+    def _show_heatsinks(self, *_args) -> None:
+        """Redraw the heatsinks on the board (2D and 3D) and update the panel's grid frame.
+
+        Args:
+            *_args: Ignored signal arguments.
+        """
+        if self.scene is not None:
+            origin = self.scene.grid_origin()
+            self.heatsinks_panel.frame.origin = (origin.x(), origin.y())
+            self.heatsinks_panel.refresh()
+            self.scene.set_heatsinks_visible(self.show_heatsinks_action.isChecked())
+            self.scene.set_heatsinks(self.document.active_heatsinks)
+        self._update_3d_overlays()
+
     def _on_show_elements_toggled(self, checked: bool) -> None:
         """Show or hide the resistive element markers, keeping the panel checkbox in sync.
 
@@ -1360,6 +1436,7 @@ class MainWindow(QMainWindow):
         self.elements_panel.show_elements.setChecked(checked)
         if self.scene is not None:
             self.scene.set_elements_visible(checked)
+        self._update_3d_overlays()
 
     def _show_elements(self, *_args) -> None:
         """Redraw the resistive element markers on the board.
@@ -1370,6 +1447,7 @@ class MainWindow(QMainWindow):
         if self.scene is not None:
             self.scene.set_elements_visible(self.show_elements_action.isChecked())
             self.scene.set_elements(self.document.active_resistive_elements)
+        self._update_3d_overlays()
 
     def _show_heat_loads(self, *_args) -> None:
         """Redraw the heat load markers on the board.

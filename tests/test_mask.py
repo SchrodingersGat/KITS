@@ -72,12 +72,12 @@ def test_mask_adds_resistance_to_convection(tmp_path):
     top = masked.layers[0]
     covered = masked.masked_triangles(top)
     assert covered.any() and not covered.all()  # the pads are open
-    h = masked._surface_coefficient(top, 10.0, True, False)
+    h = masked._surface_coefficient(top, True, False)
     expected = 1 / (1 / 10.0 + 0.02e-3 / 0.25)  # 20 µm of mask at 0.25 W/mK
     np.testing.assert_allclose(h[covered], expected)
     np.testing.assert_allclose(h[~covered], 10.0)
     # The bottom has no B.Mask thickness in the stackup: the default 10 µm, nothing open.
-    bottom = masked._surface_coefficient(masked.layers[-1], 10.0, False, True)
+    bottom = masked._surface_coefficient(masked.layers[-1], False, True)
     np.testing.assert_allclose(bottom, 1 / (1 / 10.0 + 0.01e-3 / 0.25))
 
     # Heat still balances, and a more insulating mask runs the board hotter.

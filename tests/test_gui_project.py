@@ -566,6 +566,7 @@ def test_layers_panel_overlay_toggles(app, window, strip_kits):
         "Current sources",
         "Heat loads",
         "Resistive elements",
+        "Heatsinks",
         "Markers",
         "Grid",
     ]
@@ -908,3 +909,85 @@ def test_toolbar_quick_actions(window, kits_v9_path):
     assert all(a.isEnabled() for a in buttons)
     view_menu = next(a.menu() for a in window.menuBar().actions() if a.text() == "&View")
     assert window.toolbar.toggleViewAction() in view_menu.actions()  # can be hidden from the View menu
+
+
+def test_heatsinks_panel(app, window, strip_kits, monkeypatch):
+    from PySide6.QtCore import QPointF, QRectF
+
+    from kits.config import Heatsink
+
+    assert window.open_path(strip_kits)
+    doc, panel, scene = window.document, window.heatsinks_panel, window.scene
+    shown = []
+
+    def accept(dialog):
+        shown.append(dialog)
+        return dialog.heatsink
+
+    monkeypatch.setattr(panel, "run_dialog", accept)
+
+    # Draw: the panel's button puts the view in draw mode; a drawn rectangle opens the dialog.
+    panel.draw_button.click()
+    assert window.view.drawing
+    window.view.rect_drawn.emit(QRectF(20.0, 2.0, 10.0, 6.0))
+    assert doc.heatsinks == [Heatsink("HS1", "top", 20.0, 2.0, 10.0, 6.0)]
+    assert scene.heatsink_count == 1 and doc.dirty
+    # The dialog works in grid coordinates: origin at the board's bottom-left (0, 10), Y up.
+    dialog = shown[-1]
+    assert (dialog.x.value(), dialog.y.value()) == pytest.approx((20.0, 2.0))
+    assert panel.table.item(0, 3).text() == "20.00, 2.00"
+    window.view.cancel_rect_draw()  # no-op once drawn
+
+    # Double-click the heatsink on the board to edit it: move it and put it underneath.
+    def edit(dialog):
+        dialog.y.setValue(0.0)
+        dialog.side.setCurrentIndex(dialog.side.findData("bottom"))
+        dialog.ambient_theta.setValue(2.0)
+        return dialog.heatsink
+
+    monkeypatch.setattr(panel, "run_dialog", edit)
+    window._on_board_double_clicked(QPointF(25.0, 5.0))
+    hs = doc.heatsink("HS1")
+    assert (hs.side, hs.y_mm, hs.thermal_resistance_ambient_k_w) == ("bottom", 4.0, 2.0)
+
+    # Show/hide and the enable checkbox.
+    window.show_heatsinks_action.trigger()
+    assert not scene.heatsinks_visible and not panel.show_heatsinks.isChecked()
+    panel.show_heatsinks.setChecked(True)
+    assert scene.heatsinks_visible
+    panel.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+    assert not doc.heatsink("HS1").enabled and scene.heatsink_count == 0
+    panel.table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+
+    # Solve: the heatsink takes heat and is listed; it is saved with the project.
+    window.solve()
+    _wait(
+        app,
+        lambda: not window.solve_job_running and doc.results is not None and doc.results_staleness is None,
+    )
+    assert doc.results.heatsink_heat["HS1"] > 0
+    assert "Heatsinks" in window.solve_panel.status.text()
+    assert load_kits_project(strip_kits).heatsinks == doc.heatsinks
+
+    # 3D: a block under the board.
+    window.show()
+    window.view_3d_action.trigger()
+    _wait(app, lambda: not window.view3d.busy)
+    assert "heatsink:HS1" in window.view3d.visible_part_keys()
+    window.show_heatsinks_action.trigger()
+    assert "heatsink:HS1" not in window.view3d.visible_part_keys()
+    window.view3d.shutdown()
+
+    panel.table.selectRow(0)
+    panel.remove_selected_rows()
+    assert doc.heatsinks == [] and scene.heatsink_count == 0
+
+
+def test_heatsink_dialog_mount(app):
+    from kits.config import Heatsink
+    from kits.gui.heatsinks_panel import GridFrame, HeatsinkDialog
+
+    dialog = HeatsinkDialog(Heatsink("HS1", "top", 20.0, 2.0, 10.0, 6.0), set(), GridFrame((0.0, 10.0)))
+    assert dialog.heatsink.mount == "board"
+    dialog.mount.setCurrentIndex(dialog.mount.findData("components"))
+    assert dialog.heatsink == Heatsink("HS1", "top", 20.0, 2.0, 10.0, 6.0, mount="components")

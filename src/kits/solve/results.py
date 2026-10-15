@@ -11,14 +11,16 @@ from pathlib import Path
 
 import numpy as np
 
-from ..config import CurrentSource, HeatLoad, ResistiveElement
+from ..config import CurrentSource, HeatLoad, Heatsink, ResistiveElement
 from ..mesh.fingerprint import MeshFingerprint
 from .solver import SolveSettings
 
 # Bump when the physics model changes in a way that alters results.
 # 2: stackup sub-layers summed; top/bottom convection. 3: element heat over the body area.
 # 4: solder mask (convection through the mask; pads only contact where the mask is open).
-SOLVER_VERSION = 4
+# 5: element bodies only heat the board through mask openings.
+# 6: heatsinks conduct through solder mask (reduced) and block convection under them.
+SOLVER_VERSION = 6
 
 
 def inputs_hash(
@@ -27,6 +29,7 @@ def inputs_hash(
     heat_loads: Sequence[HeatLoad] = (),
     elements: Sequence[ResistiveElement] = (),
     stackup: dict[str, float] | None = None,
+    heatsinks: Sequence[Heatsink] = (),
 ) -> str:
     """Fingerprint the solve inputs that aren't part of the mesh.
 
@@ -37,6 +40,7 @@ def inputs_hash(
             the digest when there are none, so older results stay valid.
         elements: Resistive elements (order doesn't matter); likewise left out when none.
         stackup: Layer thickness edits applied to the board; likewise left out when none.
+        heatsinks: Heatsinks (order doesn't matter); likewise left out when none.
 
     Returns:
         A hex SHA-256 digest.
@@ -48,6 +52,8 @@ def inputs_hash(
     }
     if heat_loads:
         payload["heat_loads"] = sorted((h.ref, h.pad, h.kind.value, h.value) for h in heat_loads)
+    if heatsinks:
+        payload["heatsinks"] = sorted(json.dumps(h.to_dict(), sort_keys=True) for h in heatsinks)
     if stackup:
         payload["stackup"] = sorted(stackup.items())
     if elements:
@@ -93,6 +99,8 @@ class SolveResults:
         element_currents: Current through each resistive element (group A to B), A, keyed by name.
         element_power: Power dissipated in each resistive element, W.
         element_temperatures: Body temperature of each resistive element, °C.
+        heatsink_temperatures: Temperature of each heatsink, °C, keyed by name.
+        heatsink_heat: Heat each heatsink takes from the board, W.
         mesh_fingerprint: Fingerprint of the board and mesh settings the mesh was built from.
         inputs: :func:`inputs_hash` of the sources and solver settings.
     """
@@ -108,6 +116,8 @@ class SolveResults:
     element_currents: dict[str, float] = field(default_factory=dict)
     element_power: dict[str, float] = field(default_factory=dict)
     element_temperatures: dict[str, float] = field(default_factory=dict)
+    heatsink_temperatures: dict[str, float] = field(default_factory=dict)
+    heatsink_heat: dict[str, float] = field(default_factory=dict)
 
     def layer(self, name: str) -> LayerResult | None:
         """Return one layer's results.
@@ -144,6 +154,8 @@ class SolveResults:
             "element_currents": self.element_currents,
             "element_power": self.element_power,
             "element_temperatures": self.element_temperatures,
+            "heatsink_temperatures": self.heatsink_temperatures,
+            "heatsink_heat": self.heatsink_heat,
         }
         arrays: dict[str, np.ndarray] = {"meta": np.array(json.dumps(meta))}
         for i, r in enumerate(self.layers):
@@ -187,6 +199,8 @@ class SolveResults:
             element_currents={k: float(v) for k, v in meta.get("element_currents", {}).items()},
             element_power={k: float(v) for k, v in meta.get("element_power", {}).items()},
             element_temperatures={k: float(v) for k, v in meta.get("element_temperatures", {}).items()},
+            heatsink_temperatures={k: float(v) for k, v in meta.get("heatsink_temperatures", {}).items()},
+            heatsink_heat={k: float(v) for k, v in meta.get("heatsink_heat", {}).items()},
         )
 
     def staleness(self, mesh_fingerprint: MeshFingerprint, inputs: str) -> str | None:
@@ -204,7 +218,7 @@ class SolveResults:
             return reason.replace("saved mesh", "results")
         if self.inputs != inputs:
             return (
-                "The current sources, heat loads, resistive elements, layer thicknesses or solver settings "
+                "The current sources, heat loads, elements, heatsinks, layer thicknesses or solver settings "
                 "changed since the "
                 "results were computed"
             )

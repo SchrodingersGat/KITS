@@ -196,3 +196,27 @@ def test_view_switch_pills(app, window, kits_v9_path):  # noqa: F811
     app.processEvents()
     assert viewport.width() - switch.geometry().right() < 40
     window.view3d.shutdown()
+
+
+def test_element_bodies_as_blocks(tmp_path):
+    from kits.config import PadGroup, ResistiveElement
+    from kits.gui.field_display import DisplayMode, colormap
+    from kits.gui.view3d import COMPONENT_HEIGHT_MM, ELEMENT_BODY_COLOR, element_parts, layer_z_ranges
+
+    from .test_solve import _FAB_RESISTOR, _footprint
+
+    board, _ = _footprint(tmp_path, _FAB_RESISTOR)  # R1: a 12 x 5 Fab body on top
+    element = ResistiveElement("R1", "R1", PadGroup("A", ["1"]), PadGroup("B", ["2"]), 0.01)
+    ranges = layer_z_ranges(board, 2.0)
+    (part,) = element_parts(board, ranges, [element], 2.0)
+    assert part.key == "element:R1" and part.color == ELEMENT_BODY_COLOR
+    mesh = part.mesh.clean()
+    assert mesh.volume == pytest.approx(60 * COMPONENT_HEIGHT_MM * 2.0, rel=1e-6)
+    top = max(z1 for _, z1 in ranges.values())
+    assert mesh.bounds[4] == pytest.approx(top)  # sits on the top face
+
+    # Coloured by body temperature on the temperature scale when given.
+    (hot,) = element_parts(board, ranges, [element], 2.0, {"R1": 90.0}, (25.0, 80.0))
+    assert hot.color == colormap(DisplayMode.TEMPERATURE)[-1]  # above the scale: its top colour
+    missing = ResistiveElement("R9", "R9", PadGroup("A", ["1"]), PadGroup("B", ["2"]), 0.01)
+    assert element_parts(board, ranges, [missing], 2.0) == []  # footprint not on the board

@@ -228,6 +228,7 @@ class SolvePanel(QWidget):
             document.heat_loads_changed,
             document.elements_changed,
             document.stackup_changed,
+            document.heatsinks_changed,
             document.settings_changed,
             document.results_changed,
         ):
@@ -451,6 +452,11 @@ class SolvePanel(QWidget):
                 power = results.element_power.get(name, 0.0)
                 temperature = format_value(body, DisplayMode.TEMPERATURE)
                 lines.append(f"  {name}: {current:+.4g} A, {power:.4g} W, {temperature}")
+            if results.heatsink_temperatures:
+                lines.append("Heatsinks (heat taken from the board, temperature):")
+            for name, temperature in sorted(results.heatsink_temperatures.items()):
+                shown = format_value(temperature, DisplayMode.TEMPERATURE)
+                lines.append(f"  {name}: {results.heatsink_heat.get(name, 0.0):.4g} W, {shown}")
             if doc.results_from_file:
                 lines.append("Reloaded from the project's saved results.")
             staleness = doc.results_staleness

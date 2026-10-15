@@ -27,6 +27,7 @@ from .config import (
     ConfigError,
     CurrentSource,
     HeatLoad,
+    Heatsink,
     MeshSettings,
     ResistiveElement,
     SolveSettings,
@@ -34,6 +35,7 @@ from .config import (
     current_multiplier_from_value,
     current_sources_from_list,
     heat_loads_from_list,
+    heatsinks_from_list,
     resistive_elements_from_list,
 )
 
@@ -66,6 +68,7 @@ class KitsProject:
         heat_loads: Heat sources and sinks applied to pads.
         resistive_elements: Lumped resistors between pad groups (resistors, MOSFETs...).
         stackup_edits: Layer thicknesses changed from the board file, or None.
+        heatsinks: Heatsinks placed on the board faces.
         solve: Materials, convection and ambient temperature for the solver.
         extra: Top-level keys KITS doesn't interpret yet, kept so saving doesn't drop them.
     """
@@ -78,6 +81,7 @@ class KitsProject:
     heat_loads: list[HeatLoad] = field(default_factory=list)
     resistive_elements: list[ResistiveElement] = field(default_factory=list)
     stackup_edits: StackupEdits | None = None
+    heatsinks: list[Heatsink] = field(default_factory=list)
     solve: SolveSettings = field(default_factory=SolveSettings)
     extra: dict = field(default_factory=dict)
 
@@ -138,6 +142,11 @@ class KitsProject:
         return [h for h in self.heat_loads if h.enabled]
 
     @property
+    def active_heatsinks(self) -> list[Heatsink]:
+        """The enabled heatsinks (those that are solved)."""
+        return [h for h in self.heatsinks if h.enabled]
+
+    @property
     def active_resistive_elements(self) -> list[ResistiveElement]:
         """The enabled resistive elements (those that are solved)."""
         return [e for e in self.resistive_elements if e.enabled]
@@ -189,6 +198,8 @@ class KitsProject:
             data["heat_loads"] = [h.to_dict() for h in self.heat_loads]
         if self.stackup_edits is not None and self.stackup_edits.thickness_mm:
             data["stackup_edits"] = self.stackup_edits.to_dict()
+        if self.heatsinks:
+            data["heatsinks"] = [h.to_dict() for h in self.heatsinks]
         if self.resistive_elements:
             data["resistive_elements"] = [e.to_dict() for e in self.resistive_elements]
         data.update({k: v for k, v in self.extra.items() if k not in data})
@@ -214,6 +225,7 @@ class KitsProject:
         for load in self.heat_loads:
             load.validate()
         resistive_elements_from_list([e.to_dict() for e in self.resistive_elements])
+        heatsinks_from_list([h.to_dict() for h in self.heatsinks])
         if self.stackup_edits is not None:
             self.stackup_edits.validate()
         target = _normalise(path) if path is not None else self.path
@@ -271,6 +283,7 @@ def load_kits_project(path: str | Path) -> KitsProject:
     multiplier = current_multiplier_from_value(data.pop("current_multiplier", None))
     heat_loads = heat_loads_from_list(data.pop("heat_loads", None))
     elements = resistive_elements_from_list(data.pop("resistive_elements", None))
+    heatsinks = heatsinks_from_list(data.pop("heatsinks", None))
     stackup_edits = StackupEdits.from_dict(data.pop("stackup_edits", None))
     solve = SolveSettings.from_sections(
         data.pop("ambient_temperature_c", None), data.pop("materials", None), data.pop("convection", None)
@@ -283,6 +296,7 @@ def load_kits_project(path: str | Path) -> KitsProject:
         current_multiplier=multiplier,
         heat_loads=heat_loads,
         resistive_elements=elements,
+        heatsinks=heatsinks,
         stackup_edits=stackup_edits,
         solve=solve,
         extra=data,

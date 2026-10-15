@@ -29,9 +29,10 @@ import scipy.sparse as sp
 import shapely
 from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import spsolve
+from shapely.geometry import box
 from shapely.geometry.base import BaseGeometry
 
-from ..config import HeatLoad, HeatLoadKind, ResistiveElement, SolveSettings
+from ..config import HeatLoad, HeatLoadKind, Heatsink, ResistiveElement, SolveSettings
 from ..ingest.model import Board
 from ..mesh.geometry import board_holes, footprint_body, mask_openings, pad_area
 from ..mesh.mesher import layer_heights
@@ -135,6 +136,8 @@ class ThermalResult:
         load_heat: Heat into the board at each heat load's pad, W (negative where
             a sink takes heat out), keyed ``(ref, pad)``.
         load_temperatures: Area-weighted mean temperature of each heat load's pad, °C.
+        heatsink_temperatures: Temperature of each heatsink, °C, keyed by name.
+        heatsink_heat: Heat each heatsink takes from the board (and sheds to ambient), W.
         element_temperatures: Body temperature of each resistive element, °C (its
             pads' mean temperature when the board contact is ideal), keyed by name.
         element_ambient_heat: Heat each resistive element sheds straight to ambient, W.
@@ -146,6 +149,8 @@ class ThermalResult:
     load_temperatures: dict[tuple[str, str], float] = field(default_factory=dict)
     element_temperatures: dict[str, float] = field(default_factory=dict)
     element_ambient_heat: dict[str, float] = field(default_factory=dict)
+    heatsink_temperatures: dict[str, float] = field(default_factory=dict)
+    heatsink_heat: dict[str, float] = field(default_factory=dict)
 
     @property
     def max_temperature(self) -> float:
@@ -278,8 +283,120 @@ class LayeredModel:
             raise SolveError(f"no footprint {element.ref} on the board (resistive element {element.name})")
         area, _source = footprint_body(footprint)
         side = footprint.side if footprint.side in self.by_name else self.layers[0].layer
-        found = self.area_nodes({side: area}, copper_only=False) if not area.is_empty else None
+        found = self.contact_nodes(area, side) if not area.is_empty else None
         return found if found is not None else self.pad_nodes(element.ref, element.all_pads)
+
+    def contact_nodes(self, area: BaseGeometry, layer: str) -> tuple[np.ndarray, np.ndarray] | None:
+        """Nodes where something pressed onto a board face touches it, with area weights.
+
+        Heat only crosses into the board where the solder mask is open on that
+        face (the whole area if the face has no mask); copper and bare board count.
+
+        Args:
+            area: The contact area in board millimetres.
+            layer: The face's outer copper layer.
+
+        Returns:
+            ``(nodes, weights)`` summing to 1, or None if nothing exposed lies under the area.
+        """
+        if layer in self.mask_openings:
+            area = area.intersection(self.mask_openings[layer])
+        return self.area_nodes({layer: area}, copper_only=False) if not area.is_empty else None
+
+    def heatsink_contacts(
+        self, heatsink: Heatsink, elements: Sequence[ResistiveElement]
+    ) -> list[tuple[str, float, float]]:
+        """The resistive element bodies a component-mounted heatsink sits on.
+
+        Args:
+            heatsink: The heatsink (``mount == "components"``).
+            elements: The elements being solved.
+
+        Returns:
+            ``(element name, overlap area mm², fraction of the body covered)`` for each
+            element on the heatsink's side whose body plan area it overlaps.
+
+        Raises:
+            SolveError: If it covers no element body.
+        """
+        footprints = {fp.reference: fp for fp in self.board.footprints}
+        side = "F.Cu" if heatsink.side == "top" else "B.Cu"
+        rect = box(*heatsink.bounds)
+        touching = []
+        for e in elements:
+            footprint = footprints.get(e.ref)
+            if footprint is None or footprint.side != side:
+                continue
+            body, _source = footprint_body(footprint)
+            overlap = body.intersection(rect).area if not body.is_empty else 0.0
+            if overlap > 0:
+                touching.append((e.name, overlap, overlap / body.area))
+        if not touching:
+            raise SolveError(
+                f"heatsink {heatsink.name} is set to sit on components but covers no resistive element "
+                f"on the {heatsink.side} side"
+            )
+        return touching
+
+    def heatsink_face(self, heatsink: Heatsink) -> LayerFEM:
+        """The outer layer a heatsink sits on.
+
+        Args:
+            heatsink: The heatsink.
+
+        Returns:
+            The top layer for a top heatsink, the bottom one for a bottom heatsink.
+        """
+        return self.layers[0] if heatsink.side == "top" else self.layers[-1]
+
+    def heatsink_triangles(self, heatsink: Heatsink) -> np.ndarray:
+        """Which triangles of its face a heatsink covers (by centroid).
+
+        Args:
+            heatsink: The heatsink.
+
+        Returns:
+            ``(M,)`` mask over the face layer's triangles.
+        """
+        lf = self.heatsink_face(heatsink)
+        centroids = lf.nodes_mm[lf.mesh.t].mean(axis=0)
+        return shapely.contains_xy(box(*heatsink.bounds), centroids[:, 0], centroids[:, 1])
+
+    def heatsink_conductances(self, heatsink: Heatsink) -> tuple[np.ndarray, np.ndarray]:
+        """How strongly each node of the board under a heatsink conducts to it.
+
+        The contact resistance ``R`` (thermal pad, paste) is spread evenly over the
+        covered board area ``A``: ``R·A`` per unit area. Where the solder mask
+        covers the board, the mask's ``t/k`` adds in series, so the conductance
+        per unit area is ``1 / (R·A)`` on exposed copper or bare board and
+        ``1 / (R·A + t/k)`` on mask. Fully exposed, the total is exactly ``1/R``.
+
+        Args:
+            heatsink: The heatsink (mounted on the board).
+
+        Returns:
+            ``(nodes, conductances)``: global node indices and W/K from each to the heatsink.
+
+        Raises:
+            SolveError: If the heatsink doesn't cover any of the board.
+        """
+        lf = self.heatsink_face(heatsink)
+        inside = self.heatsink_triangles(heatsink)
+        if not inside.any():
+            raise SolveError(f"heatsink {heatsink.name} is off the board: it covers none of it")
+        t = lf.mesh.t[:, inside]
+        tri_area = _triangle_areas(lf.nodes_mm, t) * MM * MM  # m²
+        resistance_area = heatsink.thermal_resistance_board_k_w * tri_area.sum()  # K·m²/W
+        masked = self.masked_triangles(lf)[inside]
+        mask = "F" if lf.layer == "F.Cu" else "B" if lf.layer == "B.Cu" else None
+        if masked.any() and mask is not None:
+            mask_r = self.mask_thickness_mm(mask) * MM / self.settings.solder_mask_thermal_conductivity_w_mk
+        else:
+            mask_r = 0.0
+        per_area = 1.0 / (resistance_area + np.where(masked, mask_r, 0.0))  # W/m²K
+        lumped = np.bincount(t.ravel(), np.repeat(tri_area * per_area / 3, 3), minlength=lf.num_nodes)
+        local = np.flatnonzero(lumped)
+        return lf.offset + local, lumped[local]
 
     def area_nodes(
         self, areas: dict[str, BaseGeometry], copper_only: bool
@@ -501,36 +618,50 @@ class LayeredModel:
         centroids = lf.nodes_mm[lf.mesh.t].mean(axis=0)
         return ~shapely.contains_xy(openings, centroids[:, 0], centroids[:, 1])
 
-    def _surface_coefficient(self, lf: LayerFEM, h: float, top: bool, bottom: bool) -> np.ndarray:
-        """Convection coefficient per triangle of a layer, through the solder mask where it covers.
+    def _surface_coefficient(
+        self, lf: LayerFEM, top: bool, bottom: bool, heatsinks: Sequence[Heatsink] = ()
+    ) -> np.ndarray:
+        """Convection coefficient per triangle of a layer, from the board faces it forms.
 
-        The mask adds a series resistance ``t / k`` per unit area:
-        ``h_eff = 1 / (1/h + t/k)``. Exposed copper and openings convect with ``h``.
+        On each face, the solder mask adds a series resistance ``t / k`` per unit
+        area where it covers (``h_eff = 1 / (1/h + t/k)``), and the board doesn't
+        convect at all under a heatsink mounted on that face (the heatsink takes
+        the heat instead).
 
         Args:
             lf: The layer.
-            h: Convection coefficient of the face(s) this layer forms, W/m²K (0 if none).
             top: Whether the layer is the top face.
             bottom: Whether the layer is the bottom face.
+            heatsinks: Heatsinks mounted on the board.
 
         Returns:
-            ``(M,)`` W/m²K.
+            ``(M,)`` W/m²K (zeros for an inner layer).
         """
-        coefficient = np.full(lf.mesh.nelements, h)
-        if h <= 0 or lf.layer not in self.mask_openings:
-            return coefficient
-        side = "F" if top and lf.layer == "F.Cu" else "B" if bottom and lf.layer == "B.Cu" else None
-        if side is None:
-            return coefficient
-        resistance = self.mask_thickness_mm(side) * MM / self.settings.solder_mask_thermal_conductivity_w_mk
-        coefficient[self.masked_triangles(lf)] = 1.0 / (1.0 / h + resistance)
-        return coefficient
+        s = self.settings
+        total = np.zeros(lf.mesh.nelements)
+        for is_face, h, side in (
+            (top, s.convection_top_w_m2k, "top"),
+            (bottom, s.convection_bottom_w_m2k, "bottom"),
+        ):
+            if not is_face or h <= 0:
+                continue
+            coefficient = np.full(lf.mesh.nelements, h)
+            mask = "F" if side == "top" else "B"
+            if lf.layer == f"{mask}.Cu" and lf.layer in self.mask_openings:
+                resistance = self.mask_thickness_mm(mask) * MM / s.solder_mask_thermal_conductivity_w_mk
+                coefficient[self.masked_triangles(lf)] = 1.0 / (1.0 / h + resistance)
+            for hs in heatsinks:
+                if hs.side == side and hs.mount == "board" and self.heatsink_face(hs) is lf:
+                    coefficient[self.heatsink_triangles(hs)] = 0.0
+            total += coefficient
+        return total
 
     def solve_thermal(
         self,
         dc: DCResult | None,
         heat_loads: Sequence[HeatLoad] = (),
         elements: Sequence[ResistiveElement] = (),
+        heatsinks: Sequence[Heatsink] = (),
     ) -> ThermalResult:
         """Solve for steady temperature with Joule heating and pad heat loads.
 
@@ -542,7 +673,8 @@ class LayeredModel:
         A resistive element's ``I²R`` (from ``dc``) heats its body, whose plan
         area (Fab outline, courtyard or pads' bounding box) covers part of the
         board on the footprint's side. With ideal board contact the heat goes
-        straight into the board under the body, shared by area; otherwise the
+        straight into the board under the body where the solder mask is open
+        (its exposed pads, usually), shared by area; otherwise the
         body is a node joined to that area's mean temperature through the
         thermal resistance to the board. The body also loses heat to ambient
         through its thermal resistance to ambient, or by default by convection
@@ -552,6 +684,9 @@ class LayeredModel:
             dc: The DC solution supplying Joule heat, or None for no current flow.
             heat_loads: Heat sources and sinks on pads.
             elements: Resistive elements (the same ones passed to :meth:`solve_dc`).
+            heatsinks: Heatsinks: a node each, joined to ambient, and either to the
+                board face under it (node by node, through the mask where it covers) or, mounted on
+                components, to the bodies of the resistive elements it covers.
 
         Returns:
             The temperature field, with each heat load's heat flow and pad
@@ -571,10 +706,7 @@ class LayeredModel:
             sheets.append(sheet_matrix(lf, conductance))
             if dc is not None:
                 loads.append(load_vector(lf, dc.sheet_power[lf.layer]))
-            h_layer = (s.convection_top_w_m2k if i == 0 else 0.0) + (
-                s.convection_bottom_w_m2k if i == len(self.layers) - 1 else 0.0
-            )
-            h = self._surface_coefficient(lf, h_layer, i == 0, i == len(self.layers) - 1)
+            h = self._surface_coefficient(lf, i == 0, i == len(self.layers) - 1, heatsinks)
             convection.append(mass_matrix(lf, h))
 
         k = block_diag(sheets) + block_diag(convection)
@@ -609,16 +741,26 @@ class LayeredModel:
         # or through a junction node — an extra unknown — when a thermal resistance
         # to the board is given) and to ambient.
         junctions = [e for e in elements if e.thermal_resistance_board_k_w is not None]
-        n = self.size + len(junctions)
-        if junctions:
-            k = sp.block_diag((k, sp.csr_matrix((len(junctions), len(junctions)))))
-            extra = np.zeros(len(junctions))
+        extra_nodes = len(junctions) + len(heatsinks)  # one unknown each
+        n = self.size + extra_nodes
+        if extra_nodes:
+            k = sp.block_diag((k, sp.csr_matrix((extra_nodes, extra_nodes))))
+            extra = np.zeros(extra_nodes)
             rhs, values, fixed = (
                 np.concatenate([rhs, extra]),
                 np.concatenate([values, extra]),
                 np.append(fixed, extra.astype(bool)),
             )
         junction_index = {e.name: self.size + i for i, e in enumerate(junctions)}
+        # Heatsinks on components: which element bodies each covers, and how much
+        # of each body's top is covered (it no longer convects there).
+        contacts = {
+            hs.name: self.heatsink_contacts(hs, elements) for hs in heatsinks if hs.mount == "components"
+        }
+        covered: dict[str, float] = {}
+        for touching in contacts.values():
+            for name, _area, fraction in touching:
+                covered[name] = min(1.0, covered.get(name, 0.0) + fraction)
         bodies = {}
         for e in elements:
             nodes, weights = self.body_nodes(e)
@@ -633,11 +775,28 @@ class LayeredModel:
                 g_ambient = 1.0 / e.thermal_resistance_ambient_k_w
             else:
                 footprint = next(fp for fp in self.board.footprints if fp.reference == e.ref)
-                g_ambient = default_ambient_conductance(footprint, s)
+                g_ambient = default_ambient_conductance(footprint, s) * (1.0 - covered.get(e.name, 0.0))
             power = dc.element_power.get(e.name, 0.0) if dc is not None else 0.0
             rhs[nodes] += (power + g_ambient * s.ambient_c) * weights
             k = k + _rank_one(nodes, weights, g_ambient, n)
             bodies[e.name] = (nodes, weights, g_ambient)
+        sinks = {}
+        for i, hs in enumerate(heatsinks):
+            j = self.size + len(junctions) + i
+            if hs.mount == "components":
+                # On top of element bodies: the contact resistance is shared by overlap area.
+                total = sum(area for _, area, _ in contacts[hs.name])
+                for name, area, _ in contacts[hs.name]:
+                    nodes, weights, _ = bodies[name]
+                    g = area / total / hs.thermal_resistance_board_k_w
+                    k = k + _rank_one(np.concatenate([[j], nodes]), np.concatenate([[1.0], -weights]), g, n)
+            else:
+                nodes, g = self.heatsink_conductances(hs)
+                k = k + _star(j, nodes, g, n)
+            g_ambient = 1.0 / hs.thermal_resistance_ambient_k_w
+            k = k + sp.coo_matrix(([g_ambient], ([j], [j])), shape=(n, n))
+            rhs[j] += g_ambient * s.ambient_c
+            sinks[hs.name] = (j, g_ambient)
         k = k.tocsr()
 
         temperature = _solve_partitioned(k, rhs, fixed, values) if fixed.any() else spsolve(k.tocsc(), rhs)
@@ -656,8 +815,14 @@ class LayeredModel:
         for name, (nodes, weights, g_ambient) in bodies.items():
             element_temperatures[name] = float(weights @ temperature[nodes])
             element_ambient_heat[name] = g_ambient * (element_temperatures[name] - s.ambient_c)
+        heatsink_temperatures = {name: float(temperature[j]) for name, (j, _) in sinks.items()}
+        heatsink_heat = {
+            name: g * (heatsink_temperatures[name] - s.ambient_c) for name, (_, g) in sinks.items()
+        }
         by_layer = {lf.layer: temperature[lf.offset : lf.offset + lf.num_nodes] for lf in self.layers}
         return ThermalResult(
+            heatsink_temperatures=heatsink_temperatures,
+            heatsink_heat=heatsink_heat,
             temperature=by_layer,
             convected_power=convected,
             load_heat=load_heat,
@@ -751,6 +916,24 @@ def _merge_matrix(size: int, groups: list[np.ndarray]) -> sp.csr_matrix:
     graph = sp.coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(size, size))
     count, label = connected_components(graph, directed=False)
     return sp.csr_matrix((np.ones(size), (np.arange(size), label)), shape=(size, count))
+
+
+def _star(center: int, nodes: np.ndarray, conductances: np.ndarray, size: int) -> sp.coo_matrix:
+    """Conductances from one unknown to each of several others (a star of links).
+
+    Args:
+        center: The hub unknown (e.g. a heatsink).
+        nodes: The other unknowns.
+        conductances: W/K (or S) of each link.
+        size: Size of the global system.
+
+    Returns:
+        A ``(size, size)`` sparse matrix.
+    """
+    rows = np.concatenate([[center], nodes, np.full(len(nodes), center), nodes])
+    cols = np.concatenate([[center], nodes, nodes, np.full(len(nodes), center)])
+    data = np.concatenate([[conductances.sum()], conductances, -conductances, -conductances])
+    return sp.coo_matrix((data, (rows, cols)), shape=(size, size))
 
 
 def _rank_one(nodes: np.ndarray, coefficients: np.ndarray, conductance: float, size: int) -> sp.coo_matrix:

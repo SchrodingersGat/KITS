@@ -71,6 +71,7 @@ def solve_project(project_path: str | Path, progress=None) -> tuple[SolveResults
     sources = kits.scaled_current_sources()
     heat_loads = kits.active_heat_loads
     elements = kits.active_resistive_elements
+    heatsinks = kits.active_heatsinks
     if not sources and not heat_loads:
         raise ConfigError(
             "the project has no enabled current sources or heat loads; add or enable some before solving"
@@ -105,7 +106,7 @@ def solve_project(project_path: str | Path, progress=None) -> tuple[SolveResults
         report("Solving current flow", start + 0.1 * span)
         dc = model.solve_dc([Electrode(s.ref, s.pad, current=s.current_a) for s in sources], elements)
     report("Solving temperature", start + 0.45 * span)
-    thermal = model.solve_thermal(dc, heat_loads, elements)
+    thermal = model.solve_thermal(dc, heat_loads, elements, heatsinks)
 
     report("Saving results", start + 0.9 * span)
     results = SolveResults(
@@ -125,12 +126,14 @@ def solve_project(project_path: str | Path, progress=None) -> tuple[SolveResults
         electrode_voltages={f"{r}.{p}": v for (r, p), v in dc.electrode_voltages.items()} if dc else {},
         electrode_currents={f"{r}.{p}": i for (r, p), i in dc.electrode_currents.items()} if dc else {},
         mesh_fingerprint=mesh.fingerprint,
-        inputs=inputs_hash(sources, settings, heat_loads, elements, stackup),
+        inputs=inputs_hash(sources, settings, heat_loads, elements, stackup, heatsinks),
         load_heat={f"{r}.{p}": q for (r, p), q in thermal.load_heat.items()},
         load_temperatures={f"{r}.{p}": t for (r, p), t in thermal.load_temperatures.items()},
         element_currents=dict(dc.element_currents) if dc else {},
         element_power=dict(dc.element_power) if dc else {},
         element_temperatures=dict(thermal.element_temperatures),
+        heatsink_temperatures=dict(thermal.heatsink_temperatures),
+        heatsink_heat=dict(thermal.heatsink_heat),
     )
     results.save_npz(kits.results_path)
     report("Done", 1.0)
@@ -186,6 +189,8 @@ def main(argv: list[str] | None = None) -> int:
             current = results.element_currents.get(name, 0.0)
             power = results.element_power.get(name, 0.0)
             print(f"  {name}: {current:+.4g} A, {power:.4g} W, body {temperature:.2f} C")
+        for name, temperature in results.heatsink_temperatures.items():
+            print(f"  heatsink {name}: {results.heatsink_heat[name]:.4g} W at {temperature:.2f} C")
     return 0
 
 

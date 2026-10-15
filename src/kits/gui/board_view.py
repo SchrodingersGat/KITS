@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QLineF, QPoint, QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QMouseEvent, QPainter, QPalette, QPen, QWheelEvent
-from PySide6.QtWidgets import QGraphicsView
+from PySide6.QtWidgets import QGraphicsView, QRubberBand
 
 from . import colors
 
@@ -28,6 +28,8 @@ class BoardView(QGraphicsView):
     cursor_moved = Signal(float, float)  # board coordinates, mm
     clicked = Signal(QPointF)  # left click, scene position (mm)
     double_clicked = Signal(QPointF)  # left double-click, scene position (mm)
+    rect_drawn = Signal(QRectF)  # rectangle drawn in draw mode, scene coordinates (mm)
+    rect_draw_cancelled = Signal()
 
     def __init__(self, parent=None):
         """Configure rendering, anchors and mouse tracking.
@@ -51,6 +53,9 @@ class BoardView(QGraphicsView):
         self._fit_rect: QRectF | None = None
         self._cursor_visible = True
         self._cursor_pos: QPoint | None = None  # viewport pixels; None when mouse is outside
+        self._drawing = False  # rectangle draw mode (see start_rect_draw)
+        self._draw_origin: QPoint | None = None
+        self._band = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
 
     # -- crosshair cursor ----------------------------------------------------
 
@@ -198,6 +203,50 @@ class BoardView(QGraphicsView):
 
     # -- pan / cursor tracking ---------------------------------------------
 
+    # -- rectangle drawing ---------------------------------------------------
+
+    def start_rect_draw(self) -> None:
+        """Enter rectangle draw mode: the next left drag draws a rectangle.
+
+        Emits :attr:`rect_drawn` with the rectangle (scene coordinates) when the
+        button is released, or :attr:`rect_draw_cancelled` on Escape or a click
+        without a drag. Panning and zooming still work meanwhile.
+        """
+        self._drawing = True
+        self._draw_origin = None
+        self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+        self.setFocus()
+
+    @property
+    def drawing(self) -> bool:
+        """Whether rectangle draw mode is on."""
+        return self._drawing
+
+    def cancel_rect_draw(self) -> None:
+        """Leave rectangle draw mode without drawing."""
+        if self._drawing:
+            self._end_draw()
+            self.rect_draw_cancelled.emit()
+
+    def _end_draw(self) -> None:
+        """Reset draw mode state and cursor."""
+        self._drawing = False
+        self._draw_origin = None
+        self._band.hide()
+        self.viewport().unsetCursor()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt override
+        """Escape cancels rectangle drawing.
+
+        Args:
+            event: The key event.
+        """
+        if self._drawing and event.key() == Qt.Key.Key_Escape:
+            self.cancel_rect_draw()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         """Start a pan on middle/right press; report left clicks via :attr:`clicked`.
 
@@ -207,6 +256,12 @@ class BoardView(QGraphicsView):
         if event.button() in _PAN_BUTTONS:
             self._pan_origin = event.position().toPoint()
             self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+        if self._drawing and event.button() == Qt.MouseButton.LeftButton:
+            self._draw_origin = event.position().toPoint()
+            self._band.setGeometry(QRect(self._draw_origin, self._draw_origin))
+            self._band.show()
             event.accept()
             return
         super().mousePressEvent(event)
@@ -230,6 +285,8 @@ class BoardView(QGraphicsView):
             event: The mouse move event.
         """
         pos = event.position().toPoint()
+        if self._drawing and self._draw_origin is not None:
+            self._band.setGeometry(QRect(self._draw_origin, pos).normalized())
         if self._pan_origin is not None:
             delta = pos - self._pan_origin
             self._pan_origin = pos
@@ -250,7 +307,21 @@ class BoardView(QGraphicsView):
         """
         if event.button() in _PAN_BUTTONS and self._pan_origin is not None:
             self._pan_origin = None
-            self.viewport().unsetCursor()
+            if self._drawing:
+                self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+            else:
+                self.viewport().unsetCursor()
+            event.accept()
+            return
+        if self._drawing and event.button() == Qt.MouseButton.LeftButton and self._draw_origin is not None:
+            start = self.mapToScene(self._draw_origin)
+            end = self.mapToScene(event.position().toPoint())
+            moved = (event.position().toPoint() - self._draw_origin).manhattanLength() > 3
+            self._end_draw()
+            if moved:
+                self.rect_drawn.emit(QRectF(start, end).normalized())
+            else:
+                self.rect_draw_cancelled.emit()
             event.accept()
             return
         super().mouseReleaseEvent(event)

@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QGraphicsSimpleTextItem,
 )
 
-from ..config import CurrentSource, HeatLoad, ResistiveElement
+from ..config import CurrentSource, HeatLoad, Heatsink, ResistiveElement
 from ..ingest.geometry import arc_points
 from ..ingest.model import EDGE_CUTS, Board, Pad
 from ..mesh.geometry import GeometryError, board_outline, footprint_body, mask_openings
@@ -73,6 +73,7 @@ _RESULTS_ALPHA = 235
 _Z_SOURCES = 1100  # current source markers, above the mesh
 _Z_HEAT_LOADS = 1150  # heat load markers, above current sources
 _Z_ELEMENTS = 1175  # resistive element markers
+_Z_HEATSINKS = 1160  # manual heatsinks
 _Z_SELECTION = 1200  # selected pad outline, on top of everything
 _Z_MARKERS = 1300  # result probe markers
 _MARKER_RADIUS_PX = 6
@@ -80,6 +81,7 @@ _LABEL_GAP_PX = 4  # gap between a pad and its current label, screen pixels
 # Data role holding a pad's (footprint ref, pad number) on its copper and hole items,
 # for picking pads with the mouse.
 PAD_KEY_ROLE = 1
+HEATSINK_ROLE = 2  # item data: name of the heatsink an item draws
 _MESH_TILES = 16  # overlay tiles per axis
 _GRID_MIN_PX = 8  # never draw grid lines closer than this on screen
 _GRID_ORIGIN_PX = 8  # half-size of the origin marker
@@ -222,6 +224,8 @@ class BoardScene(QGraphicsScene):
         self._heat_markers: LayerItem | None = None
         self._heat_loads_visible = True
         self._element_markers: LayerItem | None = None
+        self._heatsink_markers: LayerItem | None = None
+        self._heatsinks_visible = True
         self._elements_visible = True
         self._selection: LayerItem | None = None
         self._results: SolveResults | None = None
@@ -543,6 +547,94 @@ class BoardScene(QGraphicsScene):
                 f"{format_resistance(element.resistance_ohm)}"
             )
             label.setParentItem(box)
+
+    def set_heatsinks(self, heatsinks: list[Heatsink]) -> None:
+        """Draw heatsinks: hatched rectangles (solid edge on top, dashed on the bottom) with names.
+
+        Args:
+            heatsinks: The heatsinks to draw.
+        """
+        if self._heatsink_markers is not None:
+            self.removeItem(self._heatsink_markers)
+        self._heatsink_markers = LayerItem()
+        self._heatsink_markers.setZValue(_Z_HEATSINKS)
+        self._heatsink_markers.setVisible(self._heatsinks_visible)
+        self.addItem(self._heatsink_markers)
+        color = colors.HEATSINK
+        font = QFont()
+        font.setBold(True)
+        for hs in heatsinks:
+            x0, y0, x1, y1 = hs.bounds
+            rect = QGraphicsRectItem(QRectF(x0, y0, x1 - x0, y1 - y0), self._heatsink_markers)
+            pen = _cosmetic_pen(color, 2.0)
+            if hs.side == "bottom":
+                pen.setStyle(Qt.PenStyle.DashLine)
+            rect.setPen(pen)
+            pattern = (
+                Qt.BrushStyle.DiagCrossPattern if hs.mount == "components" else Qt.BrushStyle.BDiagPattern
+            )
+            rect.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), 140), pattern))
+            on = "components" if hs.mount == "components" else "the board"
+            rect.setToolTip(
+                f"Heatsink {hs.name} ({hs.side}, on {on}): "
+                f"{hs.thermal_resistance_board_k_w:g} K/W contact, "
+                f"{hs.thermal_resistance_ambient_k_w:g} K/W to ambient"
+            )
+            rect.setData(HEATSINK_ROLE, hs.name)
+            label = QGraphicsSimpleTextItem(hs.name)
+            label.setFont(font)
+            label.setBrush(QColor(20, 24, 32))
+            bounds = label.boundingRect()
+            box = QGraphicsRectItem(bounds.adjusted(-3, -1, 3, 1), self._heatsink_markers)
+            box.setBrush(color)
+            box.setPen(QPen(Qt.PenStyle.NoPen))
+            box.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+            box.setTransform(box.transform().translate(-bounds.width() / 2, -bounds.height() / 2))
+            box.setPos(QPointF((x0 + x1) / 2, (y0 + y1) / 2))
+            label.setParentItem(box)
+
+    def set_heatsinks_visible(self, visible: bool) -> None:
+        """Show or hide the heatsinks.
+
+        Args:
+            visible: Whether they are drawn. Kept when they are redrawn.
+        """
+        self._heatsinks_visible = visible
+        if self._heatsink_markers is not None:
+            self._heatsink_markers.setVisible(visible)
+
+    @property
+    def heatsinks_visible(self) -> bool:
+        """Whether heatsinks are shown."""
+        return (
+            self._heatsinks_visible
+            and self._heatsink_markers is not None
+            and self._heatsink_markers.isVisible()
+        )
+
+    @property
+    def heatsink_count(self) -> int:
+        """Number of heatsinks drawn."""
+        if self._heatsink_markers is None:
+            return 0
+        return sum(1 for i in self._heatsink_markers.childItems() if i.data(HEATSINK_ROLE))
+
+    def heatsink_at(self, pos: QPointF) -> str | None:
+        """The heatsink drawn under a point, if any (and if heatsinks are shown).
+
+        Args:
+            pos: Scene position in millimetres.
+
+        Returns:
+            The heatsink's name, or None.
+        """
+        if not self.heatsinks_visible:
+            return None
+        for item in self._heatsink_markers.childItems():
+            name = item.data(HEATSINK_ROLE)
+            if name and item.contains(item.mapFromScene(pos)):
+                return name
+        return None
 
     def set_elements_visible(self, visible: bool) -> None:
         """Show or hide the resistive element markers.

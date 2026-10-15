@@ -12,10 +12,11 @@ materials:
     plating_thickness_mm: 0.025
   dielectric:
     thermal_conductivity_w_mk: 0.3
+  solder_mask:
+    thermal_conductivity_w_mk: 0.25
 convection:
   top_w_m2k: 10.0
   bottom_w_m2k: 10.0
-current_multiplier: 2.4
 current_sources:
 - ref: J1
   pad: '1'
@@ -28,6 +29,20 @@ heat_loads:
   pad: '1'
   power_w: -0.2
   enabled: false
+- ref: J1
+  pad: '1'
+  power_w: 5.0
+  enabled: false
+heatsinks:
+- name: HS1
+  side: top
+  x_mm: 112.281
+  y_mm: 81.891
+  width_mm: 14.695
+  height_mm: 13.901
+  thermal_resistance_board_k_w: 1.0
+  thermal_resistance_ambient_k_w: 10.0
+  mount: components
 resistive_elements:
 - name: R2
   ref: R2

@@ -1,6 +1,6 @@
 board: Simple-In-Out.kicad_pro
 mesh:
-  max_size_mm: 0.25
+  max_size_mm: 0.1
   min_size_mm: 0.01
   min_circle_points: 36
   corner_size_mm: 0.05
@@ -12,14 +12,40 @@ materials:
     plating_thickness_mm: 0.025
   dielectric:
     thermal_conductivity_w_mk: 0.3
+  solder_mask:
+    thermal_conductivity_w_mk: 0.25
 convection:
   top_w_m2k: 10.0
   bottom_w_m2k: 10.0
 current_multiplier: 5.0
+current_sources:
+- ref: J1
+  pad: '1'
+  current_a: 5.0
+- ref: J2
+  pad: '1'
+  current_a: -5.0
 heat_loads:
 - ref: J2
   pad: '1'
   power_w: 1.0
 - ref: J1
   pad: '1'
-  power_w: -1.0
+  power_w: 1.0
+heatsinks:
+- name: HS1
+  side: bottom
+  x_mm: 81.377
+  y_mm: 61.138
+  width_mm: 36.935
+  height_mm: 17.597
+  thermal_resistance_board_k_w: 1.0
+  thermal_resistance_ambient_k_w: 10.0
+- name: HS2
+  side: top
+  x_mm: 98.349
+  y_mm: 67.545
+  width_mm: 8.464
+  height_mm: 4.891
+  thermal_resistance_board_k_w: 1.0
+  thermal_resistance_ambient_k_w: 10.0

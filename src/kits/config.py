@@ -610,6 +610,164 @@ def resistive_elements_from_list(data) -> list[ResistiveElement]:
     return elements
 
 
+HEATSINK_SIDES = ("top", "bottom")
+HEATSINK_MOUNTS = ("board", "components")
+
+
+@dataclass
+class Heatsink:
+    """A heatsink pressed onto one face of the board over a rectangle.
+
+    It is a lumped body: one temperature, joined to what it sits on through
+    ``thermal_resistance_board_k_w`` and to ambient through
+    ``thermal_resistance_ambient_k_w``. On the board, the contact spreads over
+    the covered area, with the solder mask's resistance in series where it covers.
+
+    Attributes:
+        name: Unique name, e.g. ``"HS1"``.
+        side: ``"top"`` or ``"bottom"`` face of the board.
+        x_mm: Left edge, board (KiCad) coordinates in mm.
+        y_mm: Top edge (smallest KiCad Y; KiCad's Y points down), mm.
+        width_mm: Size along X, mm.
+        height_mm: Size along Y, mm.
+        thermal_resistance_board_k_w: Thermal resistance of the heatsink's contact
+            (e.g. the thermal pad or paste) to what it sits on, K/W.
+        thermal_resistance_ambient_k_w: Heatsink-to-ambient thermal resistance
+            (the heatsink's datasheet value), K/W.
+        mount: ``"board"``: pressed onto the board face (through the solder mask
+            where it covers, which conducts less). ``"components"``: sitting on top of the
+            resistive elements under it, touching their bodies and not the board.
+        enabled: False to leave it out of solves and the board view without deleting it.
+    """
+
+    name: str
+    side: str
+    x_mm: float
+    y_mm: float
+    width_mm: float
+    height_mm: float
+    thermal_resistance_board_k_w: float = 1.0
+    thermal_resistance_ambient_k_w: float = 10.0
+    mount: str = "board"
+    enabled: bool = True
+
+    @property
+    def bounds(self) -> tuple[float, float, float, float]:
+        """``(x0, y0, x1, y1)`` in board millimetres."""
+        return (self.x_mm, self.y_mm, self.x_mm + self.width_mm, self.y_mm + self.height_mm)
+
+    @property
+    def copper_layer(self) -> str:
+        """The outer copper layer of its face: ``"F.Cu"`` or ``"B.Cu"``."""
+        return "F.Cu" if self.side == "top" else "B.Cu"
+
+    def validate(self) -> None:
+        """Check the name, side, rectangle and thermal resistances.
+
+        Raises:
+            ConfigError: If the name is empty, the side unknown, the size or a
+                resistance not a positive finite number, or a coordinate not finite.
+        """
+        if not self.name:
+            raise ConfigError("a heatsink needs a name")
+        if self.side not in HEATSINK_SIDES:
+            raise ConfigError(f"heatsink {self.name}: side must be 'top' or 'bottom'")
+        if self.mount not in HEATSINK_MOUNTS:
+            raise ConfigError(f"heatsink {self.name}: mount must be 'board' or 'components'")
+        if not (math.isfinite(self.x_mm) and math.isfinite(self.y_mm)):
+            raise ConfigError(f"heatsink {self.name}: position must be finite")
+        values = {
+            "width": self.width_mm,
+            "height": self.height_mm,
+            "thermal resistance to board": self.thermal_resistance_board_k_w,
+            "thermal resistance to ambient": self.thermal_resistance_ambient_k_w,
+        }
+        for label, value in values.items():
+            if not (math.isfinite(value) and value > 0):
+                raise ConfigError(f"heatsink {self.name}: {label} must be a positive number")
+
+    def to_dict(self) -> dict:
+        """Return the YAML representation.
+
+        Returns:
+            Mapping of the fields (``mount`` only for components, ``enabled`` only when false).
+        """
+        data = {
+            "name": self.name,
+            "side": self.side,
+            "x_mm": self.x_mm,
+            "y_mm": self.y_mm,
+            "width_mm": self.width_mm,
+            "height_mm": self.height_mm,
+            "thermal_resistance_board_k_w": self.thermal_resistance_board_k_w,
+            "thermal_resistance_ambient_k_w": self.thermal_resistance_ambient_k_w,
+        }
+        if self.mount != "board":
+            data["mount"] = self.mount
+        if not self.enabled:
+            data["enabled"] = False
+        return data
+
+    @classmethod
+    def from_dict(cls, data) -> Heatsink:
+        """Build a heatsink from one entry of the ``heatsinks:`` list.
+
+        Args:
+            data: The parsed entry.
+
+        Returns:
+            The validated heatsink.
+
+        Raises:
+            ConfigError: If the entry is malformed.
+        """
+        if not isinstance(data, dict):
+            raise ConfigError("each heatsink must be a mapping")
+        try:
+            heatsink = cls(
+                name=str(data["name"]),
+                side=str(data.get("side", "top")),
+                x_mm=float(data["x_mm"]),
+                y_mm=float(data["y_mm"]),
+                width_mm=float(data["width_mm"]),
+                height_mm=float(data["height_mm"]),
+                thermal_resistance_board_k_w=float(data.get("thermal_resistance_board_k_w", 1.0)),
+                thermal_resistance_ambient_k_w=float(data.get("thermal_resistance_ambient_k_w", 10.0)),
+                mount=str(data.get("mount", "board")),
+                enabled=_enabled_from(data, f"heatsink {data.get('name')}"),
+            )
+        except KeyError as exc:
+            raise ConfigError(f"heatsink is missing {exc.args[0]!r}") from exc
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"invalid heatsink: {exc}") from exc
+        heatsink.validate()
+        return heatsink
+
+
+def heatsinks_from_list(data) -> list[Heatsink]:
+    """Parse the ``heatsinks:`` section.
+
+    Args:
+        data: The parsed list, or None if the section is absent.
+
+    Returns:
+        The heatsinks, in file order.
+
+    Raises:
+        ConfigError: If the section isn't a list, an entry is invalid, or a name repeats.
+    """
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        raise ConfigError("'heatsinks' must be a list")
+    heatsinks = [Heatsink.from_dict(item) for item in data]
+    names = [h.name for h in heatsinks]
+    for name in names:
+        if names.count(name) > 1:
+            raise ConfigError(f"more than one heatsink is named {name!r}")
+    return heatsinks
+
+
 @dataclass
 class StackupEdits:
     """Layer thicknesses changed from what the board file says (copper weight, dielectric).

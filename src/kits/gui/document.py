@@ -20,6 +20,7 @@ from ..config import (
     CurrentSource,
     HeatLoad,
     HeatLoadKind,
+    Heatsink,
     MeshSettings,
     ResistiveElement,
     SolveSettings,
@@ -45,6 +46,7 @@ class Document(QObject):
         heat_loads_changed(): Heat loads were added, edited or removed.
         elements_changed(): Resistive elements were added, edited or removed.
         stackup_changed(): A layer thickness was edited or the edits were reset.
+        heatsinks_changed(): Heatsinks were added, edited or removed.
         dirty_changed(bool): The project gained or lost unsaved changes.
         mesh_changed(BoardMesh | None): A mesh was built, or cleared.
         results_changed(SolveResults | None): A solve finished, or results were cleared.
@@ -58,6 +60,7 @@ class Document(QObject):
     heat_loads_changed = Signal()
     elements_changed = Signal()
     stackup_changed = Signal()
+    heatsinks_changed = Signal()
     dirty_changed = Signal(bool)
     mesh_changed = Signal(object)
     results_changed = Signal(object)
@@ -245,6 +248,7 @@ class Document(QObject):
             project.active_heat_loads,
             project.active_resistive_elements,
             self.layer_thickness_edits,
+            project.active_heatsinks,
         )
 
     def _load_saved_results(self) -> tuple[SolveResults | None, str | None]:
@@ -744,6 +748,103 @@ class Document(QObject):
             raise ConfigError(f"there is no resistive element named {name!r}")
         project.resistive_elements = remaining
         self._elements_edited()
+
+    # -- heatsinks -------------------------------------------------------------------
+
+    @property
+    def heatsinks(self) -> list[Heatsink]:
+        """The open project's heatsinks (a copy; use the methods below to edit)."""
+        return list(self._project.heatsinks) if self._project else []
+
+    @property
+    def active_heatsinks(self) -> list[Heatsink]:
+        """The enabled heatsinks (those solved and drawn)."""
+        return self._project.active_heatsinks if self._project else []
+
+    def heatsink(self, name: str) -> Heatsink | None:
+        """Return a heatsink by name.
+
+        Args:
+            name: Heatsink name.
+
+        Returns:
+            The heatsink, or None.
+        """
+        return next((h for h in self.heatsinks if h.name == name), None)
+
+    def add_heatsink(self, heatsink: Heatsink) -> None:
+        """Add a heatsink (in memory; save to persist).
+
+        Args:
+            heatsink: The new heatsink.
+
+        Raises:
+            ConfigError: If no project is open, the name is taken, or it is invalid.
+        """
+        project = self._require_project()
+        heatsink.validate()
+        if self.heatsink(heatsink.name) is not None:
+            raise ConfigError(f"there is already a heatsink named {heatsink.name!r}")
+        project.heatsinks.append(heatsink)
+        self._heatsinks_edited()
+
+    def update_heatsink(self, name: str, heatsink: Heatsink) -> None:
+        """Replace a heatsink (it may be renamed).
+
+        Args:
+            name: Current name of the heatsink to replace.
+            heatsink: The new definition.
+
+        Raises:
+            ConfigError: If there is no such heatsink, the new name is taken, or it is invalid.
+        """
+        project = self._require_project()
+        heatsink.validate()
+        if heatsink.name != name and self.heatsink(heatsink.name) is not None:
+            raise ConfigError(f"there is already a heatsink named {heatsink.name!r}")
+        for i, old in enumerate(project.heatsinks):
+            if old.name == name:
+                if old != heatsink:
+                    project.heatsinks[i] = heatsink
+                    self._heatsinks_edited()
+                return
+        raise ConfigError(f"there is no heatsink named {name!r}")
+
+    def set_heatsink_enabled(self, name: str, enabled: bool) -> None:
+        """Include or exclude a heatsink from solves and the board view.
+
+        Args:
+            name: Heatsink name.
+            enabled: False to keep it in the project but ignore it.
+
+        Raises:
+            ConfigError: If there is no such heatsink.
+        """
+        old = self.heatsink(name)
+        if old is None:
+            raise ConfigError(f"there is no heatsink named {name!r}")
+        self.update_heatsink(name, dataclasses.replace(old, enabled=enabled))
+
+    def remove_heatsink(self, name: str) -> None:
+        """Remove a heatsink.
+
+        Args:
+            name: Heatsink name.
+
+        Raises:
+            ConfigError: If there is no such heatsink.
+        """
+        project = self._require_project()
+        remaining = [h for h in project.heatsinks if h.name != name]
+        if len(remaining) == len(project.heatsinks):
+            raise ConfigError(f"there is no heatsink named {name!r}")
+        project.heatsinks = remaining
+        self._heatsinks_edited()
+
+    def _heatsinks_edited(self) -> None:
+        """Mark the project dirty and announce the change."""
+        self._set_dirty(True)
+        self.heatsinks_changed.emit()
 
     def _elements_edited(self) -> None:
         """Mark the project dirty and announce the change."""

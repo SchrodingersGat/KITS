@@ -37,7 +37,14 @@ from shapely.geometry.base import BaseGeometry
 
 from ..config import MeshSettings, SolveSettings
 from ..ingest.model import Board
-from ..mesh.geometry import GeometryError, board_holes, board_outline, layer_copper, via_layers
+from ..mesh.geometry import (
+    GeometryError,
+    board_holes,
+    board_outline,
+    footprint_body,
+    layer_copper,
+    via_layers,
+)
 from ..mesh.mesher import layer_heights
 from . import colors
 
@@ -45,6 +52,9 @@ DIELECTRIC_COLORS = [QColor(70, 120, 60), QColor(95, 140, 70)]  # alternating sl
 DIELECTRIC_OPACITY = 0.2
 BARREL_COLOR = QColor(214, 150, 74)  # plated copper
 MAX_Z_SCALE = 50.0
+HEATSINK_HEIGHT_MM = 3.0  # drawn height of a heatsink block (scaled with Z)
+COMPONENT_HEIGHT_MM = 1.0  # drawn height of component bodies, which component heatsinks sit on
+ELEMENT_BODY_COLOR = QColor(120, 70, 165)  # resistive element bodies (a darker 2D marker purple)
 _DEFAULT_COPPER_MM = 0.035
 
 
@@ -256,6 +266,93 @@ def overlay_parts(
     return parts
 
 
+def element_parts(
+    board: Board,
+    ranges: dict[str, tuple[float, float]],
+    elements,
+    z_scale: float = 1.0,
+    temperatures: dict[str, float] | None = None,
+    temperature_range: tuple[float, float] | None = None,
+) -> list[Part]:
+    """Resistive element bodies as blocks on their side of the board.
+
+    Each block is the footprint's body outline (the element's heat source, see
+    :func:`kits.mesh.geometry.footprint_body`), :data:`COMPONENT_HEIGHT_MM` tall,
+    so a heatsink mounted on components sits on top of it.
+
+    Args:
+        board: The board (for the footprints).
+        ranges: :func:`layer_z_ranges` for the current Z scale.
+        elements: The resistive elements (``ResistiveElement``).
+        z_scale: Vertical exaggeration (applied to the block height too).
+        temperatures: Solved body temperatures by element name, to colour the
+            blocks with the temperature colour scale; None for plain colour.
+        temperature_range: ``(low, high)`` of that colour scale.
+
+    Returns:
+        Parts keyed ``"element:<name>"``.
+    """
+    from .field_display import DisplayMode, color_indices, colormap
+
+    if not ranges:
+        return []
+    top = max(z1 for _, z1 in ranges.values())
+    bottom = min(z0 for z0, _ in ranges.values())
+    height = COMPONENT_HEIGHT_MM * z_scale
+    footprints = {fp.reference: fp for fp in board.footprints}
+    palette = colormap(DisplayMode.TEMPERATURE) if temperatures and temperature_range else None
+    parts = []
+    for element in elements:
+        footprint = footprints.get(element.ref)
+        if footprint is None:
+            continue
+        body, _source = footprint_body(footprint)
+        if body.is_empty:
+            continue
+        z0, z1 = (bottom - height, bottom) if footprint.side == "B.Cu" else (top, top + height)
+        mesh = extrude(body, z0, z1)
+        if mesh is None:
+            continue
+        color = ELEMENT_BODY_COLOR
+        if palette is not None and element.name in temperatures:
+            low, high = temperature_range
+            index = color_indices(np.array([temperatures[element.name]]), low, high, steps=len(palette))[0]
+            color = palette[int(index)]
+        parts.append(Part(f"element:{element.name}", None, mesh, color, 0.95))
+    return parts
+
+
+def heatsink_parts(ranges: dict[str, tuple[float, float]], heatsinks, z_scale: float = 1.0) -> list[Part]:
+    """Heatsinks as blocks sitting on their board face.
+
+    Args:
+        ranges: :func:`layer_z_ranges` for the current Z scale.
+        heatsinks: The heatsinks (``Heatsink``).
+        z_scale: Vertical exaggeration (applied to the block height too).
+
+    Returns:
+        Parts keyed ``"heatsink:<name>"``.
+    """
+    from shapely.geometry import box
+
+    if not ranges:
+        return []
+    top = max(z1 for _, z1 in ranges.values())
+    bottom = min(z0 for z0, _ in ranges.values())
+    height = HEATSINK_HEIGHT_MM * z_scale
+    parts = []
+    for hs in heatsinks:
+        lift = COMPONENT_HEIGHT_MM * z_scale if hs.mount == "components" else 0.0  # sits on the parts
+        if hs.side == "top":
+            z0, z1 = top + lift, top + lift + height
+        else:
+            z0, z1 = bottom - lift - height, bottom - lift
+        mesh = extrude(box(*hs.bounds), z0, z1)
+        if mesh is not None:
+            parts.append(Part(f"heatsink:{hs.name}", None, mesh, colors.HEATSINK, 0.85))
+    return parts
+
+
 def board_parts(
     board: Board,
     z_scale: float = 1.0,
@@ -456,6 +553,10 @@ class Board3DView(QWidget):
         self._overlay_data: dict = {"mesh": None, "results": None, "mode": None, "log": False}
         self._show_mesh = True
         self._show_results = True
+        self._heatsinks: list = []
+        self._show_heatsinks = True
+        self._elements: list = []
+        self._show_elements = True
         self._pool: ThreadPoolExecutor | None = None
         self._pending: tuple[int, Future] | None = None  # (generation, board_parts job)
         self._generation = 0  # bumped by every rebuild; stale jobs are dropped
@@ -554,7 +655,41 @@ class Board3DView(QWidget):
             mesh: Whether the mesh wireframe is drawn.
             results: Whether the coloured results are drawn.
         """
+        recolour = results != self._show_results and bool(self._elements)
         self._show_mesh, self._show_results = mesh, results
+        if recolour and self._plotter is not None and self.parts and not self.busy:
+            self._show_overlays()  # element bodies take or lose their temperature colours
+        else:
+            self._apply_visibility()
+
+    def set_heatsinks(self, heatsinks: list, visible: bool = True) -> None:
+        """Set the heatsinks drawn as blocks on the board faces.
+
+        Args:
+            heatsinks: The (enabled) heatsinks.
+            visible: Whether they are shown (follows Show heatsinks).
+        """
+        self._show_heatsinks = visible
+        if list(heatsinks) != self._heatsinks:
+            self._heatsinks = list(heatsinks)
+            if self._plotter is not None and self.parts and not self.busy:
+                self._show_overlays()
+                return
+        self._apply_visibility()
+
+    def set_elements(self, elements: list, visible: bool = True) -> None:
+        """Set the resistive elements whose bodies are drawn as blocks.
+
+        Args:
+            elements: The (enabled) resistive elements.
+            visible: Whether they are shown (follows Show resistive elements).
+        """
+        self._show_elements = visible
+        if list(elements) != self._elements:
+            self._elements = list(elements)
+            if self._plotter is not None and self.parts and not self.busy:
+                self._show_overlays()
+                return
         self._apply_visibility()
 
     def set_layer_visible(self, layer: str, visible: bool) -> None:
@@ -735,8 +870,22 @@ class Board3DView(QWidget):
                 data["mode"],
                 data["log"],
             )
+            self.overlays += element_parts(
+                self._board,
+                layer_z_ranges(self._board, self.z_scale.value()),
+                self._elements,
+                self.z_scale.value(),
+                *self._body_temperatures(),
+            )
+            self.overlays += heatsink_parts(
+                layer_z_ranges(self._board, self.z_scale.value()), self._heatsinks, self.z_scale.value()
+            )
         for part in self.overlays:
-            if part.key.startswith("results:"):
+            if part.key.startswith(("heatsink:", "element:")):
+                actor = plotter.add_mesh(
+                    part.mesh, color=_rgb(part.color), opacity=part.opacity, name=part.key
+                )
+            elif part.key.startswith("results:"):
                 actor = plotter.add_mesh(
                     part.mesh, scalars="rgb", rgb=True, name=part.key, show_scalar_bar=False
                 )
@@ -746,6 +895,21 @@ class Board3DView(QWidget):
                 )
             self._overlay_actors[part.key] = (actor, part.layer)
         self._apply_visibility(render)
+
+    def _body_temperatures(self) -> tuple[dict[str, float] | None, tuple[float, float] | None]:
+        """Element body temperatures to colour the bodies with, when temperature is displayed.
+
+        Returns:
+            ``(temperatures, (low, high))`` on the results' temperature scale, or
+            ``(None, None)`` unless results are shown in temperature mode.
+        """
+        from .field_display import DisplayMode, value_range
+
+        data = self._overlay_data
+        results = data["results"]
+        if results is None or data["mode"] is not DisplayMode.TEMPERATURE or not self._show_results:
+            return None, None
+        return results.element_temperatures, value_range(results, DisplayMode.TEMPERATURE)
 
     def _apply_visibility(self, render: bool = True) -> None:
         """Hide hidden layers, and the dielectric, mesh or results when switched off.
@@ -761,6 +925,10 @@ class Board3DView(QWidget):
                 visible = visible and self._show_mesh
             elif key.startswith("results:"):
                 visible = visible and self._show_results
+            elif key.startswith("heatsink:"):
+                visible = self._show_heatsinks
+            elif key.startswith("element:"):
+                visible = self._show_elements
             actor.SetVisibility(visible)
         if render and self._plotter is not None:
             self._plotter.render()
