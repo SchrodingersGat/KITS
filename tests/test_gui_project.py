@@ -991,3 +991,11 @@ def test_heatsink_dialog_mount(app):
     assert dialog.heatsink.mount == "board"
     dialog.mount.setCurrentIndex(dialog.mount.findData("components"))
     assert dialog.heatsink == Heatsink("HS1", "top", 20.0, 2.0, 10.0, 6.0, mount="components")
+
+
+def test_view_menu_has_the_results_and_markers_toggles(window):
+    menus = {a.text(): a.menu() for a in window.menuBar().actions()}
+    view, solve = menus["&View"].actions(), menus["&Solve"].actions()
+    for act in (window.show_results_action, window.show_markers_action):
+        assert act in view and act not in solve
+    assert window.solve_action in solve and any(a.text() == "Clear markers" for a in solve)

@@ -393,6 +393,8 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.show_heat_loads_action)
         view_menu.addAction(self.show_elements_action)
         view_menu.addAction(self.show_heatsinks_action)
+        view_menu.addAction(self.show_results_action)
+        view_menu.addAction(self.show_markers_action)
         view_menu.addSeparator()
         view_menu.addAction(self.toolbar.toggleViewAction())
         view_menu.addAction(self._layer_dock.toggleViewAction())
@@ -410,8 +412,6 @@ class MainWindow(QMainWindow):
 
         solve_menu = self.menuBar().addMenu("&Solve")
         solve_menu.addAction(self.solve_action)
-        solve_menu.addAction(self.show_results_action)
-        solve_menu.addAction(self.show_markers_action)
         solve_menu.addAction("Clear markers", self.document.clear_markers)
 
     # -- settings --------------------------------------------------------------

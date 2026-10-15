@@ -35,6 +35,7 @@ from ..mesh.geometry import GeometryError, board_outline, footprint_body, mask_o
 from ..mesh.model import BoardMesh, LayerMesh
 from ..solve.results import LayerResult, SolveResults
 from . import colors
+from .cached_overlay import CachedOverlayItem
 from .field_display import (
     DisplayMode,
     FieldProbe,
@@ -910,8 +911,9 @@ class BoardScene(QGraphicsScene):
     def _build_results_overlay(self, layer: LayerResult) -> LayerItem:
         """Create filled, colour-binned triangles for one layer's results.
 
-        Triangles are grouped by colour and by tile (as for the mesh overlay), so
-        each group is one path item and partial repaints stay cheap.
+        Triangles are grouped by colour and by tile and drawn from cached images
+        (:class:`~kits.gui.cached_overlay.CachedOverlayItem`), so panning and
+        zooming don't redraw every triangle.
 
         Args:
             layer: The layer's results.
@@ -937,6 +939,7 @@ class BoardScene(QGraphicsScene):
         key = (cell[:, 0] * _MESH_TILES + cell[:, 1]) * len(colors_) + index
         order = np.argsort(key, kind="stable")
         bounds = np.flatnonzero(np.diff(key[order])) + 1
+        groups = []
         for group in np.split(order, bounds):
             path = QPainterPath()
             for (x0, y0), (x1, y1), (x2, y2) in corners[group].tolist():
@@ -944,11 +947,9 @@ class BoardScene(QGraphicsScene):
                 path.lineTo(x1, y1)
                 path.lineTo(x2, y2)
                 path.closeSubpath()
-            base = colors_[int(index[group[0]])]
-            fill = QColor(base.red(), base.green(), base.blue(), _RESULTS_ALPHA)
-            item = QGraphicsPathItem(path, container)
-            item.setBrush(fill)
-            item.setPen(_cosmetic_pen(fill, 1))  # hairline closes antialiasing seams between triangles
+            groups.append((path, colors_[int(index[group[0]])]))
+        overlay = CachedOverlayItem(groups, filled=True, parent=container)
+        overlay.setOpacity(_RESULTS_ALPHA / 255)
         return container
 
     def _update_mesh_visibility(self) -> None:
@@ -962,8 +963,9 @@ class BoardScene(QGraphicsScene):
     def _build_mesh_overlay(self, lm: LayerMesh) -> LayerItem:
         """Create the overlay items for one layer's mesh.
 
-        Edges are split into a grid of tiles, one path item per tile and region,
-        so a partial repaint (e.g. the crosshair moving) only redraws nearby tiles.
+        Edges are grouped in tiles and drawn from cached images
+        (:class:`~kits.gui.cached_overlay.CachedOverlayItem`); zoomed out, the
+        image thins dense edges into a tint showing the mesh density.
 
         Args:
             lm: The layer mesh.
@@ -985,14 +987,14 @@ class BoardScene(QGraphicsScene):
         key = (cell[:, 0] * _MESH_TILES + cell[:, 1]) * 2 + is_copper
         order = np.argsort(key, kind="stable")
         bounds = np.flatnonzero(np.diff(key[order])) + 1
+        groups = []
         for group in np.split(order, bounds):
             path = QPainterPath()
             for (x0, y0), (x1, y1) in zip(p0[group].tolist(), p1[group].tolist(), strict=True):
                 path.moveTo(x0, y0)
                 path.lineTo(x1, y1)
-            item = QGraphicsPathItem(path, container)
-            color = colors.MESH_COPPER if is_copper[group[0]] else colors.MESH_BARE
-            item.setPen(_cosmetic_pen(color, 1))
+            groups.append((path, colors.MESH_COPPER if is_copper[group[0]] else colors.MESH_BARE))
+        CachedOverlayItem(groups, filled=False, parent=container)
         return container
 
     def board_rect(self) -> QRectF:
