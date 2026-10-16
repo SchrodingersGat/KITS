@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
-    QProgressDialog,
     QScrollArea,
     QStackedWidget,
     QToolBar,
@@ -47,6 +46,7 @@ from .solve_job import SolveJob
 from .solve_panel import SolvePanel
 from .sources_panel import SourcesPanel
 from .start_page import NoBoardPage, StartPage
+from .timed_progress import TimedProgressDialog, format_duration
 from .view3d import Board3DView, preload_viewer, prime_window_for_3d
 from .view_switch import ViewSwitch
 
@@ -75,8 +75,8 @@ class MainWindow(QMainWindow):
         self.scene: BoardScene | None = None
         self._mesh_job: MeshJob | None = None
         self._solve_job: SolveJob | None = None
-        self._solve_progress: QProgressDialog | None = None
-        self._mesh_progress: QProgressDialog | None = None
+        self._solve_progress: TimedProgressDialog | None = None
+        self._mesh_progress: TimedProgressDialog | None = None
 
         self.view = BoardView()
         self.view3d = Board3DView()
@@ -798,13 +798,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("The board changed on disk and was reloaded before meshing.", 5000)
 
         job = MeshJob(doc.project.path, self)
-        dialog = QProgressDialog("Starting mesher…", "Cancel", 0, _PROGRESS_STEPS, self)
-        dialog.setWindowTitle("Building mesh")
-        dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        dialog.setMinimumDuration(0)
-        dialog.setAutoClose(False)
-        dialog.setAutoReset(False)
-        dialog.setValue(0)
+        dialog = TimedProgressDialog("Building mesh", "Starting mesher…", _PROGRESS_STEPS, self)
         dialog.canceled.connect(job.cancel)
         job.progress.connect(self._on_mesh_progress)
         job.succeeded.connect(self._on_mesh_built)
@@ -873,13 +867,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("The board changed on disk and was reloaded before solving.", 5000)
 
         job = SolveJob(doc.project.path, self)
-        dialog = QProgressDialog("Starting solver…", "Cancel", 0, _PROGRESS_STEPS, self)
-        dialog.setWindowTitle("Solving")
-        dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        dialog.setMinimumDuration(0)
-        dialog.setAutoClose(False)
-        dialog.setAutoReset(False)
-        dialog.setValue(0)
+        dialog = TimedProgressDialog("Solving", "Starting solver…", _PROGRESS_STEPS, self)
         dialog.canceled.connect(job.cancel)
         job.progress.connect(self._on_solve_progress)
         job.succeeded.connect(self._on_solved)
@@ -923,12 +911,15 @@ class MainWindow(QMainWindow):
         Args:
             results: The :class:`~kits.solve.results.SolveResults` loaded from the child's output.
         """
+        took = self._solve_progress.elapsed_s if self._solve_progress is not None else 0.0
         self._finish_solve_job()
         self.document.reload_saved_mesh()
         self.document.set_results(results)
         self._solve_dock.raise_()
         self.statusBar().showMessage(
-            f"Solved: {results.total_power_w:.4g} W, max {results.max_temperature_c:.1f} °C", 8000
+            f"Solved in {format_duration(took)}: {results.total_power_w:.4g} W, "
+            f"max {results.max_temperature_c:.1f} °C",
+            8000,
         )
 
     def _on_solve_failed(self, message: str) -> None:
@@ -994,10 +985,13 @@ class MainWindow(QMainWindow):
         Args:
             mesh: The mesh loaded from the child process's output.
         """
+        took = self._mesh_progress.elapsed_s if self._mesh_progress is not None else 0.0
         self._finish_mesh_job()
         self.document.set_mesh(mesh)
         self.statusBar().showMessage(
-            f"Mesh built: {mesh.num_triangles:,} triangles on {len(mesh.layers)} layers", 5000
+            f"Mesh built in {format_duration(took)}: {mesh.num_triangles:,} triangles on "
+            f"{len(mesh.layers)} layers",
+            5000,
         )
 
     def _on_mesh_failed(self, message: str) -> None:
