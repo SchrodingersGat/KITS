@@ -21,14 +21,16 @@ Temperature dependence of copper resistivity is not modelled yet.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
+import math
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
+import pyamg
 import scipy.sparse as sp
 import shapely
 from scipy.sparse.csgraph import connected_components
-from scipy.sparse.linalg import spsolve
+from scipy.sparse.linalg import LinearOperator, cg, spsolve
 from shapely.geometry import box
 from shapely.geometry.base import BaseGeometry
 
@@ -58,6 +60,16 @@ DEFAULT_MASK_THICKNESS_MM = 0.01
 # Leakage to 0 V, relative to the mean diagonal, so copper islands not connected
 # to any electrode stay solvable. Small enough not to affect driven currents.
 _LEAKAGE = 1e-12
+
+# Thermal solve (conjugate gradient, multigrid preconditioner): stop when the
+# heat imbalance is this fraction of the heat imbalance at ambient temperature.
+_THERMAL_RTOL = 1e-8
+_THERMAL_MAX_ITERATIONS = 3000
+_PROGRESS_EVERY = 5  # CG iterations between progress reports
+
+# A lumped conductance acting on a weighted combination of unknowns,
+# ``(nodes, coefficients, conductance)``; see :func:`_low_rank_matrix`.
+LowRank = tuple[np.ndarray, np.ndarray, float]
 
 
 class SolveError(ValueError):
@@ -662,6 +674,7 @@ class LayeredModel:
         heat_loads: Sequence[HeatLoad] = (),
         elements: Sequence[ResistiveElement] = (),
         heatsinks: Sequence[Heatsink] = (),
+        progress: Callable[[str, float], None] | None = None,
     ) -> ThermalResult:
         """Solve for steady temperature with Joule heating and pad heat loads.
 
@@ -687,14 +700,18 @@ class LayeredModel:
             heatsinks: Heatsinks: a node each, joined to ambient, and either to the
                 board face under it (node by node, through the mask where it covers) or, mounted on
                 components, to the bodies of the resistive elements it covers.
+            progress: Optional callback ``(message, fraction)`` reporting the
+                iterative solve's convergence, fraction 0 to 1.
 
         Returns:
             The temperature field, with each heat load's heat flow and pad
             temperature and each element's body temperature.
 
         Raises:
-            SolveError: If a heat load's or element's pad doesn't exist or has no meshed copper.
+            SolveError: If a heat load's or element's pad doesn't exist or has no meshed
+                copper, or the solve doesn't converge.
         """
+        report = progress or (lambda message, fraction: None)
         s = self.settings
         k_cu, k_d = s.copper_thermal_conductivity_w_mk, s.dielectric_thermal_conductivity_w_mk
         gaps = [self.dielectric_gap(u, lo) for u, lo in zip(self.layers, self.layers[1:], strict=False)]
@@ -739,7 +756,10 @@ class LayeredModel:
 
         # Resistive elements: the body takes I²R and is tied to its pads (directly,
         # or through a junction node — an extra unknown — when a thermal resistance
-        # to the board is given) and to ambient.
+        # to the board is given) and to ambient. These ties act on the area-weighted
+        # mean of many nodes, which as a matrix is a dense block (thousands of nodes
+        # under a large part), so they're kept as low-rank terms and applied matrix-free.
+        low_rank: list[LowRank] = []
         junctions = [e for e in elements if e.thermal_resistance_board_k_w is not None]
         extra_nodes = len(junctions) + len(heatsinks)  # one unknown each
         n = self.size + extra_nodes
@@ -767,8 +787,8 @@ class LayeredModel:
             if e.name in junction_index:
                 j = junction_index[e.name]
                 to_board = np.concatenate([[1.0], -weights])
-                k = k + _rank_one(
-                    np.concatenate([[j], nodes]), to_board, 1.0 / e.thermal_resistance_board_k_w, n
+                low_rank.append(
+                    (np.concatenate([[j], nodes]), to_board, 1.0 / e.thermal_resistance_board_k_w)
                 )
                 nodes, weights = np.array([j]), np.array([1.0])
             if e.thermal_resistance_ambient_k_w is not None:
@@ -778,7 +798,7 @@ class LayeredModel:
                 g_ambient = default_ambient_conductance(footprint, s) * (1.0 - covered.get(e.name, 0.0))
             power = dc.element_power.get(e.name, 0.0) if dc is not None else 0.0
             rhs[nodes] += (power + g_ambient * s.ambient_c) * weights
-            k = k + _rank_one(nodes, weights, g_ambient, n)
+            low_rank.append((nodes, weights, g_ambient))
             bodies[e.name] = (nodes, weights, g_ambient)
         sinks = {}
         for i, hs in enumerate(heatsinks):
@@ -789,7 +809,7 @@ class LayeredModel:
                 for name, area, _ in contacts[hs.name]:
                     nodes, weights, _ = bodies[name]
                     g = area / total / hs.thermal_resistance_board_k_w
-                    k = k + _rank_one(np.concatenate([[j], nodes]), np.concatenate([[1.0], -weights]), g, n)
+                    low_rank.append((np.concatenate([[j], nodes]), np.concatenate([[1.0], -weights]), g))
             else:
                 nodes, g = self.heatsink_conductances(hs)
                 k = k + _star(j, nodes, g, n)
@@ -798,10 +818,13 @@ class LayeredModel:
             rhs[j] += g_ambient * s.ambient_c
             sinks[hs.name] = (j, g_ambient)
         k = k.tocsr()
+        u, g = _low_rank_matrix(low_rank, n)
 
-        temperature = _solve_partitioned(k, rhs, fixed, values) if fixed.any() else spsolve(k.tocsc(), rhs)
+        report(f"Solving temperature: {n:,} unknowns, {k.nnz:,} matrix entries", 0.0)
+        temperature = _solve_spd(k, u, g, rhs, fixed, values, s.ambient_c, report)
         convected = float(np.ones(self.size) @ (conv @ (temperature[: self.size] - s.ambient_c)))
-        injected = k @ temperature - rhs  # heat the fixed-temperature constraints put in
+        # Heat the fixed-temperature constraints put in.
+        injected = k @ temperature + u @ (g * (u.T @ temperature)) - rhs
         load_heat, load_temperatures = {}, {}
         for key, (load, nodes, weights) in load_nodes.items():
             if load.kind is HeatLoadKind.POWER:
@@ -955,6 +978,125 @@ def _rank_one(nodes: np.ndarray, coefficients: np.ndarray, conductance: float, s
     cols = np.tile(nodes, len(nodes))
     data = conductance * np.outer(coefficients, coefficients).ravel()
     return sp.coo_matrix((data, (rows, cols)), shape=(size, size))
+
+
+def _low_rank_matrix(terms: Sequence[LowRank], size: int) -> tuple[sp.csr_matrix, np.ndarray]:
+    """Collect lumped conductances into factors ``U`` and ``g``, the matrix being ``U diag(g) Uᵀ``.
+
+    Each term ``(nodes, c, conductance)`` is ``conductance · c cᵀ`` (see :func:`_rank_one`)
+    but stays factored: ``U`` has one sparse column per term, so applying it costs
+    as much as its nodes, where the assembled ``c cᵀ`` would be dense.
+
+    Args:
+        terms: The lumped conductances.
+        size: Size of the global system.
+
+    Returns:
+        ``(U, g)``: ``(size, len(terms))`` sparse factor and the conductances.
+    """
+    if not terms:
+        return sp.csr_matrix((size, 0)), np.zeros(0)
+    rows = np.concatenate([nodes for nodes, _, _ in terms])
+    cols = np.concatenate([np.full(len(nodes), i) for i, (nodes, _, _) in enumerate(terms)])
+    vals = np.concatenate([c for _, c, _ in terms])
+    u = sp.csr_matrix((vals, (rows, cols)), shape=(size, len(terms)))
+    return u, np.array([g for _, _, g in terms], float)
+
+
+def _solve_spd(
+    k: sp.csr_matrix,
+    u: sp.csr_matrix,
+    g: np.ndarray,
+    rhs: np.ndarray,
+    fixed: np.ndarray,
+    values: np.ndarray,
+    guess: float,
+    report: Callable[[str, float], None],
+) -> np.ndarray:
+    """Solve ``(k + U diag(g) Uᵀ) x = rhs`` iteratively, with some unknowns fixed.
+
+    Conjugate gradient, preconditioned by algebraic multigrid on ``k`` plus the
+    low-rank terms' diagonal. Memory grows linearly with the problem (a direct
+    factorisation of the layered thermal system fills in far beyond that), and
+    each iteration's residual is reported.
+
+    Args:
+        k: Sparse stiffness (symmetric positive definite on the free unknowns,
+            together with the low-rank terms).
+        u: Low-rank factor, see :func:`_low_rank_matrix`.
+        g: Low-rank conductances.
+        rhs: Nodal loads.
+        fixed: True where the value is prescribed.
+        values: Prescribed values (used where ``fixed``).
+        guess: Starting value of the free unknowns (e.g. ambient temperature);
+            convergence is measured against the residual there.
+        report: Progress callback ``(message, fraction)``.
+
+    Returns:
+        The full solution vector.
+
+    Raises:
+        SolveError: If the iteration doesn't converge.
+    """
+    free = ~fixed
+    x = np.where(fixed, values, guess)
+    residual = (rhs - k @ x - u @ (g * (u.T @ x)))[free]
+    scale = float(np.linalg.norm(residual))
+    if scale == 0.0 or not free.any():
+        return x
+    k_ff = k[free][:, free].tocsr()
+    u_f = u[free]
+
+    def apply(v: np.ndarray) -> np.ndarray:
+        """Multiply by the full free-unknown matrix.
+
+        Args:
+            v: Free unknowns.
+
+        Returns:
+            ``(k_ff + U_f diag(g) U_fᵀ) v``.
+        """
+        return k_ff @ v + u_f @ (g * (u_f.T @ v))
+
+    report("Solving temperature: building the multigrid preconditioner", 0.0)
+    preconditioner = (k_ff + sp.diags(u_f.multiply(u_f) @ g)).tocsr()
+    multigrid = pyamg.smoothed_aggregation_solver(preconditioner, symmetry="symmetric")
+
+    iterations = 0
+
+    def step(xk: np.ndarray) -> None:
+        """Count iterations and report the relative residual every few.
+
+        Args:
+            xk: The current iterate.
+        """
+        nonlocal iterations
+        iterations += 1
+        if iterations % _PROGRESS_EVERY:
+            return
+        r = float(np.linalg.norm(residual - apply(xk))) / scale
+        fraction = min(max(math.log(r) / math.log(_THERMAL_RTOL), 0.0), 1.0) if r > 0 else 1.0
+        report(
+            f"Solving temperature: iteration {iterations}, residual {r:.1e} (target {_THERMAL_RTOL:.0e})",
+            fraction,
+        )
+
+    dx, info = cg(
+        LinearOperator(k_ff.shape, matvec=apply, dtype=float),
+        residual,
+        rtol=_THERMAL_RTOL,
+        maxiter=_THERMAL_MAX_ITERATIONS,
+        M=multigrid.aspreconditioner(),
+        callback=step,
+    )
+    if info != 0:
+        r = float(np.linalg.norm(residual - apply(dx))) / scale
+        raise SolveError(
+            f"the temperature solve didn't converge (residual {r:.1e} after {iterations} iterations); "
+            "check that heat can leave the board through convection, heatsinks or fixed temperatures"
+        )
+    x[free] += dx
+    return x
 
 
 def _solve_partitioned(

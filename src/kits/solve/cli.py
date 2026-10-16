@@ -106,7 +106,9 @@ def solve_project(project_path: str | Path, progress=None) -> tuple[SolveResults
         report("Solving current flow", start + 0.1 * span)
         dc = model.solve_dc([Electrode(s.ref, s.pad, current=s.current_a) for s in sources], elements)
     report("Solving temperature", start + 0.45 * span)
-    thermal = model.solve_thermal(dc, heat_loads, elements, heatsinks)
+    thermal = model.solve_thermal(
+        dc, heat_loads, elements, heatsinks, lambda m, f: report(m, start + (0.45 + 0.45 * f) * span)
+    )
 
     report("Saving results", start + 0.9 * span)
     results = SolveResults(
