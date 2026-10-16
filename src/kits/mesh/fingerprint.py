@@ -34,7 +34,7 @@ def settings_hash(settings: MeshSettings) -> str:
     Returns:
         A hex SHA-256 digest.
     """
-    payload = json.dumps({"mesher_version": MESHER_VERSION, **settings.to_dict()}, sort_keys=True)
+    payload = json.dumps({"mesher_version": MESHER_VERSION, **settings.effective().to_dict()}, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

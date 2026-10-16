@@ -274,6 +274,88 @@ def test_mesh_panel_edits_hole_points(window, kits_v9_path):
     assert load_kits_project(kits_v9_path).mesh.min_circle_points == 48
 
 
+def _check_net(panel, net):
+    for i in range(panel.nets.count()):
+        item = panel.nets.item(i)
+        if item.data(Qt.ItemDataRole.UserRole) == net:
+            item.setCheckState(Qt.CheckState.Checked)
+            return item
+    raise AssertionError(f"net {net} not listed")
+
+
+def test_mesh_panel_track_options(window, kits_v9_path):
+    assert window.open_path(kits_v9_path)
+    panel = window.mesh_panel
+    # The fixture has a +5V track and a GND arc.
+    assert sorted(panel.nets.item(i).text() for i in range(panel.nets.count())) == ["+5V (1)", "GND (1)"]
+    assert panel.nets.isHidden()
+    panel.track_mode.setCurrentIndex(panel.track_mode.findData("nets"))
+    assert not panel.nets.isHidden()
+    _check_net(panel, "GND")
+    mesh = window.document.project.mesh
+    assert mesh.tracks == "nets" and mesh.track_nets == ("GND",) and window.document.dirty
+    panel.net_filter.setText("5v")
+    assert [panel.nets.item(i).isHidden() for i in range(2)] == [False, False]  # GND stays: it is ticked
+    panel.net_filter.setText("zzz")
+    hidden = {
+        panel.nets.item(i).data(Qt.ItemDataRole.UserRole): panel.nets.item(i).isHidden() for i in range(2)
+    }
+    assert hidden == {"+5V": True, "GND": False}
+    # Editing a size keeps the track choice.
+    panel.max_size.setValue(1.5)
+    assert window.document.project.mesh.track_nets == ("GND",)
+    assert window.save()
+    reloaded = load_kits_project(kits_v9_path).mesh
+    assert reloaded.tracks == "nets" and reloaded.track_nets == ("GND",) and reloaded.max_size_mm == 1.5
+
+
+def test_mesh_areas_are_drawn_edited_and_saved(window, kits_v9_path, monkeypatch):
+    from PySide6.QtCore import QRectF
+
+    assert window.open_path(kits_v9_path)
+    areas = window.mesh_panel.areas
+    monkeypatch.setattr(areas, "run_dialog", lambda dialog: dialog.area)  # accept the dialog as filled in
+    window.draw_mesh_area("refine")
+    assert window.view.drawing
+    window.view.cancel_rect_draw()
+    window._on_rect_drawn(QRectF(20, 10, 8, 6))  # as if the drag finished
+    window.draw_mesh_area("exclude")
+    window.view.cancel_rect_draw()
+    window._on_rect_drawn(QRectF(30, 20, 4, 4))
+
+    project = window.document.project
+    assert [(a.name, a.kind) for a in project.mesh.areas] == [("R1", "refine"), ("X1", "exclude")]
+    refine = project.mesh.areas[0]
+    assert refine.bounds == (20, 10, 28, 16) and refine.size_mm == pytest.approx(0.1)
+    assert areas.table.rowCount() == 2 and window.scene.mesh_area_count == 2
+    assert window.document.heatsinks == []  # rectangles went to the mesh, not a heatsink
+
+    # Disabling an area hides it from the board, but keeps it in the project.
+    areas.table.item(1, 0).setCheckState(Qt.CheckState.Unchecked)
+    assert not project.mesh.areas[1].enabled and window.scene.mesh_area_count == 1
+    areas.table.selectRow(0)
+    areas.remove_selected_rows()
+    assert [a.name for a in project.mesh.areas] == ["X1"] and window.scene.mesh_area_count == 0
+    assert window.save()
+    assert load_kits_project(kits_v9_path).mesh.areas == project.mesh.areas
+
+
+def test_mesh_area_dialog_limits_size(app):
+    from kits.config import MeshArea
+    from kits.gui.heatsinks_panel import GridFrame
+    from kits.gui.mesh_areas import MeshAreaDialog
+
+    area = MeshArea("R1", "refine", 0, 0, 5, 5, size_mm=0.1)
+    dialog = MeshAreaDialog(area, {"X1"}, GridFrame(), max_size_mm=1.0)
+    assert dialog.area == area
+    dialog.size.setValue(2.0)
+    assert dialog.area is None and "max size" in dialog.error.text()
+    dialog.kind.setCurrentIndex(dialog.kind.findData("exclude"))  # exclusions have no size
+    assert dialog.area is not None and dialog.area.kind == "exclude"
+    dialog.name.setText("X1")
+    assert dialog.area is None and "already named" in dialog.error.text()
+
+
 # -- current sources ---------------------------------------------------------------
 
 

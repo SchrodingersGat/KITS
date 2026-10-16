@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QGraphicsSimpleTextItem,
 )
 
-from ..config import CurrentSource, HeatLoad, Heatsink, ResistiveElement
+from ..config import CurrentSource, HeatLoad, Heatsink, MeshArea, ResistiveElement
 from ..ingest.geometry import arc_points
 from ..ingest.model import EDGE_CUTS, Board, Pad
 from ..mesh.geometry import GeometryError, board_outline, footprint_body, mask_openings
@@ -75,6 +75,7 @@ _Z_SOURCES = 1100  # current source markers, above the mesh
 _Z_HEAT_LOADS = 1150  # heat load markers, above current sources
 _Z_ELEMENTS = 1175  # resistive element markers
 _Z_HEATSINKS = 1160  # manual heatsinks
+_Z_MESH_AREAS = 1050  # mesh refine / exclusion areas, just above the mesh
 _Z_SELECTION = 1200  # selected pad outline, on top of everything
 _Z_MARKERS = 1300  # result probe markers
 _MARKER_RADIUS_PX = 6
@@ -83,6 +84,7 @@ _LABEL_GAP_PX = 4  # gap between a pad and its current label, screen pixels
 # for picking pads with the mouse.
 PAD_KEY_ROLE = 1
 HEATSINK_ROLE = 2  # item data: name of the heatsink an item draws
+MESH_AREA_ROLE = 3  # item data: name of the mesh area an item draws
 _MESH_TILES = 16  # overlay tiles per axis
 _GRID_MIN_PX = 8  # never draw grid lines closer than this on screen
 _GRID_ORIGIN_PX = 8  # half-size of the origin marker
@@ -227,6 +229,8 @@ class BoardScene(QGraphicsScene):
         self._element_markers: LayerItem | None = None
         self._heatsink_markers: LayerItem | None = None
         self._heatsinks_visible = True
+        self._mesh_area_markers: LayerItem | None = None
+        self._mesh_areas_visible = True
         self._elements_visible = True
         self._selection: LayerItem | None = None
         self._results: SolveResults | None = None
@@ -593,6 +597,69 @@ class BoardScene(QGraphicsScene):
             box.setTransform(box.transform().translate(-bounds.width() / 2, -bounds.height() / 2))
             box.setPos(QPointF((x0 + x1) / 2, (y0 + y1) / 2))
             label.setParentItem(box)
+
+    def set_mesh_areas(self, areas: list[MeshArea]) -> None:
+        """Draw mesh areas: refine areas outlined in yellow, exclusions cross-hatched in red, with names.
+
+        Args:
+            areas: The enabled areas.
+        """
+        if self._mesh_area_markers is not None:
+            self.removeItem(self._mesh_area_markers)
+        self._mesh_area_markers = LayerItem()
+        self._mesh_area_markers.setZValue(_Z_MESH_AREAS)
+        self._mesh_area_markers.setVisible(self._mesh_areas_visible)
+        self.addItem(self._mesh_area_markers)
+        font = QFont()
+        font.setBold(True)
+        for area in areas:
+            refine = area.kind == "refine"
+            color = colors.MESH_REFINE if refine else colors.MESH_EXCLUDE
+            x0, y0, x1, y1 = area.bounds
+            rect = QGraphicsRectItem(QRectF(x0, y0, x1 - x0, y1 - y0), self._mesh_area_markers)
+            pen = _cosmetic_pen(color, 2.0)
+            pen.setStyle(Qt.PenStyle.DashLine if refine else Qt.PenStyle.SolidLine)
+            rect.setPen(pen)
+            if not refine:
+                rect.setBrush(
+                    QBrush(
+                        QColor(color.red(), color.green(), color.blue(), 150), Qt.BrushStyle.DiagCrossPattern
+                    )
+                )
+            rect.setToolTip(
+                f"Mesh area {area.name}: elements ≤ {area.size_mm:g} mm"
+                if refine
+                else f"Mesh area {area.name}: excluded from the mesh"
+            )
+            rect.setData(MESH_AREA_ROLE, area.name)
+            text = f"{area.name} {area.size_mm:g} mm" if refine else area.name
+            label = QGraphicsSimpleTextItem(text)
+            label.setFont(font)
+            label.setBrush(QColor(20, 24, 32))
+            bounds = label.boundingRect()
+            box = QGraphicsRectItem(bounds.adjusted(-3, -1, 3, 1), self._mesh_area_markers)
+            box.setBrush(color)
+            box.setPen(QPen(Qt.PenStyle.NoPen))
+            box.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+            box.setPos(QPointF(x0, y0))  # top-left corner, clear of heatsink labels (centred)
+            label.setParentItem(box)
+
+    def set_mesh_areas_visible(self, visible: bool) -> None:
+        """Show or hide the mesh areas.
+
+        Args:
+            visible: Whether they are drawn. Kept when they are redrawn.
+        """
+        self._mesh_areas_visible = visible
+        if self._mesh_area_markers is not None:
+            self._mesh_area_markers.setVisible(visible)
+
+    @property
+    def mesh_area_count(self) -> int:
+        """Number of mesh areas drawn."""
+        if self._mesh_area_markers is None:
+            return 0
+        return sum(1 for i in self._mesh_area_markers.childItems() if i.data(MESH_AREA_ROLE))
 
     def set_heatsinks_visible(self, visible: bool) -> None:
         """Show or hide the heatsinks.

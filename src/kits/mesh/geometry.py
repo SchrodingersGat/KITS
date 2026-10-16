@@ -367,28 +367,40 @@ def via_layers(board: Board) -> list[list[str]]:
     return spans
 
 
-def layer_copper(board: Board, layer: str, spans: list[list[str]] | None = None) -> BaseGeometry:
+def layer_copper(
+    board: Board,
+    layer: str,
+    spans: list[list[str]] | None = None,
+    settings: MeshSettings | None = None,
+) -> BaseGeometry:
     """Union of all copper on one layer (zone fills, tracks, pads, vias, graphics).
 
     Args:
         board: The board.
         layer: Copper layer name.
         spans: Precomputed :func:`via_layers` result, to avoid recomputing per layer.
+        settings: Mesh settings choosing which tracks and arcs to include
+            (:meth:`~kits.config.MeshSettings.keeps_track`); None includes all.
 
     Returns:
         The copper area, not yet clipped to the board outline.
     """
     spans = via_layers(board) if spans is None else spans
+    keep = settings.keeps_track if settings is not None else (lambda _net: True)
     parts: list[BaseGeometry] = []
     for zone in board.zones:
         if not zone.is_rule_area:
             parts += [shapely.make_valid(Polygon(p)) for p in zone.fills.get(layer, []) if len(p) >= 3]
 
-    tracks = [t for t in board.tracks if t.layer == layer]
+    tracks = [t for t in board.tracks if t.layer == layer and keep(t.net)]
     if tracks:
         lines = shapely.linestrings([[t.start, t.end] for t in tracks])
         parts += list(shapely.buffer(lines, [t.width / 2 for t in tracks], quad_segs=_QUAD_SEGS))
-    parts += [_stroke(arc_points(a.start, a.mid, a.end), a.width) for a in board.arcs if a.layer == layer]
+    parts += [
+        _stroke(arc_points(a.start, a.mid, a.end), a.width)
+        for a in board.arcs
+        if a.layer == layer and keep(a.net)
+    ]
     parts += [pad_area(p) for p in board.pads() if layer in p.layers and p.kind != "np_thru_hole"]
     parts += [
         Point(v.position).buffer(v.diameter / 2, quad_segs=_QUAD_SEGS)
@@ -484,6 +496,40 @@ def board_holes(board: Board, settings: MeshSettings, spans: list[list[str]] | N
         if p.drill is not None and p.drill.width > 0 and p.kind in ("thru_hole", "np_thru_hole")
     ]
     return holes
+
+
+def excluded_area(settings: MeshSettings) -> BaseGeometry:
+    """Union of the enabled exclusion areas, where the board isn't meshed.
+
+    Args:
+        settings: Mesh settings.
+
+    Returns:
+        The area in board millimetres (empty if there are none).
+    """
+    return shapely.union_all([box(*a.bounds) for a in settings.active_areas("exclude")])
+
+
+def meshed_holes(board: Board, settings: MeshSettings, spans: list[list[str]] | None = None) -> list[Hole]:
+    """The drill holes that are part of the mesh: those clear of every exclusion area.
+
+    A hole touching an exclusion would be cut partly or not at all, so its
+    edge nodes wouldn't line up across layers; it is dropped instead, by both
+    the mesher and the solver (which links plated barrels through them).
+
+    Args:
+        board: The board.
+        settings: Mesh settings (hole outlines and exclusion areas).
+        spans: Precomputed :func:`via_layers` result.
+
+    Returns:
+        The holes.
+    """
+    holes = board_holes(board, settings, spans)
+    excluded = excluded_area(settings)
+    if excluded.is_empty:
+        return holes
+    return [h for h in holes if not excluded.intersects(h.polygon)]
 
 
 def _polygons(geom: BaseGeometry) -> list[Polygon]:
@@ -639,6 +685,10 @@ def extract_layers(
 ) -> list[LayerGeometry]:
     """Build the meshable geometry for every copper layer.
 
+    Exclusion areas are cut out of the board outline (and the holes touching
+    them dropped, see :func:`meshed_holes`); tracks are filtered by the
+    settings' track mode.
+
     Args:
         board: The board.
         settings: Mesh settings; the minimum size sets the simplification tolerance.
@@ -648,17 +698,23 @@ def extract_layers(
         One :class:`LayerGeometry` per copper layer, top to bottom.
 
     Raises:
-        GeometryError: If the board has no usable outline.
+        GeometryError: If the board has no usable outline, or the exclusion
+            areas cover all of it.
     """
     outline = board_outline(board)
+    excluded = excluded_area(settings)
+    if not excluded.is_empty:
+        outline = outline.difference(excluded)
+        if outline.is_empty:
+            raise GeometryError("the mesh exclusion areas cover the whole board")
     spans = via_layers(board)
-    holes = board_holes(board, settings, spans)
+    holes = meshed_holes(board, settings, spans)
     tolerance = settings.min_size_mm * SIMPLIFY_FRACTION
     layers = []
     for i, layer in enumerate(board.copper_layers):
         if progress:
             progress(f"Extracting geometry: {layer}", i / len(board.copper_layers))
-        copper = layer_copper(board, layer, spans)
+        copper = layer_copper(board, layer, spans, settings)
         layer_holes = [h.polygon for h in holes if layer in h.layers]
         faces = partition_layer(outline, copper, tolerance, layer_holes)
         layers.append(

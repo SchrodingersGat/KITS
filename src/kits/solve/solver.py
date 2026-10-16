@@ -42,7 +42,7 @@ except ImportError:
 
 from ..config import HeatLoad, HeatLoadKind, Heatsink, ResistiveElement, SolveSettings
 from ..ingest.model import Board
-from ..mesh.geometry import board_holes, footprint_body, mask_openings, pad_area
+from ..mesh.geometry import footprint_body, mask_openings, meshed_holes, pad_area
 from ..mesh.mesher import layer_heights
 from ..mesh.model import BoardMesh
 from .elements import default_ambient_conductance
@@ -205,7 +205,8 @@ class LayeredModel:
         self.size = offset
         self.by_name = {lf.layer: lf for lf in self.layers}
         self.copper_thickness = {name: t * MM for name, (t, _) in board.copper_thicknesses().items()}
-        self.holes = [h for h in board_holes(board, mesh.settings) if h.plated]
+        self.mesh_settings = mesh.settings
+        self.holes = [h for h in meshed_holes(board, mesh.settings) if h.plated]
         # Solder mask openings on the outer layers ({layer: area}); no entry = no mask.
         self.mask_openings: dict[str, BaseGeometry] = {}
         for side, lf in (("F", self.layers[0]), ("B", self.layers[-1])):
@@ -281,7 +282,10 @@ class LayeredModel:
                 raise SolveError(
                     f"pad {label} is covered by solder mask (no mask opening), so nothing can connect to it"
                 )
-            raise SolveError(f"pad {label} has no copper in the mesh")
+            hint = (
+                " (is it inside a mesh exclusion area?)" if self.mesh_settings.active_areas("exclude") else ""
+            )
+            raise SolveError(f"pad {label} has no copper in the mesh{hint}")
         return found
 
     def body_nodes(self, element: ResistiveElement) -> tuple[np.ndarray, np.ndarray]:
@@ -561,7 +565,15 @@ class LayeredModel:
         values_r[label[fixed]] = values[fixed]
         reduced_nodes = {key: (np.unique(label[nodes]), None) for key, (nodes, _) in electrode_nodes.items()}
 
-        _check_connectivity(k_r, rhs_r, fixed_r, reduced_nodes)
+        try:
+            _check_connectivity(k_r, rhs_r, fixed_r, reduced_nodes)
+        except SolveError as exc:
+            if self.mesh_settings.tracks == "all" and not self.mesh_settings.active_areas("exclude"):
+                raise
+            raise SolveError(
+                f"{exc}. The mesh leaves out some tracks or areas: add the nets carrying this current "
+                "to the meshed tracks, or check the exclusion areas"
+            ) from exc
         y = _solve_with_fixed(k_r, rhs_r, fixed_r, values_r)
         voltage = y[label]
 

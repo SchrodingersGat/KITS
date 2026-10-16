@@ -267,7 +267,7 @@ class Document(QObject):
         """True if a mesh exists but was built with different settings than the project's."""
         if self._mesh is None or self._project is None:
             return False
-        return self._mesh.settings != self._project.mesh
+        return self._mesh.settings.effective() != self._project.mesh.effective()
 
     # -- project lifecycle -----------------------------------------------------
 

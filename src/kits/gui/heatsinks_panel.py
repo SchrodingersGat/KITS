@@ -79,7 +79,7 @@ class GridFrame:
         return round(x + ox, 6), round(oy - y - height, 6)  # no float noise in the project file
 
 
-def _spin(value: float, low: float, high: float, suffix: str, decimals: int = 3) -> QDoubleSpinBox:
+def spin_box(value: float, low: float, high: float, suffix: str, decimals: int = 3) -> QDoubleSpinBox:
     """A spin box for the dialog.
 
     Args:
@@ -135,16 +135,16 @@ class HeatsinkDialog(QDialog):
             "Components: sitting on the resistive elements under it; heat flows through their\n"
             "bodies, and the heatsink doesn't touch the board."
         )
-        self.x = _spin(gx, -MAX_COORD_MM, MAX_COORD_MM, " mm")
-        self.y = _spin(gy, -MAX_COORD_MM, MAX_COORD_MM, " mm")
-        self.width = _spin(heatsink.width_mm, 0.01, MAX_COORD_MM, " mm")
-        self.height = _spin(heatsink.height_mm, 0.01, MAX_COORD_MM, " mm")
-        self.board_theta = _spin(heatsink.thermal_resistance_board_k_w, 0.001, 1e6, " K/W")
+        self.x = spin_box(gx, -MAX_COORD_MM, MAX_COORD_MM, " mm")
+        self.y = spin_box(gy, -MAX_COORD_MM, MAX_COORD_MM, " mm")
+        self.width = spin_box(heatsink.width_mm, 0.01, MAX_COORD_MM, " mm")
+        self.height = spin_box(heatsink.height_mm, 0.01, MAX_COORD_MM, " mm")
+        self.board_theta = spin_box(heatsink.thermal_resistance_board_k_w, 0.001, 1e6, " K/W")
         self.board_theta.setToolTip(
             "Contact: thermal pad, paste or gap filler between the heatsink and the board (or the\n"
             "component bodies, shared between them by covered area)"
         )
-        self.ambient_theta = _spin(heatsink.thermal_resistance_ambient_k_w, 0.001, 1e6, " K/W")
+        self.ambient_theta = spin_box(heatsink.thermal_resistance_ambient_k_w, 0.001, 1e6, " K/W")
         self.ambient_theta.setToolTip("Heatsink-to-ambient: the heatsink's datasheet value for your airflow")
         note = QLabel(
             "X, Y: lower-left corner in grid coordinates (as in the status bar). On the board, heat "

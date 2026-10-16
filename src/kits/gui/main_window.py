@@ -101,7 +101,11 @@ class MainWindow(QMainWindow):
         self._selected_pad: tuple[str, str] | None = None
         self._layer_dock = self._add_dock("Layers", self.layer_panel, Qt.DockWidgetArea.LeftDockWidgetArea)
         self._info_dock = self._add_dock("Board", self.info_panel, Qt.DockWidgetArea.RightDockWidgetArea)
-        self._mesh_dock = self._add_dock("Mesh", self.mesh_panel, Qt.DockWidgetArea.RightDockWidgetArea)
+        mesh_scroll = QScrollArea()  # tall with the track and area options, like the Solve tab
+        mesh_scroll.setWidget(self.mesh_panel)
+        mesh_scroll.setWidgetResizable(True)
+        mesh_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._mesh_dock = self._add_dock("Mesh", mesh_scroll, Qt.DockWidgetArea.RightDockWidgetArea)
         self._sources_dock = self._add_dock(
             "Current Sources", self.sources_panel, Qt.DockWidgetArea.RightDockWidgetArea
         )
@@ -133,6 +137,7 @@ class MainWindow(QMainWindow):
 
         self._last_cursor: QPointF | None = None
         self._click_marker: int | None = None  # marker added by the latest click
+        self._draw_target = "heatsink"  # what a rectangle drawn on the board is for
         self._probe_label = QLabel()
         self._probe_label.setToolTip("Solved value under the cursor, on the active layer")
         self.statusBar().addPermanentWidget(self._probe_label)
@@ -182,7 +187,10 @@ class MainWindow(QMainWindow):
         self.elements_panel.show_elements_toggled.connect(self.show_elements_action.setChecked)
         self.heatsinks_panel.show_heatsinks_toggled.connect(self.show_heatsinks_action.setChecked)
         self.heatsinks_panel.draw_requested.connect(self.draw_heatsink)
-        self.view.rect_drawn.connect(self._on_heatsink_drawn)
+        self.view.rect_drawn.connect(self._on_rect_drawn)
+        self.mesh_panel.areas.draw_requested.connect(self.draw_mesh_area)
+        self.mesh_panel.areas.show_areas_toggled.connect(self._on_show_mesh_areas_toggled)
+        self.document.settings_changed.connect(self._show_mesh_areas)
         self.view.rect_draw_cancelled.connect(lambda: self.statusBar().clearMessage())
         self.mesh_panel.build_requested.connect(self.build_mesh)
         self.mesh_panel.show_mesh_toggled.connect(self.show_mesh_action.setChecked)
@@ -1104,6 +1112,7 @@ class MainWindow(QMainWindow):
         self._show_heat_loads()
         self._show_elements()
         self._show_heatsinks()
+        self._show_mesh_areas()
         self._show_markers()
         self._update_state()
 
@@ -1379,22 +1388,70 @@ class MainWindow(QMainWindow):
 
     def draw_heatsink(self) -> None:
         """Let the user drag a rectangle on the 2D board view for a new heatsink."""
+        self._start_rect_draw("heatsink", "Drag a rectangle on the board for the heatsink (Esc cancels)")
+
+    def draw_mesh_area(self, kind: str) -> None:
+        """Let the user drag a rectangle on the 2D board view for a new mesh area.
+
+        Args:
+            kind: ``"refine"`` or ``"exclude"``.
+        """
+        what = "to mesh more finely" if kind == "refine" else "to leave out of the mesh"
+        self._start_rect_draw(kind, f"Drag a rectangle on the board {what} (Esc cancels)")
+
+    def _start_rect_draw(self, target: str, message: str) -> None:
+        """Enter rectangle draw mode on the 2D view.
+
+        Args:
+            target: What the rectangle is for: ``"heatsink"``, ``"refine"`` or ``"exclude"``.
+            message: Status bar prompt.
+        """
         if self.scene is None:
             return
+        self._draw_target = target
         self.view_2d_action.setChecked(True)
         self.view.start_rect_draw()
-        self.statusBar().showMessage("Drag a rectangle on the board for the heatsink (Esc cancels)")
+        self.statusBar().showMessage(message)
 
-    def _on_heatsink_drawn(self, rect) -> None:
-        """Open the heatsink dialog for a rectangle drawn on the board.
+    def _on_rect_drawn(self, rect) -> None:
+        """Open the heatsink or mesh area dialog for a rectangle drawn on the board.
 
         Args:
             rect: The rectangle, in board coordinates.
         """
         self.statusBar().clearMessage()
-        self._heatsinks_dock.show()
-        self._heatsinks_dock.raise_()
-        self.heatsinks_panel.add_from_rect(rect)
+        if self._draw_target == "heatsink":
+            self._heatsinks_dock.show()
+            self._heatsinks_dock.raise_()
+            self.heatsinks_panel.add_from_rect(rect)
+        else:
+            self._mesh_dock.show()
+            self._mesh_dock.raise_()
+            self.mesh_panel.areas.add_from_rect(self._draw_target, rect)
+
+    def _on_show_mesh_areas_toggled(self, checked: bool) -> None:
+        """Show or hide the mesh areas on the board.
+
+        Args:
+            checked: New state of the panel's "Show mesh areas" checkbox.
+        """
+        if self.scene is not None:
+            self.scene.set_mesh_areas_visible(checked)
+
+    def _show_mesh_areas(self, *_args) -> None:
+        """Redraw the mesh areas on the board and update the areas table's grid frame.
+
+        Args:
+            *_args: Ignored signal arguments.
+        """
+        if self.scene is None:
+            return
+        origin = self.scene.grid_origin()
+        self.mesh_panel.areas.frame.origin = (origin.x(), origin.y())
+        self.mesh_panel.areas.refresh()
+        project = self.document.project
+        self.scene.set_mesh_areas_visible(self.mesh_panel.areas.show_areas.isChecked())
+        self.scene.set_mesh_areas([a for a in project.mesh.areas if a.enabled] if project else [])
 
     def _on_show_heatsinks_toggled(self, checked: bool) -> None:
         """Show or hide the heatsinks, keeping the panel checkbox in sync.

@@ -90,10 +90,11 @@ def _configure(settings: MeshSettings) -> None:
 def _refine_around_holes(
     geom: LayerGeometry, point_tags: dict[tuple[float, float], int], settings: MeshSettings
 ) -> None:
-    """Grade element size up to the max size around holes and concave copper corners.
+    """Grade element size up to the max size around holes, concave copper corners and refine areas.
 
     Corners (where current crowds) start at ``settings.corner_size_mm``; holes
-    start at their edge segment length.
+    start at their edge segment length; refine areas hold their ``size_mm``
+    inside and grade back outside.
 
     Hole edges are much finer than the surrounding copper outlines, and with
     boundary-size propagation off (see :func:`_configure`) gmsh would fill the
@@ -101,8 +102,9 @@ def _refine_around_holes(
     fixes that locally. Holes are grouped by edge segment length so a large
     mounting hole doesn't get a tiny-via-sized field.
 
-    Also lowers ``Mesh.MeshSizeMin`` to the finest hole segment for this layer:
-    ``min_circle_points`` and the corner size take precedence over the minimum size.
+    Also lowers ``Mesh.MeshSizeMin`` to the finest of these for this layer:
+    ``min_circle_points``, the corner size and refine areas take precedence
+    over the minimum size.
 
     Must be called on the current gmsh model after ``synchronize()``.
 
@@ -126,10 +128,22 @@ def _refine_around_holes(
             tag = point_tags.get((round(x, _COORD_DECIMALS), round(y, _COORD_DECIMALS)))
             if tag is not None:
                 groups[settings.corner_size_mm].append(tag)
-    if not groups:
+    areas = settings.active_areas("refine")
+    if not groups and not areas:
         return
 
     fields = []
+    for area in areas:
+        x0, y0, x1, y1 = area.bounds
+        field = gmsh.model.mesh.field.add("Box")
+        for name, value in (("XMin", x0), ("XMax", x1), ("YMin", y0), ("YMax", y1)):
+            gmsh.model.mesh.field.setNumber(field, name, value)
+        gmsh.model.mesh.field.setNumber(field, "VIn", area.size_mm)
+        gmsh.model.mesh.field.setNumber(field, "VOut", settings.max_size_mm)
+        # Grade back to the max size outside, at the same rate as around holes.
+        thickness = max(settings.max_size_mm - area.size_mm, 0) / HOLE_SIZE_GRADING
+        gmsh.model.mesh.field.setNumber(field, "Thickness", thickness)
+        fields.append(field)
     for size, tags in groups.items():
         distance = gmsh.model.mesh.field.add("Distance")
         gmsh.model.mesh.field.setNumbers(distance, "PointsList", tags)
@@ -146,7 +160,8 @@ def _refine_around_holes(
     combined = gmsh.model.mesh.field.add("Min")
     gmsh.model.mesh.field.setNumbers(combined, "FieldsList", fields)
     gmsh.model.mesh.field.setAsBackgroundMesh(combined)
-    gmsh.option.setNumber("Mesh.MeshSizeMin", min(settings.min_size_mm, min(groups)))
+    finest = [*groups, *(a.size_mm for a in areas)]
+    gmsh.option.setNumber("Mesh.MeshSizeMin", min(settings.min_size_mm, *finest))
 
 
 def mesh_layer(geom: LayerGeometry, settings: MeshSettings, z_mm: float) -> LayerMesh:

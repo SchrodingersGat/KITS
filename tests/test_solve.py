@@ -4,6 +4,7 @@ Copper: σ = 5.8e7 S/m, 35 µm thick, so one square of sheet is
 1 / (5.8e7 * 35e-6) = 0.4926 mΩ.
 """
 
+import dataclasses
 import math
 
 import numpy as np
@@ -378,6 +379,30 @@ def test_resistive_element_heat(bridged_board):
         dc, elements=[_element(resistance_ohm=0.01, thermal_resistance_board_k_w=20.0)]
     )
     assert junction.element_temperatures["R1"] > body
+
+
+def test_mesh_options_reach_the_solver(tmp_path):
+    from kits.config import MeshArea
+
+    # P1 and P2 joined only by a 2 mm track on net N.
+    track = '  (segment (start 9 5) (end 41 5) (width 2) (layer "F.Cu") (net 1))\n'
+    path = tmp_path / "track.kicad_pcb"
+    path.write_text(_HEADER + _pad("P1", 7, "F.Cu") + _pad("P2", 43, "F.Cu") + track + ")\n")
+    board = load_board(path)
+    electrodes = [Electrode("P1", "1", current=1.0), Electrode("P2", "1", current=-1.0)]
+    base = MeshSettings(max_size_mm=1.0, min_size_mm=0.1)
+
+    def solve(**options):
+        settings = dataclasses.replace(base, **options)
+        return LayeredModel(board, mesh_board(board, settings)).solve_dc(electrodes)
+
+    # The track's resistance: 32 mm long, 2 mm wide.
+    assert solve().resistance(("P1", "1"), ("P2", "1")) == pytest.approx(R_SQUARE * 32 / 2, rel=0.02)
+    assert solve(tracks="nets", track_nets=("N",)).total_power == pytest.approx(solve().total_power)
+    with pytest.raises(SolveError, match="add the nets carrying this current"):
+        solve(tracks="none")
+    with pytest.raises(SolveError, match="inside a mesh exclusion area"):
+        solve(areas=(MeshArea("X1", "exclude", 40, 1, 6, 8),))
 
 
 def test_solver_paths_agree(bridged_board, monkeypatch):

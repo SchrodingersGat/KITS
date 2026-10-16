@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+import dataclasses
+from collections import Counter
+
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFormLayout,
+    QGroupBox,
     QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -17,6 +25,14 @@ from PySide6.QtWidgets import (
 from ..config import MIN_CIRCLE_POINTS_RANGE, ConfigError, MeshSettings
 from . import colors
 from .document import Document
+from .mesh_areas import MeshAreasWidget
+
+TRACK_MODE_LABELS = {
+    "all": "All tracks",
+    "none": "No tracks (zones, pads, vias only)",
+    "nets": "Only tracks on selected nets",
+}
+_NET_ROLE = Qt.ItemDataRole.UserRole
 
 _MIN_SIZE_MM = 0.001
 _MAX_SIZE_MM = 100.0
@@ -48,6 +64,9 @@ class MeshPanel(QWidget):
     Signals:
         build_requested(): The user asked to build (or rebuild) the mesh.
         show_mesh_toggled(bool): The user toggled the mesh overlay.
+
+    The track choice and mesh areas (see :attr:`areas`) simplify or focus the
+    mesh: leaving out tracks, refining some rectangles, excluding others.
     """
 
     build_requested = Signal()
@@ -92,6 +111,32 @@ class MeshPanel(QWidget):
         )
         self.corner_size.valueChanged.connect(self._on_size_changed)
 
+        self.track_mode = QComboBox()
+        for mode, label in TRACK_MODE_LABELS.items():
+            self.track_mode.addItem(label, mode)
+        self.track_mode.setToolTip(
+            "Which routed tracks and arcs are meshed. Leaving out signal tracks simplifies the mesh;\n"
+            "zone fills, pads, vias and copper graphics are always meshed."
+        )
+        self.track_mode.currentIndexChanged.connect(self._on_size_changed)
+        self.net_filter = QLineEdit()
+        self.net_filter.setPlaceholderText("Filter nets…")
+        self.net_filter.setClearButtonEnabled(True)
+        self.net_filter.textChanged.connect(self._filter_nets)
+        self.nets = QListWidget()
+        self.nets.setToolTip("Nets whose tracks are meshed (track segment counts in brackets)")
+        self.nets.itemChanged.connect(self._on_size_changed)
+        self.areas = MeshAreasWidget(document)
+
+        simplify = QGroupBox("Tracks")
+        simplify_layout = QVBoxLayout(simplify)
+        simplify_layout.addWidget(self.track_mode)
+        simplify_layout.addWidget(self.net_filter)
+        simplify_layout.addWidget(self.nets)
+        areas = QGroupBox("Mesh areas")
+        areas.setToolTip("Rectangles meshed more finely, or left out of the mesh, on every copper layer")
+        QVBoxLayout(areas).addWidget(self.areas)
+
         self.build_button = QPushButton("Build mesh")
         colors.style_action_button(self.build_button, colors.MESH_BUTTON)
         self.build_button.clicked.connect(self.build_requested)
@@ -115,6 +160,8 @@ class MeshPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.addLayout(form)
+        layout.addWidget(simplify)
+        layout.addWidget(areas)
         layout.addWidget(self.settings_error)
         layout.addWidget(self.build_button)
         layout.addWidget(self.show_mesh)
@@ -122,6 +169,7 @@ class MeshPanel(QWidget):
         layout.addStretch(1)
 
         document.project_changed.connect(self._load_settings)
+        document.board_changed.connect(self._load_nets)
         document.board_changed.connect(self._refresh)
         document.settings_changed.connect(self._refresh)
         document.mesh_changed.connect(self._refresh)
@@ -140,14 +188,66 @@ class MeshPanel(QWidget):
         """Return the settings currently entered in the panel.
 
         Returns:
-            The (possibly invalid) settings.
+            The (possibly invalid) settings, with the project's mesh areas
+            (edited through :attr:`areas`).
         """
-        return MeshSettings(
+        project = self._document.project
+        return dataclasses.replace(
+            project.mesh if project else MeshSettings(),
             max_size_mm=self.max_size.value(),
             min_size_mm=self.min_size.value(),
             min_circle_points=self.circle_points.value(),
             corner_size_mm=self.corner_size.value(),
+            tracks=self.track_mode.currentData(),
+            track_nets=tuple(self._checked_nets()),
         )
+
+    def _checked_nets(self) -> list[str]:
+        """The nets ticked in the list, in list order.
+
+        Returns:
+            Net names.
+        """
+        items = (self.nets.item(i) for i in range(self.nets.count()))
+        return [item.data(_NET_ROLE) for item in items if item.checkState() == Qt.CheckState.Checked]
+
+    def _load_nets(self, *_args) -> None:
+        """List the board's nets that have tracks, ticking the project's chosen ones.
+
+        Chosen nets the board no longer has are listed too, so they aren't lost.
+
+        Args:
+            *_args: Ignored signal arguments.
+        """
+        board = self._document.board
+        project = self._document.project
+        chosen = set(project.mesh.track_nets) if project else set()
+        counts = Counter(
+            t.net for t in [*(board.tracks if board else []), *(board.arcs if board else [])] if t.net
+        )
+        self.nets.blockSignals(True)
+        self.nets.clear()
+        for net in sorted(set(counts) | chosen, key=str.casefold):
+            text = f"{net} ({counts[net]})" if net in counts else f"{net} (not on the board)"
+            item = QListWidgetItem(text)
+            item.setData(_NET_ROLE, net)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if net in chosen else Qt.CheckState.Unchecked)
+            self.nets.addItem(item)
+        self.nets.blockSignals(False)
+        self._filter_nets(self.net_filter.text())
+
+    def _filter_nets(self, text: str) -> None:
+        """Show only nets whose name contains the filter text (ticked nets always show).
+
+        Args:
+            text: The filter, case-insensitive.
+        """
+        needle = text.strip().casefold()
+        for i in range(self.nets.count()):
+            item = self.nets.item(i)
+            shown = not needle or needle in item.data(_NET_ROLE).casefold()
+            item.setHidden(not (shown or item.checkState() == Qt.CheckState.Checked))
 
     def _load_settings(self, *_args) -> None:
         """Show the open project's saved settings.
@@ -167,6 +267,10 @@ class MeshPanel(QWidget):
             box.blockSignals(True)
             box.setValue(value)
             box.blockSignals(False)
+        self.track_mode.blockSignals(True)
+        self.track_mode.setCurrentIndex(self.track_mode.findData(settings.tracks))
+        self.track_mode.blockSignals(False)
+        self._load_nets()
         self.settings_error.hide()
         self._refresh()
 
@@ -199,8 +303,14 @@ class MeshPanel(QWidget):
         can_build = board is not None and board.has_outline and valid and not self._busy
         self.build_button.setEnabled(can_build)
         self.build_button.setText("Rebuild mesh" if doc.mesh else "Build mesh")
-        for box in (self.max_size, self.min_size, self.circle_points, self.corner_size):
-            box.setEnabled(doc.project is not None and not self._busy)
+        editable = doc.project is not None and not self._busy
+        for box in (self.max_size, self.min_size, self.circle_points, self.corner_size, self.track_mode):
+            box.setEnabled(editable)
+        by_net = self.track_mode.currentData() == "nets"
+        self.net_filter.setVisible(by_net)
+        self.nets.setVisible(by_net)
+        self.nets.setEnabled(editable)
+        self.areas.setEnabled(editable)
 
         style, lines = "", []
         if board is None:

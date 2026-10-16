@@ -26,6 +26,115 @@ class ConfigError(ValueError):
     """A project file is unreadable or contains invalid values."""
 
 
+# Which routed tracks (and arcs) are meshed: all, none, or only those on chosen nets.
+TRACK_MODES = ("all", "none", "nets")
+# A mesh area either refines the mesh inside it or removes the board there.
+MESH_AREA_KINDS = ("refine", "exclude")
+
+
+@dataclass(frozen=True)
+class MeshArea:
+    """A rectangle where meshing differs, on every copper layer.
+
+    Attributes:
+        name: Unique name among the mesh areas, e.g. ``"A1"``.
+        kind: ``"refine"``: elements inside are at most ``size_mm``.
+            ``"exclude"``: the board is cut away there, like a board cutout
+            (no copper, no conduction; holes touching it are dropped too).
+        x_mm: Left edge, board (KiCad) coordinates in mm.
+        y_mm: Top edge (smallest KiCad Y; KiCad's Y points down), mm.
+        width_mm: Size along X, mm.
+        height_mm: Size along Y, mm.
+        size_mm: Element size inside a refine area, mm (graded back to the max
+            size outside it). May be below the mesh min size. Ignored for exclusions.
+        enabled: False to keep the area in the project without applying it.
+    """
+
+    name: str
+    kind: str
+    x_mm: float
+    y_mm: float
+    width_mm: float
+    height_mm: float
+    size_mm: float = DEFAULT_CORNER_SIZE_MM
+    enabled: bool = True
+
+    @property
+    def bounds(self) -> tuple[float, float, float, float]:
+        """``(x0, y0, x1, y1)`` in board millimetres."""
+        return (self.x_mm, self.y_mm, self.x_mm + self.width_mm, self.y_mm + self.height_mm)
+
+    def validate(self) -> None:
+        """Check the name, kind, rectangle and element size.
+
+        Raises:
+            ConfigError: If the name is empty, the kind unknown, a coordinate not
+                finite, or the size, width or height not a positive finite number.
+        """
+        if not self.name:
+            raise ConfigError("a mesh area needs a name")
+        if self.kind not in MESH_AREA_KINDS:
+            raise ConfigError(f"mesh area {self.name}: kind must be 'refine' or 'exclude'")
+        if not (math.isfinite(self.x_mm) and math.isfinite(self.y_mm)):
+            raise ConfigError(f"mesh area {self.name}: position must be finite")
+        for label, value in (("width", self.width_mm), ("height", self.height_mm), ("size", self.size_mm)):
+            if not (math.isfinite(value) and value > 0):
+                raise ConfigError(f"mesh area {self.name}: {label} must be a positive number")
+
+    def to_dict(self) -> dict:
+        """Return the YAML representation.
+
+        Returns:
+            Mapping of the fields (``size_mm`` only for refine areas, ``enabled`` only when false).
+        """
+        data = {
+            "name": self.name,
+            "kind": self.kind,
+            "x_mm": self.x_mm,
+            "y_mm": self.y_mm,
+            "width_mm": self.width_mm,
+            "height_mm": self.height_mm,
+        }
+        if self.kind == "refine":
+            data["size_mm"] = self.size_mm
+        if not self.enabled:
+            data["enabled"] = False
+        return data
+
+    @classmethod
+    def from_dict(cls, data) -> MeshArea:
+        """Build an area from one entry of the ``mesh: areas:`` list.
+
+        Args:
+            data: The parsed entry.
+
+        Returns:
+            The validated area.
+
+        Raises:
+            ConfigError: If the entry is malformed.
+        """
+        if not isinstance(data, dict):
+            raise ConfigError("each mesh area must be a mapping")
+        try:
+            area = cls(
+                name=str(data["name"]),
+                kind=str(data["kind"]),
+                x_mm=float(data["x_mm"]),
+                y_mm=float(data["y_mm"]),
+                width_mm=float(data["width_mm"]),
+                height_mm=float(data["height_mm"]),
+                size_mm=float(data.get("size_mm", DEFAULT_CORNER_SIZE_MM)),
+                enabled=_enabled_from(data, f"mesh area {data.get('name')}"),
+            )
+        except KeyError as exc:
+            raise ConfigError(f"mesh area is missing {exc.args[0]!r}") from exc
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"invalid mesh area: {exc}") from exc
+        area.validate()
+        return area
+
+
 @dataclass
 class MeshSettings:
     """Mesh resolution settings for the gmsh mesher.
@@ -40,20 +149,81 @@ class MeshSettings:
         corner_size_mm: Element size at concave copper corners (where current
             crowds), graded back to ``max_size_mm`` nearby; 0 turns corner
             refinement off. Takes precedence over ``min_size_mm`` there.
+        tracks: Which routed tracks and arcs are meshed (see :data:`TRACK_MODES`):
+            ``"all"``, ``"none"`` (zones, pads, vias and copper graphics only), or
+            ``"nets"`` (only tracks on ``track_nets``).
+        track_nets: Nets whose tracks are kept when ``tracks`` is ``"nets"``. Kept
+            (but unused) in the other modes, so switching back restores the choice.
+        areas: Refine and exclusion rectangles (:class:`MeshArea`), applied to every layer.
     """
 
     max_size_mm: float = DEFAULT_MESH_MAX_SIZE_MM
     min_size_mm: float = DEFAULT_MESH_MIN_SIZE_MM
     min_circle_points: int = DEFAULT_MIN_CIRCLE_POINTS
     corner_size_mm: float = DEFAULT_CORNER_SIZE_MM
+    tracks: str = "all"
+    track_nets: tuple[str, ...] = ()
+    areas: tuple[MeshArea, ...] = ()
+
+    def keeps_track(self, net: str | None) -> bool:
+        """Whether a track or arc on a net is meshed.
+
+        Args:
+            net: The track's net name (None for no net).
+
+        Returns:
+            True if it is part of the mesh geometry.
+        """
+        if self.tracks == "all":
+            return True
+        return self.tracks == "nets" and net is not None and net in self.track_nets
+
+    def active_areas(self, kind: str) -> list[MeshArea]:
+        """The enabled areas of one kind.
+
+        Args:
+            kind: ``"refine"`` or ``"exclude"``.
+
+        Returns:
+            The areas, in order.
+        """
+        return [a for a in self.areas if a.enabled and a.kind == kind]
+
+    def effective(self) -> MeshSettings:
+        """These settings with what doesn't affect the mesh removed.
+
+        Unused track nets and disabled areas are dropped, so toggling them
+        doesn't make a saved mesh look out of date.
+
+        Returns:
+            A copy holding only what shapes the mesh.
+        """
+        return dataclasses.replace(
+            self,
+            track_nets=self.track_nets if self.tracks == "nets" else (),
+            areas=tuple(a for a in self.areas if a.enabled),
+        )
 
     def validate(self) -> None:
-        """Check the sizes are positive and ordered, and the circle point count is in range.
+        """Check sizes, circle points, the track mode and the areas.
 
         Raises:
-            ConfigError: If a size is not positive, the minimum exceeds the maximum, or
-                ``min_circle_points`` is not an integer in :data:`MIN_CIRCLE_POINTS_RANGE`.
+            ConfigError: If a size is not positive, the minimum exceeds the maximum,
+                ``min_circle_points`` is not an integer in :data:`MIN_CIRCLE_POINTS_RANGE`,
+                the track mode is unknown, or an area is invalid, finer areas exceed
+                the max size, or area names repeat.
         """
+        if self.tracks not in TRACK_MODES:
+            raise ConfigError(f"tracks must be one of {', '.join(TRACK_MODES)}")
+        if not all(isinstance(n, str) for n in self.track_nets):
+            raise ConfigError("track nets must be net names")
+        names = [a.name for a in self.areas]
+        for area in self.areas:
+            area.validate()
+            if names.count(area.name) > 1:
+                raise ConfigError(f"more than one mesh area is named {area.name!r}")
+            if area.kind == "refine" and area.size_mm > self.max_size_mm:
+                raise ConfigError(f"mesh area {area.name}: size must not exceed the max size")
         if not (0 <= self.corner_size_mm <= self.max_size_mm):
             raise ConfigError("corner size must be between 0 (off) and the max size")
         lo, hi = MIN_CIRCLE_POINTS_RANGE
@@ -70,14 +240,23 @@ class MeshSettings:
         """Return the YAML representation of these settings.
 
         Returns:
-            Mapping suitable for the ``mesh:`` section of the config file.
+            Mapping suitable for the ``mesh:`` section of the config file. Track
+            and area options appear only when set, so older projects (and their
+            mesh fingerprints) are unchanged.
         """
-        return {
+        data = {
             "max_size_mm": self.max_size_mm,
             "min_size_mm": self.min_size_mm,
             "min_circle_points": self.min_circle_points,
             "corner_size_mm": self.corner_size_mm,
         }
+        if self.tracks != "all":
+            data["tracks"] = self.tracks
+        if self.track_nets:
+            data["track_nets"] = list(self.track_nets)
+        if self.areas:
+            data["areas"] = [a.to_dict() for a in self.areas]
+        return data
 
     @classmethod
     def from_dict(cls, data: dict | None) -> MeshSettings:
@@ -96,12 +275,22 @@ class MeshSettings:
             return cls()
         if not isinstance(data, dict):
             raise ConfigError("'mesh' must be a mapping")
+        nets = data.get("track_nets") or []
+        areas = data.get("areas") or []
+        if not isinstance(nets, list):
+            raise ConfigError("'track_nets' must be a list of net names")
+        if not isinstance(areas, list):
+            raise ConfigError("'areas' must be a list")
+        areas = tuple(MeshArea.from_dict(a) for a in areas)
         try:
             settings = cls(
                 max_size_mm=float(data.get("max_size_mm", DEFAULT_MESH_MAX_SIZE_MM)),
                 min_size_mm=float(data.get("min_size_mm", DEFAULT_MESH_MIN_SIZE_MM)),
                 min_circle_points=_whole_number(data.get("min_circle_points", DEFAULT_MIN_CIRCLE_POINTS)),
                 corner_size_mm=float(data.get("corner_size_mm", DEFAULT_CORNER_SIZE_MM)),
+                tracks=str(data.get("tracks", "all")),
+                track_nets=tuple(str(n) for n in nets),
+                areas=areas,
             )
         except (TypeError, ValueError) as exc:
             raise ConfigError(f"invalid mesh setting: {exc}") from exc

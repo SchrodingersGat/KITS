@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -114,6 +115,8 @@ class BoardMesh:
             "z_mm": np.array([m.z_mm for m in self.layers]),
             "sizes_mm": np.array([self.settings.max_size_mm, self.settings.min_size_mm]),
             "min_circle_points": np.array(self.settings.min_circle_points),
+            # Everything else (corner size, tracks, areas): the solver needs the exclusions.
+            "settings_json": np.array(json.dumps(self.settings.to_dict())),
             "msh_path": np.array(str(self.msh_path) if self.msh_path else ""),
             "settings_hash": np.array(self.fingerprint.settings),
             "board_hash": np.array(self.fingerprint.board),
@@ -145,9 +148,13 @@ class BoardMesh:
                 )
                 for i, name in enumerate(data["layers"])
             ]
-            max_size, min_size = (float(v) for v in data["sizes_mm"])
-            # Files from before this setting existed are stale anyway (their fingerprint won't match).
-            circle_points = int(data.get("min_circle_points", DEFAULT_MIN_CIRCLE_POINTS))
+            if "settings_json" in data:
+                settings = MeshSettings.from_dict(json.loads(str(data["settings_json"])))
+            else:  # older files: sizes and circle points only
+                max_size, min_size = (float(v) for v in data["sizes_mm"])
+                # Files from before this setting existed are stale anyway (their fingerprint won't match).
+                circle_points = int(data.get("min_circle_points", DEFAULT_MIN_CIRCLE_POINTS))
+                settings = MeshSettings(max_size, min_size, circle_points)
             msh_path = str(data["msh_path"])
             fingerprint = MeshFingerprint(
                 settings=str(data["settings_hash"]) if "settings_hash" in data else "",
@@ -155,7 +162,7 @@ class BoardMesh:
             )
         return cls(
             layers=layers,
-            settings=MeshSettings(max_size, min_size, circle_points),
+            settings=settings,
             msh_path=Path(msh_path) if msh_path else None,
             fingerprint=fingerprint,
         )
@@ -187,4 +194,7 @@ def load_saved_mesh(
     reason = mesh.fingerprint.staleness(current)
     if reason is not None:
         return None, reason
+    # The fingerprint matches, so the mesh was built from these settings; files
+    # from before the full settings were stored only record some of them.
+    mesh.settings = settings
     return mesh, None
