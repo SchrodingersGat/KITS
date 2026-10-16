@@ -43,7 +43,6 @@ heatsinks:
   thermal_resistance_board_k_w: 1.0
   thermal_resistance_ambient_k_w: 10.0
   mount: components
-  enabled: false
 - name: HS2
   side: top
   x_mm: 120.134

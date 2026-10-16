@@ -146,7 +146,7 @@ def test_mesh_and_results_in_3d(app, window, strip_kits):  # noqa: F811
     before = window.view3d.overlays[0].mesh.cell_data["rgb"].copy()
     from kits.gui.field_display import DisplayMode
 
-    window.solve_panel.mode.setCurrentIndex(window.solve_panel.mode.findData(DisplayMode.TEMPERATURE))
+    window.results_panel.mode.setCurrentIndex(window.results_panel.mode.findData(DisplayMode.TEMPERATURE))
     results = next(p for p in window.view3d.overlays if p.key == "results:F.Cu")
     assert results.mesh.n_cells != len(before) or (results.mesh.cell_data["rgb"] != before).any()
     window._on_layer_visibility("F.Cu", False)

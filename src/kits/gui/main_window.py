@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QStackedWidget,
     QToolBar,
+    QWidget,
 )
 
 from .. import __version__
@@ -41,6 +42,7 @@ from .heatsinks_panel import HeatsinksPanel
 from .layer_panel import LayerPanel
 from .mesh_job import MeshJob
 from .mesh_panel import MeshPanel
+from .results_panel import ResultsPanel
 from .settings import AppSettings
 from .settings_dialog import SettingsDialog
 from .solve_job import SolveJob
@@ -58,6 +60,22 @@ _KICAD_FILTER = f"KiCad project or board (*{KICAD_PROJECT_SUFFIX} *{BOARD_SUFFIX
 _KICAD_SUFFIXES = (KICAD_PROJECT_SUFFIX, BOARD_SUFFIX)
 _LAST_DIR_KEY = "paths/last_open_dir"
 _PROGRESS_STEPS = 1000
+
+
+def _scrollable(panel: QWidget) -> QScrollArea:
+    """Wrap a tall dock panel so it scrolls instead of setting the window's minimum height.
+
+    Args:
+        panel: The panel.
+
+    Returns:
+        The scroll area holding it.
+    """
+    scroll = QScrollArea()
+    scroll.setWidget(panel)
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+    return scroll
 
 
 class MainWindow(QMainWindow):
@@ -99,14 +117,14 @@ class MainWindow(QMainWindow):
         self.elements_panel = ElementsPanel(self.document)
         self.heatsinks_panel = HeatsinksPanel(self.document)
         self.solve_panel = SolvePanel(self.document)
+        self.results_panel = ResultsPanel(self.document)
         self._selected_pad: tuple[str, str] | None = None
         self._layer_dock = self._add_dock("Layers", self.layer_panel, Qt.DockWidgetArea.LeftDockWidgetArea)
         self._info_dock = self._add_dock("Board", self.info_panel, Qt.DockWidgetArea.RightDockWidgetArea)
-        mesh_scroll = QScrollArea()  # tall with the track and area options, like the Solve tab
-        mesh_scroll.setWidget(self.mesh_panel)
-        mesh_scroll.setWidgetResizable(True)
-        mesh_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        self._mesh_dock = self._add_dock("Mesh", mesh_scroll, Qt.DockWidgetArea.RightDockWidgetArea)
+        # Tall with the track and area options, like the Solve tab.
+        self._mesh_dock = self._add_dock(
+            "Mesh", _scrollable(self.mesh_panel), Qt.DockWidgetArea.RightDockWidgetArea
+        )
         self._sources_dock = self._add_dock(
             "Current Sources", self.sources_panel, Qt.DockWidgetArea.RightDockWidgetArea
         )
@@ -126,14 +144,16 @@ class MainWindow(QMainWindow):
         self._pad_load_dock = self._sources_dock
         for dock in (self._sources_dock, self._heat_dock, self._elements_dock):
             dock.visibilityChanged.connect(lambda shown, dock=dock: self._on_load_dock_shown(dock, shown))
-        # Scrollable: the Solve tab is tall, and a dock's minimum height would
-        # otherwise set the whole window's minimum size.
-        solve_scroll = QScrollArea()
-        solve_scroll.setWidget(self.solve_panel)
-        solve_scroll.setWidgetResizable(True)
-        solve_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        self._solve_dock = self._add_dock("Solve", solve_scroll, Qt.DockWidgetArea.RightDockWidgetArea)
+        # Scrollable: the Solve and Results tabs are tall, and a dock's minimum
+        # height would otherwise set the whole window's minimum size.
+        self._solve_dock = self._add_dock(
+            "Solve", _scrollable(self.solve_panel), Qt.DockWidgetArea.RightDockWidgetArea
+        )
         self.tabifyDockWidget(self._mesh_dock, self._solve_dock)
+        self._results_dock = self._add_dock(
+            "Results", _scrollable(self.results_panel), Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.tabifyDockWidget(self._solve_dock, self._results_dock)
         self._mesh_dock.raise_()
 
         self._last_cursor: QPointF | None = None
@@ -167,8 +187,8 @@ class MainWindow(QMainWindow):
         for signal in (
             self.document.mesh_changed,
             self.document.results_changed,
-            self.solve_panel.mode_changed,
-            self.solve_panel.log_scale_toggled,
+            self.results_panel.mode_changed,
+            self.results_panel.log_scale_toggled,
             self.show_mesh_action.toggled,
             self.show_results_action.toggled,
         ):
@@ -178,10 +198,10 @@ class MainWindow(QMainWindow):
         self.document.mesh_changed.connect(self._on_mesh_changed)
         self.document.results_changed.connect(self._on_results_changed)
         self.solve_panel.solve_requested.connect(self.solve)
-        self.solve_panel.mode_changed.connect(self._on_display_mode_changed)
-        self.solve_panel.log_scale_toggled.connect(lambda _on: self._on_display_mode_changed())
-        self.solve_panel.show_results_toggled.connect(self.show_results_action.setChecked)
-        self.solve_panel.show_markers_toggled.connect(self.show_markers_action.setChecked)
+        self.results_panel.mode_changed.connect(self._on_display_mode_changed)
+        self.results_panel.log_scale_toggled.connect(lambda _on: self._on_display_mode_changed())
+        self.results_panel.show_results_toggled.connect(self.show_results_action.setChecked)
+        self.results_panel.show_markers_toggled.connect(self.show_markers_action.setChecked)
         self.document.markers_changed.connect(self._show_markers)
         self.sources_panel.show_sources_toggled.connect(self.show_sources_action.setChecked)
         self.heat_panel.show_heat_loads_toggled.connect(self.show_heat_loads_action.setChecked)
@@ -376,7 +396,7 @@ class MainWindow(QMainWindow):
         self.display_mode_box.setToolTip("Result shown on the board (solve first)")
         self.display_mode_box.setEnabled(False)
         self.toolbar.addWidget(self.display_mode_box)
-        panel_mode = self.solve_panel.mode
+        panel_mode = self.results_panel.mode
         self.display_mode_box.setCurrentIndex(panel_mode.currentIndex())
         self.display_mode_box.currentIndexChanged.connect(panel_mode.setCurrentIndex)
         panel_mode.currentIndexChanged.connect(self._sync_display_mode_box)
@@ -441,6 +461,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self._elements_dock.toggleViewAction())
         view_menu.addAction(self._heatsinks_dock.toggleViewAction())
         view_menu.addAction(self._solve_dock.toggleViewAction())
+        view_menu.addAction(self._results_dock.toggleViewAction())
 
         mesh_menu = self.menuBar().addMenu("&Mesh")
         mesh_menu.addAction(self.build_mesh_action)
@@ -951,7 +972,8 @@ class MainWindow(QMainWindow):
         self._finish_solve_job()
         self.document.reload_saved_mesh()
         self.document.set_results(results)
-        self._solve_dock.raise_()
+        self._results_dock.show()
+        self._results_dock.raise_()
         self.statusBar().showMessage(
             f"Solved in {format_duration(took)}: {results.total_power_w:.4g} W, "
             f"max {results.max_temperature_c:.1f} °C",
@@ -980,12 +1002,12 @@ class MainWindow(QMainWindow):
         """
         if self.scene is not None:
             self.scene.set_results(
-                results, self.solve_panel.display_mode, self.solve_panel.log_scale_selected
+                results, self.results_panel.display_mode, self.results_panel.log_scale_selected
             )
             self.scene.set_results_visible(self.show_results_action.isChecked())
             if results is not None:
-                self.solve_panel.set_legend(
-                    self.solve_panel.display_mode, *self.scene.results_range, self.scene.results_log
+                self.results_panel.set_legend(
+                    self.results_panel.display_mode, *self.scene.results_range, self.scene.results_log
                 )
         self._show_markers()
         self._update_probe()
@@ -997,10 +1019,10 @@ class MainWindow(QMainWindow):
             mode: The :class:`~kits.gui.field_display.DisplayMode` to show; the
                 panel's current selection if omitted (e.g. the log scale changed).
         """
-        mode = mode or self.solve_panel.display_mode
+        mode = mode or self.results_panel.display_mode
         if self.scene is not None and self.document.results is not None:
-            self.scene.set_results(self.document.results, mode, self.solve_panel.log_scale_selected)
-            self.solve_panel.set_legend(mode, *self.scene.results_range, self.scene.results_log)
+            self.scene.set_results(self.document.results, mode, self.results_panel.log_scale_selected)
+            self.results_panel.set_legend(mode, *self.scene.results_range, self.scene.results_log)
         self._show_markers()
         self._update_probe()
 
@@ -1010,7 +1032,7 @@ class MainWindow(QMainWindow):
         Args:
             checked: New state of the "Show results" action.
         """
-        self.solve_panel.show_results.setChecked(checked)
+        self.results_panel.show_results.setChecked(checked)
         if self.scene is not None:
             self.scene.set_results_visible(checked)
         self._update_probe()
@@ -1190,8 +1212,8 @@ class MainWindow(QMainWindow):
         self.view3d.set_overlays(
             self.document.mesh,
             self.document.results,
-            self.solve_panel.display_mode,
-            self.solve_panel.log_scale_selected,
+            self.results_panel.display_mode,
+            self.results_panel.log_scale_selected,
         )
         self.view3d.set_overlay_visible(
             self.show_mesh_action.isChecked(), self.show_results_action.isChecked()
@@ -1556,7 +1578,7 @@ class MainWindow(QMainWindow):
         Args:
             checked: New state of the "Show markers" action.
         """
-        self.solve_panel.show_markers.setChecked(checked)
+        self.results_panel.show_markers.setChecked(checked)
         if self.scene is not None:
             self.scene.set_markers_visible(checked)
 
@@ -1574,7 +1596,7 @@ class MainWindow(QMainWindow):
             for (x, y), value in zip(points, self.scene.marker_labels, strict=True):
                 gx, gy = self.scene.to_grid_coords(x, y)
                 rows.append((f"{gx:.3f}, {gy:.3f}", value))
-        self.solve_panel.set_markers(rows)
+        self.results_panel.set_markers(rows)
 
     def _show_sources(self, *_args) -> None:
         """Redraw the current source markers on the board.

@@ -489,9 +489,10 @@ def test_solve_in_child_process_shows_overlay_and_reloads(app, window, strip_kit
     from kits.gui.field_display import DisplayMode
 
     assert window.open_path(strip_kits)
-    panel = window.solve_panel
+    panel, shown = window.solve_panel, window.results_panel
     assert panel.solve_button.isEnabled() and window.solve_action.isEnabled()
-    assert window.document.results is None and not panel.legend.isVisibleTo(panel)
+    assert window.document.results is None and not shown.legend.isVisibleTo(shown)
+    assert "No results yet" in shown.summary.text()
 
     window.solve()
     assert window.solve_job_running and not panel.solve_button.isEnabled()
@@ -503,19 +504,22 @@ def test_solve_in_child_process_shows_overlay_and_reloads(app, window, strip_kit
     assert window.document.mesh is not None  # the mesh the solver built is picked up
     scene = window.scene
     assert scene.results_overlay_visible("F.Cu")
-    assert "Joule power" in panel.status.text() and "P1.1" in panel.status.text()
-    assert panel.legend_high.text().startswith("≥") and "A/mm²" in panel.legend_high.text()
+    # The results are summarised in the Results tab (not the Solve tab), which is brought forward.
+    assert "Joule power" in shown.summary.text() and "P1.1" in shown.summary.text()
+    assert "Joule power" not in panel.status.text()
+    assert not window._results_dock.isHidden()
+    assert shown.legend_high.text().startswith("≥") and "A/mm²" in shown.legend_high.text()
 
     # Display modes rescale the overlay; the legend follows.
-    panel.mode.setCurrentIndex(panel.mode.findData(DisplayMode.TEMPERATURE))
+    shown.mode.setCurrentIndex(shown.mode.findData(DisplayMode.TEMPERATURE))
     low, high = scene.results_range
-    assert 25 <= low < high and "°C" in panel.legend_high.text()
-    panel.mode.setCurrentIndex(panel.mode.findData(DisplayMode.VOLTAGE))
+    assert 25 <= low < high and "°C" in shown.legend_high.text()
+    shown.mode.setCurrentIndex(shown.mode.findData(DisplayMode.VOLTAGE))
     assert scene.results_range[0] == pytest.approx(0.0, abs=1e-9)
 
     # Toggle like the mesh; only the active layer is shown.
     window.show_results_action.trigger()
-    assert not scene.results_overlay_visible("F.Cu") and not panel.show_results.isChecked()
+    assert not scene.results_overlay_visible("F.Cu") and not shown.show_results.isChecked()
     window.show_results_action.trigger()
     scene.set_active_layer("B.Cu")
     assert not scene.results_overlay_visible("F.Cu")
@@ -633,12 +637,12 @@ def test_status_bar_shows_value_under_cursor(app, window, strip_kits):
     assert value == pytest.approx(5 / (6 * 0.035), rel=0.01)
 
     # Changing the display mode updates the readout without moving the mouse.
-    window.solve_panel.mode.setCurrentIndex(window.solve_panel.mode.findData(DisplayMode.TEMPERATURE))
+    window.results_panel.mode.setCurrentIndex(window.results_panel.mode.findData(DisplayMode.TEMPERATURE))
     assert "Temperature:" in label.text() and label.text().endswith("°C")
 
     window._on_cursor_moved(25.0, 9.5)  # bare board beside the strip: temperature still shown
     assert "Temperature:" in label.text()
-    window.solve_panel.mode.setCurrentIndex(window.solve_panel.mode.findData(DisplayMode.VOLTAGE))
+    window.results_panel.mode.setCurrentIndex(window.results_panel.mode.findData(DisplayMode.VOLTAGE))
     assert label.text() == ""  # voltage is copper-only
     window._on_cursor_moved(80.0, 80.0)  # off the board
     assert label.text() == ""
@@ -682,7 +686,7 @@ def test_layers_panel_overlay_toggles(app, window, strip_kits):
     # Menu actions / other panels -> checkbox.
     window.show_mesh_action.trigger()
     assert boxes["Mesh"].isChecked() and scene.mesh_overlay_visible("F.Cu")
-    window.solve_panel.show_results.setChecked(True)
+    window.results_panel.show_results.setChecked(True)
     assert boxes["Results"].isChecked() and scene.results_overlay_visible("F.Cu")
     window.sources_panel.show_sources.setChecked(True)
     assert boxes["Current sources"].isChecked()
@@ -705,7 +709,7 @@ def test_log_scale_option(app, window, strip_kits):
     from kits.gui.field_display import DisplayMode
 
     assert window.open_path(strip_kits)
-    panel = window.solve_panel
+    panel = window.results_panel
     assert not panel.log_scale.isEnabled()  # no results yet
     window.solve()
     _wait(app, lambda: not window.solve_job_running)
@@ -733,7 +737,7 @@ def test_markers(app, window, strip_kits):
     assert window.open_path(strip_kits)
     window.build_mesh()
     _wait(app, lambda: not window.mesh_job_running)
-    doc, scene, panel = window.document, window.scene, window.solve_panel
+    doc, scene, panel = window.document, window.scene, window.results_panel
 
     window._on_board_clicked(QPointF(25.0, 5.0))  # no results yet: no marker
     assert doc.markers == []
@@ -878,7 +882,7 @@ def test_heat_loads_panel(app, window, strip_kits):
     results = doc.results
     assert results is not None and results.load_heat["P2.1"] == 3.0
     assert results.load_heat["P1.1"] < 0  # the 10 K/W heatsink takes some of it out
-    assert "Heat loads" in window.solve_panel.status.text()
+    assert "Heat loads" in window.results_panel.summary.text()
     assert load_kits_project(strip_kits).heat_loads == doc.heat_loads  # saved before solving
 
     # Remove via the panel; editing a load makes the results stale.
@@ -978,17 +982,18 @@ def test_resistive_elements_panel(app, window, bridged_kits, monkeypatch):
     assert results.element_currents["Shunt"] == pytest.approx(5.0, rel=1e-6)
     assert results.element_power["Shunt"] == pytest.approx(25 * 5e-3, rel=1e-6)
     assert results.element_temperatures["Shunt"] > 25.0
-    assert "Shunt" in window.solve_panel.status.text()
+    assert "Shunt" in window.results_panel.summary.text()
+    assert "Results tab" in window.solve_panel.status.text()  # the Solve tab points there
     # The body is drawn on the temperature map of its side (F.Cu), and the scale covers it.
     from kits.gui.field_display import DisplayMode
 
     scene = window.scene
-    mode = window.solve_panel.mode
+    mode = window.results_panel.mode
     # The toolbar drop-down switches the display, and follows the panel's choice.
     box = window.display_mode_box
     assert box.isEnabled()
     box.setCurrentIndex(box.findData(DisplayMode.VOLTAGE))
-    assert window.solve_panel.display_mode is DisplayMode.VOLTAGE
+    assert window.results_panel.display_mode is DisplayMode.VOLTAGE
     mode.setCurrentIndex(mode.findData(DisplayMode.TEMPERATURE))
     assert box.currentData() is DisplayMode.TEMPERATURE
     scene.set_active_layer("F.Cu")
@@ -1087,7 +1092,7 @@ def test_heatsinks_panel(app, window, strip_kits, monkeypatch):
         lambda: not window.solve_job_running and doc.results is not None and doc.results_staleness is None,
     )
     assert doc.results.heatsink_heat["HS1"] > 0
-    assert "Heatsinks" in window.solve_panel.status.text()
+    assert "Heatsinks" in window.results_panel.summary.text()
     assert load_kits_project(strip_kits).heatsinks == doc.heatsinks
 
     # 3D: a block under the board.
