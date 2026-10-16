@@ -1082,6 +1082,47 @@ def test_toolbar_quick_actions(window, kits_v9_path):
     assert window.toolbar.toggleViewAction() in view_menu.actions()  # can be hidden from the View menu
 
 
+def test_pass_fail_limits(app, window, strip_kits):
+    assert window.open_path(strip_kits)
+    solve, shown = window.solve_panel, window.results_panel
+    window.solve()
+    _wait(app, lambda: not window.solve_job_running)
+    results = window.document.results
+    assert shown.verdict.isHidden() and window._verdict_label.isHidden()  # no limits yet
+    assert shown._table_groups["limits"].isHidden()
+
+    # Set limits on the Solve tab: a generous current density, a temperature just under the max.
+    checks, values = solve.limit_checks, solve.limit_values
+    assert not values["max_temperature_c"].isEnabled()
+    checks["max_current_density_a_mm2"].setChecked(True)
+    values["max_current_density_a_mm2"].setValue(1000.0)
+    checks["max_temperature_c"].setChecked(True)
+    values["max_temperature_c"].setValue(results.max_temperature_c - 0.5)
+    doc = window.document
+    assert doc.limits.max_current_density_a_mm2 == 1000.0 and doc.dirty
+    # Judged straight away, without solving again: the results stay current.
+    assert doc.results_staleness is None
+    rows = shown.table_rows("limits")
+    assert [row[1] for row in rows] == ["PASS", "FAIL"]
+    assert rows[1][0].startswith("Temperature ≤") and rows[1][3].startswith("-")  # negative margin
+    assert shown.verdict.text() == "FAIL" and not shown.verdict.isHidden()
+    assert window._verdict_label.text().strip() == "FAIL" and "Temperature" in window._verdict_label.toolTip()
+
+    values["max_temperature_c"].setValue(results.max_temperature_c + 5)
+    assert shown.verdict.text() == "PASS" and window._verdict_label.text().strip() == "PASS"
+    # Switching a limit off drops it.
+    checks["max_current_density_a_mm2"].setChecked(False)
+    assert doc.limits.max_current_density_a_mm2 is None and len(shown.table_rows("limits")) == 1
+
+    assert window.save()
+    assert load_kits_project(strip_kits).limits == doc.limits
+    # Reopened: the limits are shown on the Solve tab again.
+    window.close_project()
+    assert window.open_path(strip_kits)
+    assert checks["max_temperature_c"].isChecked() and not checks["max_current_density_a_mm2"].isChecked()
+    assert values["max_temperature_c"].value() == pytest.approx(round(results.max_temperature_c + 5, 1))
+
+
 def test_generate_report_from_toolbar_and_results_tab(app, window, strip_kits, tmp_path, monkeypatch):
     assert window.open_path(strip_kits)
     action, button = window.report_action, window.results_panel.report_button

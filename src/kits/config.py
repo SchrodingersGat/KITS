@@ -1216,6 +1216,84 @@ class SolveSettings:
         return settings
 
 
+@dataclass(frozen=True)
+class Limits:
+    """Pass/fail thresholds a solve is checked against (stored as ``limits:``).
+
+    Attributes:
+        max_current_density_a_mm2: Highest acceptable current density, A/mm², or
+            None for no check. Compared with the peak excluding corner spikes
+            (see :func:`kits.postprocess.limits.peak_current_density`).
+        max_temperature_c: Highest acceptable temperature anywhere on the board or
+            any element body, °C, or None for no check.
+    """
+
+    max_current_density_a_mm2: float | None = None
+    max_temperature_c: float | None = None
+
+    @property
+    def any(self) -> bool:
+        """Whether any limit is set."""
+        return self.max_current_density_a_mm2 is not None or self.max_temperature_c is not None
+
+    def validate(self) -> None:
+        """Check the thresholds.
+
+        Raises:
+            ConfigError: If the current density limit isn't a positive finite number,
+                or the temperature limit isn't finite or is below absolute zero.
+        """
+        j = self.max_current_density_a_mm2
+        if j is not None and not (math.isfinite(j) and j > 0):
+            raise ConfigError("the current density limit must be a positive number")
+        t = self.max_temperature_c
+        if t is not None and not (math.isfinite(t) and t > ABSOLUTE_ZERO_C):
+            raise ConfigError("the temperature limit must be above absolute zero")
+
+    def to_dict(self) -> dict:
+        """Return the YAML representation.
+
+        Returns:
+            Mapping of the limits that are set (empty if none).
+        """
+        data = {}
+        if self.max_current_density_a_mm2 is not None:
+            data["max_current_density_a_mm2"] = self.max_current_density_a_mm2
+        if self.max_temperature_c is not None:
+            data["max_temperature_c"] = self.max_temperature_c
+        return data
+
+    @classmethod
+    def from_dict(cls, data) -> Limits:
+        """Build limits from the ``limits:`` section.
+
+        Args:
+            data: The parsed mapping, or None if the section is absent.
+
+        Returns:
+            The validated limits.
+
+        Raises:
+            ConfigError: If the section isn't a mapping or holds invalid values.
+        """
+        data = _mapping(data, "limits")
+        try:
+            limits = cls(
+                max_current_density_a_mm2=(
+                    None
+                    if data.get("max_current_density_a_mm2") is None
+                    else float(data["max_current_density_a_mm2"])
+                ),
+                max_temperature_c=None
+                if data.get("max_temperature_c") is None
+                else float(data["max_temperature_c"]),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"invalid limit: {exc}") from exc
+        limits.validate()
+        return limits
+
+
 def _mapping(value, name: str) -> dict:
     """Return a config section as a dict, treating a missing section as empty.
 

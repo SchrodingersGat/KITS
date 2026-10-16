@@ -9,6 +9,7 @@ import dataclasses
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -19,12 +20,33 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..config import ConfigError, SolveSettings
+from ..config import ConfigError, Limits, SolveSettings
 from . import colors
 from .document import Document
 
 _BALANCE_TOLERANCE_A = 1e-9
 VIA_FILL_LABELS = {"none": "Unfilled", "resin": "Resin", "copper": "Copper"}
+
+# Pass/fail limits: (Limits attribute, label, unit, range, value offered when switched on, tip).
+_LIMIT_FIELDS = (
+    (
+        "max_current_density_a_mm2",
+        "Current density ≤",
+        " A/mm²",
+        (0.1, 10_000.0),
+        35.0,
+        "Fail if the current density exceeds this over more than 0.5% of the copper area. The very\n"
+        "highest values sit at sharp inside corners and depend on the mesh, so they're left out.",
+    ),
+    (
+        "max_temperature_c",
+        "Temperature ≤",
+        " °C",
+        (-200.0, 1_000.0),
+        105.0,
+        "Fail if any point of the board, or any element body, is hotter than this.",
+    ),
+)
 _WARNING_STYLE = "color: #e0a030;"
 _ERROR_STYLE = "color: #e05050;"
 
@@ -165,6 +187,7 @@ class SolvePanel(QWidget):
         layout.addWidget(self.solve_button)
         layout.addWidget(self.status)
         layout.addWidget(self.settings_group)
+        layout.addWidget(self._build_limits())
         layout.addStretch(1)
 
         for signal in (
@@ -182,6 +205,80 @@ class SolvePanel(QWidget):
         document.project_changed.connect(self._load_settings)
         self._load_settings()
         self.refresh()
+
+    def _build_limits(self) -> QGroupBox:
+        """Create the pass/fail limits editor: a checkbox and value per limit.
+
+        Returns:
+            The group box.
+        """
+        self.limit_checks: dict[str, QCheckBox] = {}
+        self.limit_values: dict[str, QDoubleSpinBox] = {}
+        form = QFormLayout()
+        for name, label, unit, (low, high), default, tip in _LIMIT_FIELDS:
+            check = QCheckBox(label)
+            check.setToolTip(tip)
+            box = QDoubleSpinBox()
+            box.setRange(low, high)
+            box.setDecimals(1)
+            box.setSuffix(unit)
+            box.setValue(default)
+            box.setKeyboardTracking(False)
+            box.setToolTip(tip)
+            check.toggled.connect(box.setEnabled)
+            check.toggled.connect(self._on_limits_edited)
+            box.valueChanged.connect(self._on_limits_edited)
+            self.limit_checks[name], self.limit_values[name] = check, box
+            form.addRow(check, box)
+        note = QLabel(
+            "Checked against the results without solving again; the Results tab shows pass or fail."
+        )
+        note.setWordWrap(True)
+        note.setEnabled(False)
+        form.addRow(note)
+        self.limits_group = QGroupBox("Pass/fail limits")
+        self.limits_group.setLayout(form)
+        return self.limits_group
+
+    def limits(self) -> Limits:
+        """The limits as entered.
+
+        Returns:
+            The limits (unchecked ones are off).
+        """
+        values = {
+            name: self.limit_values[name].value() if self.limit_checks[name].isChecked() else None
+            for name in self.limit_checks
+        }
+        return Limits(**values)
+
+    def _load_limits(self) -> None:
+        """Show the open project's limits."""
+        limits = self._document.limits
+        for name, _label, _unit, _range, default, _tip in _LIMIT_FIELDS:
+            value = getattr(limits, name)
+            check, box = self.limit_checks[name], self.limit_values[name]
+            for widget in (check, box):
+                widget.blockSignals(True)
+            check.setChecked(value is not None)
+            box.setValue(default if value is None else value)
+            box.setEnabled(value is not None)
+            for widget in (check, box):
+                widget.blockSignals(False)
+
+    def _on_limits_edited(self, *_args) -> None:
+        """Store the edited limits in the project (unsaved until File > Save).
+
+        Args:
+            *_args: Ignored signal arguments.
+        """
+        if self._document.project is None:
+            return
+        try:
+            self._document.set_limits(self.limits())
+        except ConfigError as exc:
+            self.settings_error.setText(str(exc))
+            self.settings_error.show()
 
     def _build_via_fill(self) -> QComboBox:
         """Create the via fill selector.
@@ -250,6 +347,7 @@ class SolvePanel(QWidget):
         self.via_fill.setCurrentIndex(self.via_fill.findData(settings.via_fill))
         self.via_fill.blockSignals(False)
         self._update_resin_enabled()
+        self._load_limits()
         self.settings_error.hide()
 
     def _on_setting_edited(self, name: str, value: float) -> None:
@@ -330,3 +428,4 @@ class SolvePanel(QWidget):
         self.status.setStyleSheet(style)
         self.status.setText("\n".join(lines))
         self.settings_group.setEnabled(doc.project is not None and not self._busy)
+        self.limits_group.setEnabled(doc.project is not None)

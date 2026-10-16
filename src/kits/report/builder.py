@@ -37,6 +37,7 @@ from ..postprocess.fields import (
     supports_log,
     value_range,
 )
+from ..postprocess.limits import CURRENT_DENSITY_AREA_PERCENTILE, check_limits, verdict
 from ..project import KitsProject
 from ..solve.elements import default_ambient_conductance, default_body_thermal, terminal_thermal_resistances
 from ..solve.results import SolveResults
@@ -278,6 +279,28 @@ def _tables(project: KitsProject, board: Board, results: SolveResults) -> str:
         The sections' HTML.
     """
     sections = []
+    checks = check_limits(results, project.limits)
+    sections.append(
+        _table(
+            "Pass/fail limits",
+            "The project's limits. Current density is the peak over "
+            f"{CURRENT_DENSITY_AREA_PERCENTILE:g}% of the copper area: sharp inside corners have "
+            "mesh-dependent spikes.",
+            ["Check", "Limit", "Value", "Where", "Margin", "Result"],
+            [
+                [
+                    _e(c.quantity),
+                    _num(c.limit, c.unit),
+                    _num(c.value, c.unit),
+                    _e(c.where),
+                    _num(c.margin, c.unit, 3, signed=True),
+                    f'<b class="{"pass" if c.passed else "fail"}">{"PASS" if c.passed else "FAIL"}</b>',
+                ]
+                for c in checks
+            ],
+            numeric={1, 2, 4, 5},
+        )
+    )
     multiplier = project.current_multiplier
     sources = [
         [
@@ -605,6 +628,7 @@ def report_data(
         "project": str(project.path),
         "board": str(board.path),
         "staleness": staleness,
+        "verdict": verdict(check_limits(results, project.limits)),
         "summary": {
             "power": results.total_power_w,
             "max_temperature": results.max_temperature_c,

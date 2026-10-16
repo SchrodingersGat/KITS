@@ -28,6 +28,7 @@ from .config import (
     CurrentSource,
     HeatLoad,
     Heatsink,
+    Limits,
     MeshSettings,
     ResistiveElement,
     SolveSettings,
@@ -70,6 +71,7 @@ class KitsProject:
         stackup_edits: Layer thicknesses changed from the board file, or None.
         heatsinks: Heatsinks placed on the board faces.
         solve: Materials, convection and ambient temperature for the solver.
+        limits: Pass/fail thresholds the results are checked against.
         extra: Top-level keys KITS doesn't interpret yet, kept so saving doesn't drop them.
     """
 
@@ -83,6 +85,7 @@ class KitsProject:
     stackup_edits: StackupEdits | None = None
     heatsinks: list[Heatsink] = field(default_factory=list)
     solve: SolveSettings = field(default_factory=SolveSettings)
+    limits: Limits = field(default_factory=Limits)
     extra: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -202,6 +205,8 @@ class KitsProject:
             data["heatsinks"] = [h.to_dict() for h in self.heatsinks]
         if self.resistive_elements:
             data["resistive_elements"] = [e.to_dict() for e in self.resistive_elements]
+        if self.limits.any:
+            data["limits"] = self.limits.to_dict()
         data.update({k: v for k, v in self.extra.items() if k not in data})
         return data
 
@@ -219,6 +224,7 @@ class KitsProject:
         """
         self.mesh.validate()
         self.solve.validate()
+        self.limits.validate()
         for source in self.current_sources:
             source.validate()
         current_multiplier_from_value(self.current_multiplier)
@@ -288,6 +294,7 @@ def load_kits_project(path: str | Path) -> KitsProject:
     solve = SolveSettings.from_sections(
         data.pop("ambient_temperature_c", None), data.pop("materials", None), data.pop("convection", None)
     )
+    limits = Limits.from_dict(data.pop("limits", None))
     return KitsProject(
         path=path,
         board=(path.parent / board) if board else None,
@@ -299,6 +306,7 @@ def load_kits_project(path: str | Path) -> KitsProject:
         heatsinks=heatsinks,
         stackup_edits=stackup_edits,
         solve=solve,
+        limits=limits,
         extra=data,
     )
 

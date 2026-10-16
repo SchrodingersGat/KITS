@@ -37,6 +37,7 @@ from ..ingest import BoardLoadError, Project
 from ..ingest.kicad import BOARD_SUFFIX
 from ..ingest.kicad import PROJECT_SUFFIX as KICAD_PROJECT_SUFFIX
 from ..mesh.model import BoardMesh
+from ..postprocess.limits import check_limits, verdict
 from ..project import PROJECT_SUFFIX, KitsProject, default_project_path
 from . import colors
 from .board_info import BoardInfoPanel
@@ -51,7 +52,7 @@ from .layer_panel import LayerPanel, swatch
 from .mesh_job import MeshJob
 from .mesh_panel import MeshPanel
 from .report_job import ReportJob
-from .results_panel import ResultsPanel
+from .results_panel import FAIL_COLOR, PASS_COLOR, ResultsPanel
 from .settings import AppSettings
 from .settings_dialog import SettingsDialog
 from .solve_job import SolveJob
@@ -172,6 +173,8 @@ class MainWindow(QMainWindow):
         self._last_cursor: QPointF | None = None
         self._click_marker: int | None = None  # marker added by the latest click
         self._draw_target = "heatsink"  # what a rectangle drawn on the board is for
+        self._verdict_label = QLabel()  # PASS / FAIL against the project's limits
+        self.statusBar().addPermanentWidget(self._verdict_label)
         self._max_temperature_label = QLabel()  # highest temperature in the results
         self.statusBar().addPermanentWidget(self._max_temperature_label)
         self._probe_label = QLabel()
@@ -223,6 +226,7 @@ class MainWindow(QMainWindow):
             self.document.stackup_changed,
             self.document.heatsinks_changed,
             self.document.settings_changed,
+            self.document.limits_changed,
         ):
             signal.connect(self._update_max_temperature)
         self.solve_panel.solve_requested.connect(self.solve)
@@ -1202,6 +1206,30 @@ class MainWindow(QMainWindow):
         self._finish_report_job()
         self.statusBar().showMessage("Report cancelled", 5000)
 
+    def _update_verdict(self) -> None:
+        """Show PASS / FAIL against the project's limits in the status bar (hidden without both)."""
+        label = self._verdict_label
+        results = self.document.results
+        checks = check_limits(results, self.document.limits) if results is not None else []
+        passed = verdict(checks)
+        if passed is None:
+            label.hide()
+            return
+        color = PASS_COLOR if passed else FAIL_COLOR
+        label.setText(" PASS " if passed else " FAIL ")
+        label.setStyleSheet(
+            f"background: {color.name()}; color: white; font-weight: bold; border-radius: 3px;"
+        )
+        lines = [
+            f"{c.quantity}: {c.value:.4g} {c.unit} (limit {c.limit:g} {c.unit}, {c.where}) "
+            f"{'PASS' if c.passed else 'FAIL'}"
+            for c in checks
+        ]
+        if self.document.results_staleness:
+            lines.append("The results are out of date; solve again to update.")
+        label.setToolTip("\n".join(lines))
+        label.show()
+
     def _update_max_temperature(self, *_args) -> None:
         """Show the results' highest temperature in the status bar, and where it is.
 
@@ -1210,6 +1238,7 @@ class MainWindow(QMainWindow):
         """
         label = self._max_temperature_label
         results = self.document.results
+        self._update_verdict()
         if results is None:
             label.clear()
             label.setToolTip("")

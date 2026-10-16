@@ -8,7 +8,8 @@ elements, and saves the results to
 with ``--progress``; the output protocol matches ``kits-mesh``:
 
 * ``{"progress": 0.42, "message": "..."}`` while running;
-* ``{"done": true, "results": "<path>", "mesh": "<path>", "power_w": P, "max_temperature_c": T}``;
+* ``{"done": true, "results": "<path>", "mesh": "<path>", "power_w": P, "max_temperature_c": T,
+  "passed": true | false | null}`` (``passed``: against the project's limits; null if it has none);
 * ``{"error": "..."}`` on failure (exit status 1).
 """
 
@@ -27,6 +28,7 @@ from ..mesh.fingerprint import board_hash
 from ..mesh.geometry import GeometryError
 from ..mesh.mesher import MeshError, mesh_board
 from ..mesh.model import load_saved_mesh
+from ..postprocess.limits import check_limits, verdict
 from ..project import PROJECT_SUFFIX, load_kits_project
 from .results import LayerResult, SolveResults, inputs_hash
 from .solver import Electrode, LayeredModel, SolveError
@@ -179,7 +181,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    summary = {"power_w": results.total_power_w, "max_temperature_c": results.max_temperature_c}
+    checks = check_limits(results, load_kits_project(args.project).limits)
+    passed = verdict(checks)
+    summary = {
+        "power_w": results.total_power_w,
+        "max_temperature_c": results.max_temperature_c,
+        "passed": passed,  # against the project's limits; None if it has none
+    }
     if args.progress:
         _emit({"done": True, "results": str(results_path), "mesh": str(mesh_path), **summary})
     else:
@@ -195,6 +203,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {name}: {current:+.4g} A, {power:.4g} W, body {temperature:.2f} C")
         for name, temperature in results.heatsink_temperatures.items():
             print(f"  heatsink {name}: {results.heatsink_heat[name]:.4g} W at {temperature:.2f} C")
+        for c in checks:
+            unit = c.unit.replace("°", "")  # plain text for any console
+            print(
+                f"  limit: {c.quantity} {c.value:.4g} {unit} (max {c.limit:g} {unit}, {c.where}) "
+                f"{'PASS' if c.passed else 'FAIL'}"
+            )
+        if passed is not None:
+            print(f"Result: {'PASS' if passed else 'FAIL'}")
     return 0
 
 

@@ -21,6 +21,7 @@ from ..config import (
     HeatLoad,
     HeatLoadKind,
     Heatsink,
+    Limits,
     MeshSettings,
     ResistiveElement,
     SolveSettings,
@@ -47,6 +48,7 @@ class Document(QObject):
         elements_changed(): Resistive elements were added, edited or removed.
         stackup_changed(): A layer thickness was edited or the edits were reset.
         heatsinks_changed(): Heatsinks were added, edited or removed.
+        limits_changed(): The pass/fail limits were edited.
         dirty_changed(bool): The project gained or lost unsaved changes.
         mesh_changed(BoardMesh | None): A mesh was built, or cleared.
         results_changed(SolveResults | None): A solve finished, or results were cleared.
@@ -61,6 +63,7 @@ class Document(QObject):
     elements_changed = Signal()
     stackup_changed = Signal()
     heatsinks_changed = Signal()
+    limits_changed = Signal()
     dirty_changed = Signal(bool)
     mesh_changed = Signal(object)
     results_changed = Signal(object)
@@ -872,6 +875,30 @@ class Document(QObject):
         project.solve = settings
         self._set_dirty(True)
         self.settings_changed.emit()
+
+    @property
+    def limits(self) -> Limits:
+        """The open project's pass/fail limits (none if no project)."""
+        return self._project.limits if self._project else Limits()
+
+    def set_limits(self, limits: Limits) -> None:
+        """Change the project's pass/fail limits (in memory; save to persist).
+
+        They don't affect the results, only how they're judged, so the results stay current.
+
+        Args:
+            limits: The new limits.
+
+        Raises:
+            ConfigError: If no project is open or the limits are invalid.
+        """
+        project = self._require_project()
+        limits.validate()
+        if limits == project.limits:
+            return
+        project.limits = limits
+        self._set_dirty(True)
+        self.limits_changed.emit()
 
     def set_mesh_settings(self, settings: MeshSettings) -> None:
         """Change the project's mesh settings (in memory; save to persist).

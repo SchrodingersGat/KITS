@@ -22,6 +22,9 @@ materials:
     thermal_conductivity_w_mk: 0.3
   solder_mask:
     thermal_conductivity_w_mk: 0.25
+  via_fill:
+    type: none
+    thermal_conductivity_w_mk: 0.3
 convection:
   top_w_m2k: 10.0
   bottom_w_m2k: 10.0
@@ -52,7 +55,7 @@ heatsinks:
 resistive_elements:
 - name: R1
   ref: R1
-  resistance_ohm: 2.0
+  resistance_ohm: 1.0
   pads_a:
     name: Net-(J2-Pin_1)
     pads:
@@ -61,3 +64,5 @@ resistive_elements:
     name: Net-(J1-Pin_1)
     pads:
     - '2'
+limits:
+  max_temperature_c: 50.0

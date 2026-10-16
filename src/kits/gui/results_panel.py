@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QKeySequence, QLinearGradient, QPainter, QPixmap, QShortcut
+from PySide6.QtGui import QColor, QKeySequence, QLinearGradient, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..postprocess.limits import check_limits, verdict
 from .document import Document
 from .field_display import (
     CURRENT_DENSITY_PERCENTILE,
@@ -34,10 +35,13 @@ from .field_display import (
 _WARNING_STYLE = "color: #e0a030;"
 _LEGEND_SIZE = (220, 14)
 _NUMBER = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+PASS_COLOR = QColor(22, 163, 74)
+FAIL_COLOR = QColor(220, 38, 38)
 
 # Results tables: key -> (title, column headings). The first column names the item;
 # the rest are right-aligned numbers.
 RESULT_TABLES = {
+    "limits": ("Pass/fail limits", ["Check", "Result", "Value", "Margin"]),
     "sources": ("Current sources", ["Pad", "Current", "Voltage"]),
     "loads": ("Heat loads", ["Pad", "Heat into board", "Pad temperature"]),
     "elements": (
@@ -47,6 +51,10 @@ RESULT_TABLES = {
     "heatsinks": ("Heatsinks", ["Heatsink", "Heat", "Temperature"]),
 }
 _TABLE_TIPS = {
+    "limits": (
+        "The results against the project's limits (set on the Solve tab). Current density is the peak\n"
+        "over 99.5% of the copper area: sharp inside corners have mesh-dependent spikes."
+    ),
     "sources": "Current into the board at each source pad (negative: a sink), and the pad's voltage",
     "loads": "Heat into the board at each heat load's pad (negative: taken out), and its mean temperature",
     "elements": (
@@ -123,6 +131,10 @@ class ResultsPanel(QWidget):
         self.summary = QLabel()
         self.summary.setWordWrap(True)
         self.summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        # Overall PASS / FAIL against the project's limits (hidden without limits or results).
+        self.verdict = QLabel()
+        self.verdict.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.verdict.hide()
         self.report_button = QPushButton("Generate report…")
         self.report_button.setToolTip(
             "Save an HTML report: layer-by-layer maps of each result (hover for values) and every "
@@ -184,6 +196,7 @@ class ResultsPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.addWidget(self.summary)
+        layout.addWidget(self.verdict)
         layout.addWidget(self.report_button)
         for group in self._table_groups.values():
             layout.addWidget(group)
@@ -194,6 +207,7 @@ class ResultsPanel(QWidget):
         document.project_changed.connect(self.refresh)
         document.board_changed.connect(self.refresh)
         document.results_changed.connect(self.refresh)
+        document.limits_changed.connect(self.refresh)
         for signal in (
             document.sources_changed,
             document.heat_loads_changed,
@@ -336,10 +350,14 @@ class ResultsPanel(QWidget):
         table.setWordWrap(False)
         table.setToolTip(f"{tip}\nCtrl+C copies the selected cells (tab-separated).")
         header = table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        # Every column fits its contents (names are never cut short); the last takes any spare
+        # width, and a narrow dock scrolls the table sideways.
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setStretchLastSection(True)
         for column in range(1, len(headers)):
-            header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
             table.horizontalHeaderItem(column).setTextAlignment(_NUMBER)
+        # The sideways scrollbar comes and goes with the dock's width: keep every row visible.
+        table.horizontalScrollBar().rangeChanged.connect(lambda _low, _high: self._fit_height(table))
         copy = QShortcut(QKeySequence.StandardKey.Copy, table, lambda: copy_cells(table))
         copy.setContext(Qt.ShortcutContext.WidgetShortcut)
         group = QGroupBox(title)
@@ -361,14 +379,29 @@ class ResultsPanel(QWidget):
                 item = QTableWidgetItem(text)
                 if c:
                     item.setTextAlignment(_NUMBER)
+                if text in ("PASS", "FAIL"):
+                    item.setForeground(PASS_COLOR if text == "PASS" else FAIL_COLOR)
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
                 table.setItem(r, c, item)
         table.resizeRowsToContents()
-        height = table.horizontalHeader().height() + 2 * table.frameWidth()
-        height += sum(table.rowHeight(r) for r in range(len(rows)))
-        if table.horizontalScrollBar().isVisible():
-            height += table.horizontalScrollBar().height()
-        table.setFixedHeight(height)
+        self._fit_height(table)
         self._table_groups[key].setVisible(bool(rows))
+
+    @staticmethod
+    def _fit_height(table: QTableWidget) -> None:
+        """Make a table exactly tall enough for its rows (and its sideways scrollbar, if shown).
+
+        Args:
+            table: The table.
+        """
+        height = table.horizontalHeader().height() + 2 * table.frameWidth()
+        height += sum(table.rowHeight(r) for r in range(table.rowCount()))
+        bar = table.horizontalScrollBar()
+        if bar.maximum() > bar.minimum():  # it will be shown
+            height += bar.sizeHint().height()
+        table.setFixedHeight(height)
 
     def _fill_tables(self, results) -> None:
         """Show each simulation element's results in its table.
@@ -379,7 +412,24 @@ class ResultsPanel(QWidget):
         if results is None:
             for key in self.tables:
                 self._set_rows(key, [])
+            self._show_verdict(None)
             return
+        checks = check_limits(results, self._document.limits)
+        self._set_rows(
+            "limits",
+            [
+                [
+                    f"{c.quantity} ≤ {c.limit:g} {c.unit}",
+                    "PASS" if c.passed else "FAIL",
+                    f"{c.value:.4g} {c.unit}",
+                    f"{c.margin:+.3g} {c.unit}",
+                ]
+                for c in checks
+            ],
+        )
+        for row, c in enumerate(checks):  # where each value occurs, and how it's taken
+            self.tables["limits"].item(row, 2).setToolTip(f"{c.where}: {c.basis}")
+        self._show_verdict(verdict(checks))
         temperature = DisplayMode.TEMPERATURE
 
         def degrees(value: float | None) -> str:
@@ -433,6 +483,27 @@ class ResultsPanel(QWidget):
                 for name, temperature_c in sorted(results.heatsink_temperatures.items())
             ],
         )
+
+    def _show_verdict(self, passed: bool | None) -> None:
+        """Show the overall PASS / FAIL banner.
+
+        Args:
+            passed: The verdict, or None to hide the banner (no limits, or no results).
+        """
+        if passed is None:
+            self.verdict.hide()
+            return
+        stale = " (results out of date)" if self._document.results_staleness else ""
+        color = PASS_COLOR if passed else FAIL_COLOR
+        self.verdict.setText(("PASS" if passed else "FAIL") + stale)
+        self.verdict.setStyleSheet(
+            f"background: {color.name()}; color: white; font-weight: bold; font-size: 15px;"
+            " border-radius: 4px; padding: 4px;"
+        )
+        self.verdict.setToolTip(
+            "All limits met" if passed else "At least one limit is exceeded: see Pass/fail limits below"
+        )
+        self.verdict.show()
 
     def table_rows(self, key: str) -> list[list[str]]:
         """The cell texts of one results table.

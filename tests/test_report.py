@@ -65,7 +65,12 @@ def bridged_project(tmp_path):
 
 
 def test_report_contents(bridged_project, tmp_path):
+    from kits.config import Limits
+
     results, _, _ = solve_project(bridged_project)
+    project = load_kits_project(bridged_project)
+    project.limits = Limits(max_temperature_c=results.max_temperature_c - 1)  # a failing check
+    project.save()
     out = tmp_path / "out" / "report.html"
     path, staleness = cli.generate_report(bridged_project, out, max_pixels=200)
     assert path == out and staleness is None
@@ -77,6 +82,9 @@ def test_report_contents(bridged_project, tmp_path):
     assert data["summary"]["max_temperature"] == pytest.approx(results.max_temperature_c)
     for heading in ("Current sources", "Heat loads", "Resistive elements", "Settings", "Board stackup"):
         assert heading in page
+    # The verdict, and the limits table.
+    assert data["verdict"] is False
+    assert "Pass/fail limits" in page and '<b class="fail">FAIL</b>' in page
     # The stackup, top to bottom, with each copper layer's weight and height, and the total.
     stackup = page[page.index("Board stackup") :]
     assert stackup.index("F.Cu") < stackup.index("dielectric 1") < stackup.index("B.Cu")
