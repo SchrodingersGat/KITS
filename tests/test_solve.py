@@ -462,6 +462,74 @@ def test_legacy_board_resistance_is_split_between_terminals():
     assert ResistiveElement.from_dict(element.to_dict()) == element
 
 
+def test_via_plating_and_fill(two_layer_board):
+    from kits.mesh.geometry import board_holes
+
+    # Five vias (0.3 mm drill) join the F.Cu and B.Cu strips.
+    holes = board_holes(two_layer_board, MeshSettings())
+    assert len(holes) == 5 and all(h.via and h.plated for h in holes)
+    hole = holes[0].polygon
+    t = 0.025
+    drilled, core = hole.area, hole.buffer(-t).area
+    # The plating is the exact annulus between the drilled wall and the core.
+    assert drilled - core == pytest.approx(math.pi * t * (0.3 - t), rel=0.01)
+
+    # One mesh for every case (gmsh meshes in parallel, so meshes differ slightly run to run).
+    mesh = mesh_board(two_layer_board, MeshSettings(max_size_mm=1.0, min_size_mm=0.1))
+
+    def model(**solve):
+        return LayeredModel(two_layer_board, mesh, SolveSettings(plating_thickness_mm=t, **solve))
+
+    open_vias = model()
+    length = open_vias.by_name["F.Cu"].z - open_vias.by_name["B.Cu"].z
+
+    def total(links):
+        return sum(g for _, _, g in links)
+
+    k_cu, k_resin = 390.0, 0.8
+    per_area = 5 * 1e-6 / length  # five barrels, mm² -> m², per metre of length
+    assert total(open_vias.barrel_links(k_cu)) == pytest.approx(k_cu * (drilled - core) * per_area)
+    # A filled via's core conducts too: copper for current and heat, resin for heat only.
+    copper = model(via_fill="copper")
+    resin = model(via_fill="resin", via_fill_thermal_conductivity_w_mk=k_resin)
+    assert copper.settings.via_fill_conductivities() == (5.8e7, k_cu)
+    assert resin.settings.via_fill_conductivities() == (0.0, k_resin)
+    assert total(copper.barrel_links(k_cu, k_cu)) == pytest.approx(k_cu * drilled * per_area)
+    assert total(resin.barrel_links(k_cu, k_resin)) == pytest.approx(
+        (k_cu * (drilled - core) + k_resin * core) * per_area
+    )
+
+    # Through the solver: copper fill lowers the board's resistance; resin doesn't change it.
+    electrodes = [Electrode("P1", "1", current=1.0), Electrode("P2", "1", current=-1.0)]
+
+    def resistance(m):
+        return m.solve_dc(electrodes).resistance(("P1", "1"), ("P2", "1"))
+
+    r_open, r_copper, r_resin = resistance(open_vias), resistance(copper), resistance(resin)
+    assert r_copper < r_open and r_resin == pytest.approx(r_open, rel=1e-9)
+
+    with pytest.raises(Exception, match="via fill must be one of"):
+        SolveSettings(via_fill="silver").validate()
+
+
+def test_via_fill_round_trip_and_pad_holes(board_v9_path):
+    from kits.mesh.geometry import board_holes
+
+    # Only vias are filled; a through-hole pad's hole (R1.2) never is.
+    holes = board_holes(load_board(board_v9_path), MeshSettings())
+    assert sorted(h.via for h in holes) == [False, True, True]
+    settings = SolveSettings(via_fill="resin", via_fill_thermal_conductivity_w_mk=1.5)
+    sections = settings.to_sections()
+    assert sections["materials"]["via_fill"] == {"type": "resin", "thermal_conductivity_w_mk": 1.5}
+    assert (
+        SolveSettings.from_sections(
+            sections["ambient_temperature_c"], sections["materials"], sections["convection"]
+        )
+        == settings
+    )
+    assert SolveSettings.from_sections().via_fill == "none"  # older projects: unfilled
+
+
 def test_mesh_options_reach_the_solver(tmp_path):
     from kits.config import MeshArea
 

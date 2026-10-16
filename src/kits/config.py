@@ -26,6 +26,10 @@ class ConfigError(ValueError):
     """A project file is unreadable or contains invalid values."""
 
 
+# What fills a via inside its plating (see SolveSettings.via_fill).
+VIA_FILLS = ("none", "resin", "copper")
+DEFAULT_RESIN_FILL_K_W_MK = 0.3  # plain via-plugging epoxy
+
 # Which routed tracks (and arcs) are meshed: all, none, or only those on chosen nets.
 TRACK_MODES = ("all", "none", "nets")
 # A mesh area either refines the mesh inside it or removes the board there.
@@ -155,6 +159,9 @@ class MeshSettings:
         track_nets: Nets whose tracks are kept when ``tracks`` is ``"nets"``. Kept
             (but unused) in the other modes, so switching back restores the choice.
         areas: Refine and exclusion rectangles (:class:`MeshArea`), applied to every layer.
+        via_rings: Embed each via pad's outer edge as a ring of nodes (like the drill
+            hole edge, ``min_circle_points`` or more), so the annular ring meshes as
+            concentric circles even where the via sits in a pour.
     """
 
     max_size_mm: float = DEFAULT_MESH_MAX_SIZE_MM
@@ -164,6 +171,7 @@ class MeshSettings:
     tracks: str = "all"
     track_nets: tuple[str, ...] = ()
     areas: tuple[MeshArea, ...] = ()
+    via_rings: bool = True
 
     def keeps_track(self, net: str | None) -> bool:
         """Whether a track or arc on a net is meshed.
@@ -215,6 +223,8 @@ class MeshSettings:
         """
         if self.tracks not in TRACK_MODES:
             raise ConfigError(f"tracks must be one of {', '.join(TRACK_MODES)}")
+        if not isinstance(self.via_rings, bool):
+            raise ConfigError("via_rings must be true or false")
         if not all(isinstance(n, str) for n in self.track_nets):
             raise ConfigError("track nets must be net names")
         names = [a.name for a in self.areas]
@@ -256,6 +266,8 @@ class MeshSettings:
             data["track_nets"] = list(self.track_nets)
         if self.areas:
             data["areas"] = [a.to_dict() for a in self.areas]
+        if not self.via_rings:
+            data["via_rings"] = False
         return data
 
     @classmethod
@@ -291,6 +303,7 @@ class MeshSettings:
                 tracks=str(data.get("tracks", "all")),
                 track_nets=tuple(str(n) for n in nets),
                 areas=areas,
+                via_rings=data.get("via_rings", True),
             )
         except (TypeError, ValueError) as exc:
             raise ConfigError(f"invalid mesh setting: {exc}") from exc
@@ -1059,6 +1072,13 @@ class SolveSettings:
         solder_mask_thermal_conductivity_w_mk: Thermal conductivity of the solder
             mask, W/mK; with its thickness it adds resistance to convection where
             the mask covers the board.
+        via_fill: What fills the vias inside their plating (:data:`VIA_FILLS`):
+            ``"none"`` (open), ``"resin"`` (an insulating plug that conducts heat,
+            with ``via_fill_thermal_conductivity_w_mk``) or ``"copper"`` (solid
+            copper, conducting current and heat like the plating). Plated holes
+            of through-hole pads are never filled.
+        via_fill_thermal_conductivity_w_mk: Thermal conductivity of a resin via
+            fill, W/mK (plain plugging epoxy ≈ 0.3; thermally conductive fills 1-3+).
     """
 
     copper_conductivity_s_m: float = 5.8e7
@@ -1069,16 +1089,34 @@ class SolveSettings:
     convection_bottom_w_m2k: float = 10.0
     ambient_c: float = 25.0
     solder_mask_thermal_conductivity_w_mk: float = 0.25
+    via_fill: str = "none"
+    via_fill_thermal_conductivity_w_mk: float = DEFAULT_RESIN_FILL_K_W_MK
+
+    def via_fill_conductivities(self) -> tuple[float, float]:
+        """Electrical and thermal conductivity of the via fill.
+
+        Returns:
+            ``(S/m, W/mK)``: copper's for a copper fill, ``(0, resin k)`` for resin,
+            zeros for open vias.
+        """
+        if self.via_fill == "copper":
+            return self.copper_conductivity_s_m, self.copper_thermal_conductivity_w_mk
+        if self.via_fill == "resin":
+            return 0.0, self.via_fill_thermal_conductivity_w_mk
+        return 0.0, 0.0
 
     def validate(self) -> None:
         """Check the values are physically meaningful.
 
         Raises:
             ConfigError: If a conductivity or the plating thickness isn't positive, a
-                convection coefficient is negative, both are zero, or a value isn't finite.
+                convection coefficient is negative, both are zero, a value isn't
+                finite, or the via fill is unknown.
         """
+        if self.via_fill not in VIA_FILLS:
+            raise ConfigError(f"via fill must be one of {', '.join(VIA_FILLS)}")
         for name, value in dataclasses.asdict(self).items():
-            if not math.isfinite(value):
+            if name != "via_fill" and not math.isfinite(value):
                 raise ConfigError(f"{name} must be a finite number")
         positive = {
             "copper conductivity": self.copper_conductivity_s_m,
@@ -1086,6 +1124,7 @@ class SolveSettings:
             "dielectric thermal conductivity": self.dielectric_thermal_conductivity_w_mk,
             "plating thickness": self.plating_thickness_mm,
             "solder mask thermal conductivity": self.solder_mask_thermal_conductivity_w_mk,
+            "via fill thermal conductivity": self.via_fill_thermal_conductivity_w_mk,
         }
         for label, value in positive.items():
             if value <= 0:
@@ -1113,6 +1152,10 @@ class SolveSettings:
                 },
                 "dielectric": {"thermal_conductivity_w_mk": self.dielectric_thermal_conductivity_w_mk},
                 "solder_mask": {"thermal_conductivity_w_mk": self.solder_mask_thermal_conductivity_w_mk},
+                "via_fill": {
+                    "type": self.via_fill,
+                    "thermal_conductivity_w_mk": self.via_fill_thermal_conductivity_w_mk,
+                },
             },
             "convection": {
                 "top_w_m2k": self.convection_top_w_m2k,
@@ -1140,6 +1183,7 @@ class SolveSettings:
         copper = _mapping(materials.get("copper"), "materials.copper")
         dielectric = _mapping(materials.get("dielectric"), "materials.dielectric")
         mask = _mapping(materials.get("solder_mask"), "materials.solder_mask")
+        fill = _mapping(materials.get("via_fill"), "materials.via_fill")
         convection = _mapping(convection, "convection")
         try:
             settings = cls(
@@ -1160,6 +1204,10 @@ class SolveSettings:
                 ambient_c=float(defaults.ambient_c if ambient is None else ambient),
                 solder_mask_thermal_conductivity_w_mk=float(
                     mask.get("thermal_conductivity_w_mk", defaults.solder_mask_thermal_conductivity_w_mk)
+                ),
+                via_fill=str(fill.get("type", defaults.via_fill)),
+                via_fill_thermal_conductivity_w_mk=float(
+                    fill.get("thermal_conductivity_w_mk", defaults.via_fill_thermal_conductivity_w_mk)
                 ),
             )
         except (TypeError, ValueError) as exc:

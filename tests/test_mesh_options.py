@@ -160,6 +160,42 @@ def test_refine_area_meshes_finer_inside(board_v9_path):
     assert refined.num_triangles > plain.num_triangles
 
 
+def test_via_pad_edge_is_a_ring_of_nodes(tmp_path):
+    from .test_solve import _HEADER, _strip
+
+    # A 0.8 mm via (0.4 mm drill) in the middle of a pour on both layers: its pad edge
+    # isn't part of any copper outline, so without a ring the mesh ignores it.
+    via = '  (via (at 25 5) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1))\n'
+    path = tmp_path / "via.kicad_pcb"
+    path.write_text(_HEADER + _strip("F.Cu") + _strip("B.Cu") + via + ")\n")
+    board = load_board(path)
+    settings = MeshSettings(max_size_mm=1.0, min_size_mm=0.1, min_circle_points=36, corner_size_mm=0)
+
+    def on_circle(mesh, radius):
+        layer = mesh.layers[0]
+        distance = np.hypot(*(layer.nodes - (25.0, 5.0)).T)
+        return layer.nodes[np.abs(distance - radius) < 1e-3]
+
+    with_rings = mesh_board(board, settings)
+    for layer in with_rings.layers:
+        assert layer.layer in ("F.Cu", "B.Cu")
+    ring = on_circle(with_rings, 0.4)
+    assert len(ring) == 36  # a regular 36-gon...
+    angles = np.sort(np.degrees(np.arctan2(ring[:, 1] - 5, ring[:, 0] - 25)) % 360)
+    np.testing.assert_allclose(angles, np.arange(36) * 10.0, atol=0.05)  # ...from angle 0, like the hole
+    assert len(on_circle(with_rings, 0.2)) == 36  # the drill hole edge, concentric
+
+    without = mesh_board(board, dataclasses.replace(settings, via_rings=False))
+    assert len(on_circle(without, 0.4)) < 6
+    assert with_rings.num_triangles > without.num_triangles
+
+    # The option is saved only when off, and changes the mesh fingerprint.
+    assert "via_rings" not in settings.to_dict()
+    off = dataclasses.replace(settings, via_rings=False)
+    assert MeshSettings.from_dict(off.to_dict()) == off
+    assert fingerprint.settings_hash(off) != fingerprint.settings_hash(settings)
+
+
 def test_saved_mesh_keeps_all_settings(board_v9_path, tmp_path):
     settings = MeshSettings(
         max_size_mm=2.0, corner_size_mm=0.2, tracks="none", areas=(_area("X1", "exclude", x=30, y=20),)

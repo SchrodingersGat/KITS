@@ -9,6 +9,7 @@ import dataclasses
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
@@ -23,6 +24,7 @@ from . import colors
 from .document import Document
 
 _BALANCE_TOLERANCE_A = 1e-9
+VIA_FILL_LABELS = {"none": "Unfilled", "resin": "Resin", "copper": "Copper"}
 _WARNING_STYLE = "color: #e0a030;"
 _ERROR_STYLE = "color: #e05050;"
 
@@ -74,6 +76,16 @@ _SETTING_FIELDS = (
         (1.0, 200.0),
         1,
         "Barrel plating thickness of vias and plated holes.",
+    ),
+    (
+        "via_fill_thermal_conductivity_w_mk",
+        "Resin fill k",
+        " W/mK",
+        1.0,
+        (0.01, 50.0),
+        2,
+        "Thermal conductivity of a resin via fill (plain plugging epoxy ≈ 0.3; thermally\n"
+        "conductive fills 1-3 or more). Resin doesn't conduct current.",
     ),
     (
         "dielectric_thermal_conductivity_w_mk",
@@ -138,6 +150,8 @@ class SolvePanel(QWidget):
             box.valueChanged.connect(lambda value, n=name: self._on_setting_edited(n, value))
             self.setting_boxes[name] = box
             settings_form.addRow(f"{label}:", box)
+            if name == "plating_thickness_mm":
+                settings_form.addRow("Via fill:", self._build_via_fill())
         self.settings_error = QLabel()
         self.settings_error.setStyleSheet(_ERROR_STYLE)
         self.settings_error.setWordWrap(True)
@@ -169,6 +183,48 @@ class SolvePanel(QWidget):
         self._load_settings()
         self.refresh()
 
+    def _build_via_fill(self) -> QComboBox:
+        """Create the via fill selector.
+
+        Returns:
+            The combo box.
+        """
+        self.via_fill = QComboBox()
+        for fill, label in VIA_FILL_LABELS.items():
+            self.via_fill.addItem(label, fill)
+        self.via_fill.setToolTip(
+            "What fills the vias inside their plating. Resin conducts heat (at the resin k below)\n"
+            "but not current; copper conducts both, like a solid copper core. Holes of\n"
+            "through-hole pads are never filled."
+        )
+        self.via_fill.currentIndexChanged.connect(self._on_via_fill_changed)
+        return self.via_fill
+
+    def _on_via_fill_changed(self, _index: int) -> None:
+        """Store the chosen via fill in the project.
+
+        Args:
+            _index: The selected index (the fill is read back from the box).
+        """
+        self._update_resin_enabled()
+        if self._document.project is None:
+            return
+        self._pending = dataclasses.replace(self._pending, via_fill=self.via_fill.currentData())
+        try:
+            self._document.set_solve_settings(self._pending)
+        except ConfigError as exc:
+            self.settings_error.setText(str(exc))
+            self.settings_error.show()
+        else:
+            self.settings_error.hide()
+        self.refresh()
+
+    def _update_resin_enabled(self) -> None:
+        """Enable the resin conductivity only for a resin fill."""
+        self.setting_boxes["via_fill_thermal_conductivity_w_mk"].setEnabled(
+            self.via_fill.currentData() == "resin"
+        )
+
     def settings(self) -> SolveSettings:
         """Return the material and environment settings entered in the panel.
 
@@ -190,6 +246,10 @@ class SolvePanel(QWidget):
             box.blockSignals(True)
             box.setValue(getattr(settings, name) / factor)
             box.blockSignals(False)
+        self.via_fill.blockSignals(True)
+        self.via_fill.setCurrentIndex(self.via_fill.findData(settings.via_fill))
+        self.via_fill.blockSignals(False)
+        self._update_resin_enabled()
         self.settings_error.hide()
 
     def _on_setting_edited(self, name: str, value: float) -> None:

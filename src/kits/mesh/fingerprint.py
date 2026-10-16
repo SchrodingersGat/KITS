@@ -20,7 +20,9 @@ from pathlib import Path
 from ..config import MeshSettings
 
 # Bump when geometry extraction or meshing changes in a way that alters results.
-MESHER_VERSION = 4  # 2: holes cut; 3: pad outlines embedded; 4: stackup sub-layers summed (layer heights)
+# 2: holes cut; 3: pad outlines embedded; 4: stackup sub-layers summed (layer heights);
+# 5: via pad rings embedded.
+MESHER_VERSION = 5
 
 _CHUNK = 1 << 20
 

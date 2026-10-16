@@ -580,6 +580,16 @@ def test_solve_panel_edits_materials_and_environment(window, strip_kits):
     boxes["plating_thickness_mm"].setValue(30.0)
     assert window.document.solve_settings.plating_thickness_mm == pytest.approx(0.03)
 
+    # Via fill: the resin conductivity only applies (and is editable) for a resin fill.
+    fill, resin = panel.via_fill, boxes["via_fill_thermal_conductivity_w_mk"]
+    assert fill.currentData() == "none" and not resin.isEnabled()
+    fill.setCurrentIndex(fill.findData("resin"))
+    assert window.document.solve_settings.via_fill == "resin" and resin.isEnabled()
+    resin.setValue(1.2)
+    assert window.document.solve_settings.via_fill_thermal_conductivity_w_mk == pytest.approx(1.2)
+    fill.setCurrentIndex(fill.findData("copper"))
+    assert window.document.solve_settings.via_fill == "copper" and not resin.isEnabled()
+
     # Both faces insulated is rejected and blocks solving until fixed.
     boxes["convection_top_w_m2k"].setValue(0.0)
     boxes["convection_bottom_w_m2k"].setValue(0.0)
@@ -590,7 +600,12 @@ def test_solve_panel_edits_materials_and_environment(window, strip_kits):
     assert window.save()
     saved = load_kits_project(strip_kits).solve
     assert saved == SolveSettings(
-        ambient_c=40.0, plating_thickness_mm=0.03, convection_top_w_m2k=0.0, convection_bottom_w_m2k=5.0
+        ambient_c=40.0,
+        plating_thickness_mm=0.03,
+        convection_top_w_m2k=0.0,
+        convection_bottom_w_m2k=5.0,
+        via_fill="copper",
+        via_fill_thermal_conductivity_w_mk=1.2,  # kept for when resin is chosen again
     )
     assert saved.copper_conductivity_s_m == 5.8e7  # untouched fields keep their exact values
 

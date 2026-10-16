@@ -72,7 +72,8 @@ class LayerGeometry:
         holes: Drill-hole outlines cut from this layer.
         pad_edges: Pad outlines running through copper, to be embedded as mesh
             edges so each pad's area is resolved exactly (pads are where current
-            enters). Kept a tolerance away from copper and hole edges.
+            enters), and via pad rings (:func:`via_rings`, if enabled). Kept a
+            tolerance away from copper and hole edges.
         corners: Concave copper corners (see :func:`concave_copper_corners`), where
             current crowds and the mesh is refined.
     """
@@ -102,11 +103,13 @@ class Hole:
         polygon: The hole outline in board millimetres.
         layers: Copper layers the hole is cut from.
         plated: True for vias and plated through-holes.
+        via: True for a via (which may be filled), False for a pad's hole.
     """
 
     polygon: Polygon
     layers: list[str]
     plated: bool
+    via: bool = False
 
 
 # -- shape conversion ----------------------------------------------------------
@@ -482,7 +485,7 @@ def board_holes(board: Board, settings: MeshSettings, spans: list[list[str]] | N
     """
     spans = via_layers(board) if spans is None else spans
     holes = [
-        Hole(hole_polygon(Drill(v.drill, v.drill), v.position, 0.0, settings), span, True)
+        Hole(hole_polygon(Drill(v.drill, v.drill), v.position, 0.0, settings), span, True, via=True)
         for v, span in zip(board.vias, spans, strict=True)
         if v.drill > 0 and span
     ]
@@ -607,8 +610,43 @@ def partition_layer(
     return faces
 
 
-def pad_edge_lines(board: Board, layer: str, faces: list[Face], tolerance: float) -> list[LineString]:
-    """Pad outlines on a layer that run through the interior of its copper.
+def via_rings(
+    board: Board, layer: str, settings: MeshSettings, spans: list[list[str]] | None = None
+) -> list[LineString]:
+    """The outer edge of each via pad on a layer, as a regular polygon to embed in the mesh.
+
+    Like a drill hole edge (:func:`hole_polygon`): a regular polygon starting at
+    angle 0 with at least ``min_circle_points`` vertices (more for large pads),
+    so the annular ring between the two meshes as concentric circles. Kept
+    unsimplified, and snapped to the partition grid.
+
+    Args:
+        board: The board.
+        layer: Copper layer name.
+        settings: Mesh settings (vertex count).
+        spans: Precomputed :func:`via_layers` result.
+
+    Returns:
+        Closed rings, one per via pad on the layer.
+    """
+    spans = via_layers(board) if spans is None else spans
+    rings = []
+    for via, span in zip(board.vias, spans, strict=True):
+        if layer not in span or via.diameter <= via.drill:
+            continue
+        r = via.diameter / 2
+        n = circle_points(r, settings)
+        angles = 2 * math.pi * np.arange(n + 1) / n
+        x, y = via.position
+        ring = LineString(np.column_stack([x + r * np.cos(angles), y + r * np.sin(angles)]))
+        rings.append(shapely.set_precision(ring, SNAP_GRID_MM))
+    return rings
+
+
+def pad_edge_lines(
+    board: Board, layer: str, faces: list[Face], tolerance: float, rings: list[LineString] | None = None
+) -> list[LineString]:
+    """Pad outlines (and via rings) on a layer that run through the interior of its copper.
 
     Pad edges that coincide with the copper outline are already mesh edges;
     the rest (where a pad joins a track or pour) are returned so they can be
@@ -620,9 +658,11 @@ def pad_edge_lines(board: Board, layer: str, faces: list[Face], tolerance: float
         layer: Copper layer name.
         faces: The layer's partition (see :func:`partition_layer`).
         tolerance: Inset from copper/hole edges, and minimum kept line length, in mm.
+        rings: Via pad rings (:func:`via_rings`) to embed too. Unlike pad
+            outlines they aren't simplified, so they keep every vertex.
 
     Returns:
-        Non-overlapping line pieces, noded where pad outlines cross.
+        Non-overlapping line pieces, noded where pad outlines and rings cross.
     """
     copper = shapely.union_all([f.polygon for f in faces if f.is_copper])
     interior = copper.buffer(-tolerance)
@@ -633,6 +673,7 @@ def pad_edge_lines(board: Board, layer: str, faces: list[Face], tolerance: float
         for p in board.pads()
         if layer in p.layers and p.kind != "np_thru_hole"
     ]
+    outlines += rings or []
     if not outlines:
         return []
     clipped = shapely.union_all(outlines, grid_size=SNAP_GRID_MM).intersection(interior)
@@ -722,7 +763,13 @@ def extract_layers(
                 layer=layer,
                 faces=faces,
                 holes=layer_holes,
-                pad_edges=pad_edge_lines(board, layer, faces, settings.min_size_mm),
+                pad_edges=pad_edge_lines(
+                    board,
+                    layer,
+                    faces,
+                    settings.min_size_mm,
+                    via_rings(board, layer, settings, spans) if settings.via_rings else None,
+                ),
                 corners=concave_copper_corners(faces),
             )
         )

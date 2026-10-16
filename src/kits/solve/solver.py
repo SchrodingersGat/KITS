@@ -5,11 +5,12 @@ Model (see PLAN.md):
 * **Electrical.** Each copper layer is a sheet with conductance ``σ·t``
   (copper triangles only). Vias and plated holes are barrels of thickness
   ``plating_thickness`` linking the hole-edge nodes of consecutive layers that
-  have copper there. Pads are electrodes: fixed voltage, or a current
-  injected over the pad area.
+  have copper there; a copper-filled via also conducts through its core. Pads
+  are electrodes: fixed voltage, or a current injected over the pad area.
 * **Thermal.** Each layer conducts heat in-plane through its copper plus half
   of each adjacent dielectric slab. Heat crosses between adjacent layers through
-  the dielectric (``k / thickness`` per area) and through plated barrels, and
+  the dielectric (``k / thickness`` per area) and through plated barrels (and
+  via fills, copper or resin), and
   leaves by convection from the top and bottom layers. Sources are Joule heat
   in the sheets and barrels, plus user heat loads on pads: injected power,
   fixed temperature, or a thermal resistance to ambient (each spread over the
@@ -450,25 +451,37 @@ class LayeredModel:
         weights = np.concatenate(weights)
         return np.concatenate(nodes), weights / weights.sum() if normalize else weights
 
-    def barrel_links(self, conductivity: float) -> list[tuple[int, int, float]]:
-        """Discrete conductances of all plated barrels between their layers.
+    def barrel_links(
+        self, conductivity: float, fill_conductivity: float = 0.0
+    ) -> list[tuple[int, int, float]]:
+        """Discrete conductances of all plated barrels (and via fills) between their layers.
+
+        A barrel is the plating on the drilled wall: a tube whose cross-section is
+        the drilled area less the core inside the plating. A via's core conducts
+        too when it is filled (``fill_conductivity``); pad holes are never filled.
 
         Args:
-            conductivity: Barrel material conductivity (electrical S/m or thermal W/mK).
+            conductivity: Plating conductivity (electrical S/m or thermal W/mK).
+            fill_conductivity: Via fill conductivity in the same units (0 for open vias).
 
         Returns:
             ``(node_a, node_b, conductance)`` triples in global numbering; each
             barrel segment's conductance is split evenly over its edge nodes.
         """
-        plating = self.settings.plating_thickness_mm * MM
+        plating = self.settings.plating_thickness_mm
         pairs = []
         for hole in self.holes:
             layers = [self.by_name[name] for name in hole.layers if name in self.by_name]
             ring = np.array(hole.polygon.exterior.coords)[:-1]
-            perimeter = hole.polygon.exterior.length * MM
+            drilled = hole.polygon.area  # mm²
+            core = hole.polygon.buffer(-plating).area  # inside the plating; 0 if it closes the hole
+            conductance_area = conductivity * (drilled - core)
+            if hole.via:
+                conductance_area += fill_conductivity * core
+            conductance_area *= MM * MM  # mm² -> m²
             for upper, lower, ui, li in ring_links(layers, ring):
                 length = max(upper.z - lower.z, 1e-6)
-                g = conductivity * perimeter * plating / length / len(ui)
+                g = conductance_area / length / len(ui)
                 pairs += [(upper.offset + a, lower.offset + b, g) for a, b in zip(ui, li, strict=True)]
         return pairs
 
@@ -518,7 +531,7 @@ class LayeredModel:
         """
         s = self.settings
         sheets = [sheet_matrix(lf, self.sheet_conductance(lf)) for lf in self.layers]
-        links = self.barrel_links(s.copper_conductivity_s_m)
+        links = self.barrel_links(s.copper_conductivity_s_m, s.via_fill_conductivities()[0])
         k = (block_diag(sheets) + link_matrix(links, self.size)).tocsr()
 
         electrodes = list(electrodes)
@@ -776,7 +789,7 @@ class LayeredModel:
                 pool.map(lambda p: interlayer_coupling(p[0], p[1], k_d / p[2], self.size), pairs)
             )
         k = sum(couplings, block_diag(sheets) + block_diag(convection))
-        k = k + link_matrix(self.barrel_links(k_cu), self.size)
+        k = k + link_matrix(self.barrel_links(k_cu, s.via_fill_conductivities()[1]), self.size)
 
         conv = block_diag(convection)
         rhs = conv @ np.full(self.size, s.ambient_c)

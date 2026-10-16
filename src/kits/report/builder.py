@@ -388,6 +388,14 @@ def _settings(project: KitsProject, board: Board) -> str:
         ("Dielectric k", f"{s.dielectric_thermal_conductivity_w_mk:g} W/mK"),
         ("Solder mask k", f"{s.solder_mask_thermal_conductivity_w_mk:g} W/mK"),
         ("Via plating", f"{s.plating_thickness_mm * 1000:g} µm"),
+        (
+            "Via fill",
+            {
+                "none": "unfilled",
+                "copper": "copper",
+                "resin": f"resin, {s.via_fill_thermal_conductivity_w_mk:g} W/mK",
+            }[s.via_fill],
+        ),
     ]
     m = project.mesh
     tracks = {"all": "all", "none": "none", "nets": f"only {', '.join(m.track_nets) or 'no nets'}"}[m.tracks]

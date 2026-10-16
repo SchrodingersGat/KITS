@@ -102,6 +102,13 @@ class MeshPanel(QWidget):
             "Holes are cut out of the mesh; this takes precedence over the min size for small holes."
         )
         self.circle_points.valueChanged.connect(self._on_size_changed)
+        self.via_rings = QCheckBox("Ring of nodes at each via pad's edge")
+        self.via_rings.setToolTip(
+            "Embed each via pad's outer diameter in the mesh as a circle of nodes (at least the hole\n"
+            "points), so the annular ring meshes as concentric circles, even for vias in a pour.\n"
+            "Adds elements on boards with many vias."
+        )
+        self.via_rings.toggled.connect(self._on_size_changed)
         self.corner_size = _size_spinbox()
         self.corner_size.setMinimum(0.0)
         self.corner_size.setSpecialValueText("Off")
@@ -155,6 +162,7 @@ class MeshPanel(QWidget):
         form.addRow("Max size:", self.max_size)
         form.addRow("Min size:", self.min_size)
         form.addRow("Hole points:", self.circle_points)
+        form.addRow("Via pads:", self.via_rings)
         form.addRow("Corner size:", self.corner_size)
 
         layout = QVBoxLayout(self)
@@ -200,6 +208,7 @@ class MeshPanel(QWidget):
             corner_size_mm=self.corner_size.value(),
             tracks=self.track_mode.currentData(),
             track_nets=tuple(self._checked_nets()),
+            via_rings=self.via_rings.isChecked(),
         )
 
     def _checked_nets(self) -> list[str]:
@@ -270,6 +279,9 @@ class MeshPanel(QWidget):
         self.track_mode.blockSignals(True)
         self.track_mode.setCurrentIndex(self.track_mode.findData(settings.tracks))
         self.track_mode.blockSignals(False)
+        self.via_rings.blockSignals(True)
+        self.via_rings.setChecked(settings.via_rings)
+        self.via_rings.blockSignals(False)
         self._load_nets()
         self.settings_error.hide()
         self._refresh()
@@ -304,7 +316,14 @@ class MeshPanel(QWidget):
         self.build_button.setEnabled(can_build)
         self.build_button.setText("Rebuild mesh" if doc.mesh else "Build mesh")
         editable = doc.project is not None and not self._busy
-        for box in (self.max_size, self.min_size, self.circle_points, self.corner_size, self.track_mode):
+        for box in (
+            self.max_size,
+            self.min_size,
+            self.circle_points,
+            self.via_rings,
+            self.corner_size,
+            self.track_mode,
+        ):
             box.setEnabled(editable)
         by_net = self.track_mode.currentData() == "nets"
         self.net_filter.setVisible(by_net)
