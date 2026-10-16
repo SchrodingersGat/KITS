@@ -23,6 +23,7 @@ from __future__ import annotations
 import dataclasses
 import math
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -33,6 +34,11 @@ from scipy.sparse.csgraph import connected_components
 from scipy.sparse.linalg import LinearOperator, cg, spsolve
 from shapely.geometry import box
 from shapely.geometry.base import BaseGeometry
+
+try:
+    import pypardiso  # Intel MKL PARDISO: multithreaded sparse direct solver (x86-64 only)
+except ImportError:
+    pypardiso = None
 
 from ..config import HeatLoad, HeatLoadKind, Heatsink, ResistiveElement, SolveSettings
 from ..ingest.model import Board
@@ -61,8 +67,12 @@ DEFAULT_MASK_THICKNESS_MM = 0.01
 # to any electrode stay solvable. Small enough not to affect driven currents.
 _LEAKAGE = 1e-12
 
-# Thermal solve (conjugate gradient, multigrid preconditioner): stop when the
-# heat imbalance is this fraction of the heat imbalance at ambient temperature.
+# Below this many unknowns SuperLU beats PARDISO's per-solve overhead.
+_PARDISO_MIN_SIZE = 20_000
+
+# Iterative thermal solve, used where PARDISO isn't available (conjugate gradient,
+# multigrid preconditioner): stop when the heat imbalance is this fraction of the
+# heat imbalance at ambient temperature.
 _THERMAL_RTOL = 1e-8
 _THERMAL_MAX_ITERATIONS = 3000
 _PROGRESS_EVERY = 5  # CG iterations between progress reports
@@ -726,9 +736,13 @@ class LayeredModel:
             h = self._surface_coefficient(lf, i == 0, i == len(self.layers) - 1, heatsinks)
             convection.append(mass_matrix(lf, h))
 
-        k = block_diag(sheets) + block_diag(convection)
-        for upper, lower, gap in zip(self.layers, self.layers[1:], gaps, strict=False):
-            k = k + interlayer_coupling(upper, lower, k_d / gap, self.size)
+        # Layer pairs are independent and the work releases the GIL, so build them in parallel.
+        pairs = list(zip(self.layers, self.layers[1:], gaps, strict=False))
+        with ThreadPoolExecutor() as pool:
+            couplings = list(
+                pool.map(lambda p: interlayer_coupling(p[0], p[1], k_d / p[2], self.size), pairs)
+            )
+        k = sum(couplings, block_diag(sheets) + block_diag(convection))
         k = k + link_matrix(self.barrel_links(k_cu), self.size)
 
         conv = block_diag(convection)
@@ -1013,12 +1027,14 @@ def _solve_spd(
     guess: float,
     report: Callable[[str, float], None],
 ) -> np.ndarray:
-    """Solve ``(k + U diag(g) Uᵀ) x = rhs`` iteratively, with some unknowns fixed.
+    """Solve ``(k + U diag(g) Uᵀ) x = rhs``, with some unknowns fixed.
 
-    Conjugate gradient, preconditioned by algebraic multigrid on ``k`` plus the
-    low-rank terms' diagonal. Memory grows linearly with the problem (a direct
-    factorisation of the layered thermal system fills in far beyond that), and
-    each iteration's residual is reported.
+    With PARDISO, a direct solve of the bordered system
+    ``[[k, U], [Uᵀ, -diag(1/g)]]``, which stays sparse (one extra unknown per
+    low-rank term) and reduces to the original exactly. Otherwise conjugate
+    gradient, preconditioned by algebraic multigrid on ``k`` plus the low-rank
+    terms' diagonal (SuperLU fills in far too much on the layered thermal
+    system), reporting each iteration's residual.
 
     Args:
         k: Sparse stiffness (symmetric positive definite on the free unknowns,
@@ -1036,7 +1052,7 @@ def _solve_spd(
         The full solution vector.
 
     Raises:
-        SolveError: If the iteration doesn't converge.
+        SolveError: If the system is singular or the iteration doesn't converge.
     """
     free = ~fixed
     x = np.where(fixed, values, guess)
@@ -1046,6 +1062,18 @@ def _solve_spd(
         return x
     k_ff = k[free][:, free].tocsr()
     u_f = u[free]
+
+    if pypardiso is not None:
+        report("Solving temperature: factorising (direct solver)", 0.0)
+        live = g > 0  # a zero conductance contributes nothing (and has no 1/g)
+        u_l, g_l = u_f[:, live], g[live]
+        if len(g_l):
+            bordered = sp.bmat([[k_ff, u_l], [u_l.T, sp.diags(-1.0 / g_l)]], format="csr")
+            dx = _direct_solve(bordered, np.concatenate([residual, np.zeros(len(g_l))]))[: k_ff.shape[0]]
+        else:
+            dx = _direct_solve(k_ff, residual)
+        x[free] += dx
+        return x
 
     def apply(v: np.ndarray) -> np.ndarray:
         """Multiply by the full free-unknown matrix.
@@ -1117,7 +1145,47 @@ def _solve_partitioned(
     x = np.where(fixed, values, 0.0)
     k_ff = k[free][:, free].tocsc()
     k_fc = k[free][:, fixed]
-    x[free] = spsolve(k_ff, rhs[free] - k_fc @ x[fixed])
+    x[free] = _direct_solve(k_ff, rhs[free] - k_fc @ x[fixed])
+    return x
+
+
+def _direct_solve(a: sp.spmatrix, b: np.ndarray) -> np.ndarray:
+    """Solve a symmetric sparse system directly.
+
+    PARDISO in symmetric indefinite mode (multithreaded, and it stores half the
+    factor), else SuperLU, which is also quicker on small systems.
+
+    Args:
+        a: Symmetric, non-singular matrix.
+        b: Right-hand side.
+
+    Returns:
+        The solution.
+
+    Raises:
+        SolveError: If the matrix is singular.
+    """
+    if pypardiso is None or a.shape[0] < _PARDISO_MIN_SIZE:
+        return spsolve(sp.csc_matrix(a), b)
+    # Upper triangle, with every diagonal entry stored (PARDISO needs them, even zeros).
+    n = a.shape[0]
+    upper = sp.triu(a, k=1, format="coo")
+    upper = sp.csr_matrix(
+        (
+            np.concatenate([upper.data, a.diagonal()]),
+            (np.concatenate([upper.row, np.arange(n)]), np.concatenate([upper.col, np.arange(n)])),
+        ),
+        shape=(n, n),
+    )
+    solver = pypardiso.PyPardisoSolver(mtype=-2)
+    try:
+        x = solver.solve(upper, b)
+    except (pypardiso.pardiso_wrapper.PyPardisoError, ValueError) as exc:
+        raise SolveError(f"the sparse solver failed ({exc}); the problem may be ill-posed") from exc
+    finally:
+        solver.free_memory(everything=True)  # the factor can be gigabytes
+    if not np.all(np.isfinite(x)):
+        raise SolveError("the sparse solver returned non-finite values; the problem may be ill-posed")
     return x
 
 

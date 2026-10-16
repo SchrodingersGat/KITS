@@ -380,6 +380,33 @@ def test_resistive_element_heat(bridged_board):
     assert junction.element_temperatures["R1"] > body
 
 
+def test_solver_paths_agree(bridged_board, monkeypatch):
+    import kits.solve.solver as solver
+
+    if solver.pypardiso is None:
+        pytest.skip("PARDISO not installed")
+    settings = SolveSettings(convection_top_w_m2k=10.0, convection_bottom_w_m2k=10.0, ambient_c=25.0)
+    model = _model(bridged_board, settings)
+    electrodes = [Electrode("P1", "1", current=10.0), Electrode("P2", "1", current=-10.0)]
+    # A junction node is a zero diagonal in the sparse part, which PARDISO must still accept.
+    element = _element(resistance_ohm=0.01, thermal_resistance_board_k_w=20.0)
+    loads = [HeatLoad("P2", "1", HeatLoadKind.TEMPERATURE, 30.0)]
+
+    def solve():
+        dc = model.solve_dc(electrodes, [element])
+        return dc, model.solve_thermal(dc, loads, [element])
+
+    monkeypatch.setattr(solver, "_PARDISO_MIN_SIZE", 0)
+    dc_pardiso, th_pardiso = solve()
+    monkeypatch.setattr(solver, "pypardiso", None)  # SuperLU for DC, conjugate gradient for heat
+    dc_fallback, th_fallback = solve()
+    assert dc_pardiso.total_power == pytest.approx(dc_fallback.total_power, rel=1e-9)
+    for layer, t in th_pardiso.temperature.items():
+        np.testing.assert_allclose(t, th_fallback.temperature[layer], rtol=0, atol=1e-6)
+    assert th_pardiso.element_temperatures["R1"] == pytest.approx(th_fallback.element_temperatures["R1"])
+    assert th_pardiso.load_heat == pytest.approx(th_fallback.load_heat, rel=1e-6)
+
+
 def test_auto_pad_groups(tmp_path):
     from kits.solve.elements import auto_pad_groups
 
