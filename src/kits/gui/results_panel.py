@@ -42,8 +42,10 @@ class ResultsPanel(QWidget):
         log_scale_toggled(bool): The log colour scale option changed.
         show_results_toggled(bool): The results overlay was toggled.
         show_markers_toggled(bool): The markers were toggled.
+        report_requested(): The user asked for an HTML report of the results.
     """
 
+    report_requested = Signal()
     mode_changed = Signal(object)
     log_scale_toggled = Signal(bool)
     show_results_toggled = Signal(bool)
@@ -62,6 +64,13 @@ class ResultsPanel(QWidget):
         self.summary = QLabel()
         self.summary.setWordWrap(True)
         self.summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.report_button = QPushButton("Generate report…")
+        self.report_button.setToolTip(
+            "Save an HTML report: layer-by-layer maps of each result (hover for values) and every "
+            "element's figures (Ctrl+Shift+R)"
+        )
+        self.report_button.setEnabled(False)
+        self.report_button.clicked.connect(self.report_requested)
 
         self.mode = QComboBox()
         for mode in DisplayMode:
@@ -111,6 +120,7 @@ class ResultsPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.addWidget(self.summary)
+        layout.addWidget(self.report_button)
         layout.addWidget(display)
         layout.addWidget(self._build_markers_group())
         layout.addStretch(1)

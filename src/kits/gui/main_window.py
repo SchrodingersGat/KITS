@@ -6,8 +6,16 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QSettings, Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QDragEnterEvent, QDropEvent, QKeySequence
+from PySide6.QtCore import QPointF, QSettings, Qt, QTimer, QUrl
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QCloseEvent,
+    QDesktopServices,
+    QDragEnterEvent,
+    QDropEvent,
+    QKeySequence,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -42,6 +50,7 @@ from .heatsinks_panel import HeatsinksPanel
 from .layer_panel import LayerPanel, swatch
 from .mesh_job import MeshJob
 from .mesh_panel import MeshPanel
+from .report_job import ReportJob
 from .results_panel import ResultsPanel
 from .settings import AppSettings
 from .settings_dialog import SettingsDialog
@@ -94,6 +103,9 @@ class MainWindow(QMainWindow):
         self.scene: BoardScene | None = None
         self._mesh_job: MeshJob | None = None
         self._solve_job: SolveJob | None = None
+        self._report_job: ReportJob | None = None
+        self._report_progress: TimedProgressDialog | None = None
+        self._last_report_dir: Path | None = None  # where the last report was saved, this session
         self._solve_progress: TimedProgressDialog | None = None
         self._mesh_progress: TimedProgressDialog | None = None
 
@@ -197,7 +209,9 @@ class MainWindow(QMainWindow):
         self.document.dirty_changed.connect(self._update_title)
         self.document.mesh_changed.connect(self._on_mesh_changed)
         self.document.results_changed.connect(self._on_results_changed)
+        self.document.results_changed.connect(self._update_state)  # Generate Report needs results
         self.solve_panel.solve_requested.connect(self.solve)
+        self.results_panel.report_requested.connect(self.generate_report)
         self.results_panel.mode_changed.connect(self._on_display_mode_changed)
         self.results_panel.log_scale_toggled.connect(lambda _on: self._on_display_mode_changed())
         self.results_panel.show_results_toggled.connect(self.show_results_action.setChecked)
@@ -336,6 +350,12 @@ class MainWindow(QMainWindow):
         self.build_mesh_action = action("&Build mesh", self.build_mesh, "Ctrl+B", False)
         self.show_mesh_action = toggle("Show &mesh", True, self._on_show_mesh_toggled, Qt.Key.Key_M)
         self.solve_action = action("&Solve", self.solve, Qt.Key.Key_F9, False)
+        self.report_action = action("Generate &Report…", self.generate_report, "Ctrl+Shift+R", False)
+        self.report_action.setIconText("Report…")
+        self.report_action.setToolTip(
+            "Save an HTML report of the results: layer-by-layer maps (hover for values) and every "
+            "element's figures (Ctrl+Shift+R)"
+        )
         self.show_results_action = toggle("Show &results", True, self._on_show_results_toggled, Qt.Key.Key_R)
         self.show_markers_action = toggle("Show mar&kers", True, self._on_show_markers_toggled, Qt.Key.Key_K)
         self.show_sources_action = toggle(
@@ -417,6 +437,8 @@ class MainWindow(QMainWindow):
             )
         )
         self.toolbar.addWidget(self.layer_box)
+        self.toolbar.addSeparator()
+        self.toolbar.addAction(self.report_action)
 
     def _load_layer_box(self) -> None:
         """List the board's copper layers in the toolbar, top to bottom, selecting the active one."""
@@ -503,6 +525,7 @@ class MainWindow(QMainWindow):
 
         solve_menu = self.menuBar().addMenu("&Solve")
         solve_menu.addAction(self.solve_action)
+        solve_menu.addAction(self.report_action)
         solve_menu.addAction("Clear markers", self.document.clear_markers)
 
     # -- settings --------------------------------------------------------------
@@ -1028,6 +1051,142 @@ class MainWindow(QMainWindow):
         self._finish_solve_job()
         self.statusBar().showMessage("Solve cancelled", 5000)
 
+    # -- report ---------------------------------------------------------------------
+
+    def ask_report_path(self, suggestion: Path) -> Path | None:
+        """Ask where to save the report (separate so tests can replace it).
+
+        Args:
+            suggestion: The proposed file.
+
+        Returns:
+            The chosen ``.html`` file, or None if cancelled.
+        """
+        path, _ = QFileDialog.getSaveFileName(self, "Save report", str(suggestion), "HTML report (*.html)")
+        if not path:
+            return None
+        path = Path(path)
+        return path if path.suffix.lower() in (".html", ".htm") else path.with_suffix(".html")
+
+    def generate_report(self) -> None:
+        """Write an HTML report of the results, to a file the user chooses, in a child process.
+
+        The project is saved first (the report generator reads it and its saved
+        results from disk). Out-of-date results can still be reported, after a
+        confirmation; the report then carries a warning.
+        """
+        doc = self.document
+        if (
+            doc.project is None
+            or doc.results is None
+            or self._mesh_job
+            or self._solve_job
+            or self._report_job
+        ):
+            return
+        staleness = doc.results_staleness
+        if staleness and not self._confirm_stale_report(staleness):
+            return
+        if doc.dirty and not self.save():
+            return
+        folder = self._last_report_dir or doc.project.path.parent
+        target = self.ask_report_path(folder / f"{doc.project.name}-report.html")
+        if target is None:
+            return
+        self._last_report_dir = target.parent
+
+        job = ReportJob(doc.project.path, target, self)
+        dialog = TimedProgressDialog("Generating report", "Starting…", _PROGRESS_STEPS, self)
+        dialog.canceled.connect(job.cancel)
+        job.progress.connect(self._on_report_progress)
+        job.succeeded.connect(self._on_report_written)
+        job.failed.connect(self._on_report_failed)
+        job.cancelled.connect(self._on_report_cancelled)
+        self._report_job, self._report_progress = job, dialog
+        self._update_state()
+        job.start()
+        dialog.show()
+
+    def _confirm_stale_report(self, staleness: str) -> bool:
+        """Ask whether to report results that no longer match the project.
+
+        Args:
+            staleness: Why they're out of date.
+
+        Returns:
+            True to go ahead.
+        """
+        answer = QMessageBox.question(
+            self,
+            "Results out of date",
+            f"{staleness}.\n\nGenerate the report from these results anyway? "
+            "It will say they're out of date.",
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    @property
+    def report_job_running(self) -> bool:
+        """Whether a report is being generated."""
+        return self._report_job is not None
+
+    def _on_report_progress(self, message: str, fraction: float) -> None:
+        """Update the report progress dialog.
+
+        Args:
+            message: Current step.
+            fraction: Overall completion, 0 to 1.
+        """
+        if self._report_progress is not None:
+            self._report_progress.setLabelText(message)
+            self._report_progress.setValue(round(fraction * _PROGRESS_STEPS))
+
+    def _finish_report_job(self) -> None:
+        """Close the report progress dialog and release the finished job."""
+        if self._report_progress is not None:
+            self._report_progress.close()
+            self._report_progress.deleteLater()
+        if self._report_job is not None:
+            self._report_job.deleteLater()
+        self._report_job = self._report_progress = None
+        self._update_state()
+
+    def _on_report_written(self, path: Path) -> None:
+        """Say where the report went.
+
+        Args:
+            path: The written report.
+        """
+        self._finish_report_job()
+        if self.open_report(path):
+            self.statusBar().showMessage(f"Report saved to {path} and opened", 10000)
+        else:
+            self.statusBar().showMessage(f"Report saved to {path} (it couldn't be opened here)", 10000)
+
+    def open_report(self, path: Path) -> bool:
+        """Open a written report in the default browser (separate so tests can replace it).
+
+        Args:
+            path: The report.
+
+        Returns:
+            True if the system accepted the request.
+        """
+        return QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _on_report_failed(self, message: str) -> None:
+        """Report a failed report.
+
+        Args:
+            message: Why it failed.
+        """
+        self._finish_report_job()
+        QMessageBox.critical(self, "Report failed", message)
+
+    def _on_report_cancelled(self) -> None:
+        """Note a cancelled report."""
+        self._finish_report_job()
+        self.statusBar().showMessage("Report cancelled", 5000)
+
     def _on_results_changed(self, results) -> None:
         """Show (or clear) the results overlay and its legend.
 
@@ -1292,9 +1451,11 @@ class MainWindow(QMainWindow):
             act.setEnabled(doc.project is not None)
         for act in self._board_actions:
             act.setEnabled(doc.board is not None)
-        idle = self._mesh_job is None and self._solve_job is None
+        idle = self._mesh_job is None and self._solve_job is None and self._report_job is None
         self.build_mesh_action.setEnabled(doc.board is not None and idle)
         self.solve_action.setEnabled(doc.board is not None and idle)
+        self.report_action.setEnabled(doc.board is not None and doc.results is not None and idle)
+        self.results_panel.report_button.setEnabled(self.report_action.isEnabled())
         self.mesh_panel.set_busy(not idle)
         self.solve_panel.set_busy(not idle)
         self._update_title()

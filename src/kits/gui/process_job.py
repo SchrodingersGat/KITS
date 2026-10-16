@@ -68,9 +68,19 @@ class ProcessJob(QObject):
         """The child's final ``done`` record, once it has finished successfully."""
         return self._done
 
+    def arguments(self) -> list[str]:
+        """Extra command-line arguments for the child, after the project and ``--progress``.
+
+        Returns:
+            None by default; subclasses add their own.
+        """
+        return []
+
     def start(self) -> None:
         """Launch the child process."""
-        self._process.start(sys.executable, ["-m", self.module, str(self._project_path), "--progress"])
+        self._process.start(
+            sys.executable, ["-m", self.module, str(self._project_path), "--progress", *self.arguments()]
+        )
 
     def cancel(self) -> None:
         """Kill the child process; :attr:`cancelled` is emitted once it has exited."""

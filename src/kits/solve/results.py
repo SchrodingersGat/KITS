@@ -103,6 +103,9 @@ class SolveResults:
         element_currents: Current through each resistive element (group A to B), A, keyed by name.
         element_power: Power dissipated in each resistive element, W.
         element_temperatures: Body temperature of each resistive element, °C.
+        element_ambient_heat: Heat each element's body sheds straight to ambient, W.
+        element_terminal_heat: Heat from each element's body into terminal A's and B's
+            pads, W (negative where the board heats the body through that terminal).
         heatsink_temperatures: Temperature of each heatsink, °C, keyed by name.
         heatsink_heat: Heat each heatsink takes from the board, W.
         mesh_fingerprint: Fingerprint of the board and mesh settings the mesh was built from.
@@ -120,6 +123,8 @@ class SolveResults:
     element_currents: dict[str, float] = field(default_factory=dict)
     element_power: dict[str, float] = field(default_factory=dict)
     element_temperatures: dict[str, float] = field(default_factory=dict)
+    element_ambient_heat: dict[str, float] = field(default_factory=dict)
+    element_terminal_heat: dict[str, tuple[float, float]] = field(default_factory=dict)
     heatsink_temperatures: dict[str, float] = field(default_factory=dict)
     heatsink_heat: dict[str, float] = field(default_factory=dict)
 
@@ -158,6 +163,8 @@ class SolveResults:
             "element_currents": self.element_currents,
             "element_power": self.element_power,
             "element_temperatures": self.element_temperatures,
+            "element_ambient_heat": self.element_ambient_heat,
+            "element_terminal_heat": {k: list(v) for k, v in self.element_terminal_heat.items()},
             "heatsink_temperatures": self.heatsink_temperatures,
             "heatsink_heat": self.heatsink_heat,
         }
@@ -203,6 +210,10 @@ class SolveResults:
             element_currents={k: float(v) for k, v in meta.get("element_currents", {}).items()},
             element_power={k: float(v) for k, v in meta.get("element_power", {}).items()},
             element_temperatures={k: float(v) for k, v in meta.get("element_temperatures", {}).items()},
+            element_ambient_heat={k: float(v) for k, v in meta.get("element_ambient_heat", {}).items()},
+            element_terminal_heat={
+                k: (float(v[0]), float(v[1])) for k, v in meta.get("element_terminal_heat", {}).items()
+            },
             heatsink_temperatures={k: float(v) for k, v in meta.get("heatsink_temperatures", {}).items()},
             heatsink_heat={k: float(v) for k, v in meta.get("heatsink_heat", {}).items()},
         )

@@ -1041,6 +1041,43 @@ def test_toolbar_quick_actions(window, kits_v9_path):
     assert window.toolbar.toggleViewAction() in view_menu.actions()  # can be hidden from the View menu
 
 
+def test_generate_report_from_toolbar_and_results_tab(app, window, strip_kits, tmp_path, monkeypatch):
+    assert window.open_path(strip_kits)
+    action, button = window.report_action, window.results_panel.report_button
+    assert action in window.toolbar.actions()
+    assert not action.isEnabled() and not button.isEnabled()  # no results yet
+    window.solve()
+    _wait(app, lambda: not window.solve_job_running)
+    assert action.isEnabled() and button.isEnabled()
+
+    # Cancelling the save dialog writes nothing.
+    monkeypatch.setattr(window, "ask_report_path", lambda suggestion: None)
+    button.click()
+    assert not window.report_job_running
+
+    target = tmp_path / "reports" / "strip report.html"
+    asked, opened = [], []
+    monkeypatch.setattr(window, "ask_report_path", lambda suggestion: asked.append(suggestion) or target)
+    monkeypatch.setattr(window, "open_report", lambda path: opened.append(path) or True)
+    action.trigger()
+    assert asked[0].name == "strip-report.html"  # suggested next to the project
+    assert window.report_job_running and not action.isEnabled() and not window.solve_action.isEnabled()
+    _wait(app, lambda: not window.report_job_running)
+    page = target.read_text(encoding="utf-8")
+    assert "Field maps" in page and "Board stackup" in page
+    # It opens once written, and the status bar says where it went.
+    assert opened == [target]
+    message = window.statusBar().currentMessage()
+    assert str(target) in message and "opened" in message
+    assert action.isEnabled()
+    # The next report starts in the same folder; if it can't be opened, the status bar says so.
+    monkeypatch.setattr(window, "open_report", lambda path: False)
+    action.trigger()
+    _wait(app, lambda: not window.report_job_running)
+    assert asked[1].parent == target.parent
+    assert "couldn't be opened" in window.statusBar().currentMessage()
+
+
 def test_toolbar_layer_selector_follows_the_active_layer(window, kits_v9_path):
     assert window.open_path(kits_v9_path)
     box, scene = window.layer_box, window.scene

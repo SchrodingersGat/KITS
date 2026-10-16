@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title><!--KITS:TITLE--> – KITS report</title>
+<style>
+:root {
+  --bg: #f6f7f9; --surface: #ffffff; --surface-2: #f0f2f5; --border: #dde1e7;
+  --text: #1b1f24; --muted: #5d6673; --accent: #2563eb; --warn-bg: #fff4e0; --warn-text: #8a4b00;
+  --map-bg: #0b1626; --shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1216; --surface: #171b21; --surface-2: #1e232b; --border: #2b313a;
+    --text: #e6e9ee; --muted: #9aa3af; --accent: #6ea0ff; --warn-bg: #3a2a10; --warn-text: #ffcf85;
+    --map-bg: #05090f; --shadow: none;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 1280px; margin: 0 auto; padding: 24px 16px 48px; }
+header h1 { margin: 0; font-size: 24px; font-weight: 650; letter-spacing: -0.01em; }
+header .meta { color: var(--muted); margin-top: 4px; font-size: 13px; word-break: break-all; }
+h2 { font-size: 17px; margin: 32px 0 12px; font-weight: 620; }
+h3 { font-size: 14px; margin: 0 0 4px; font-weight: 620; }
+.note, .dim { color: var(--muted); }
+.note { margin: 0 0 8px; font-size: 13px; }
+.banner { background: var(--warn-bg); color: var(--warn-text); border-radius: 8px; padding: 10px 14px; margin-top: 16px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-top: 20px; }
+.card, .block { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; box-shadow: var(--shadow); }
+.stat .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+.stat .value { font-size: 22px; font-weight: 650; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; margin-bottom: 12px; }
+.segmented { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.segmented button { border: 0; background: none; color: var(--text); padding: 7px 14px; font: inherit; cursor: pointer; }
+.segmented button + button { border-left: 1px solid var(--border); }
+.segmented button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+label.check { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+.legend { display: flex; flex-direction: column; gap: 2px; min-width: 240px; flex: 1 1 260px; max-width: 420px; }
+.legend .bar { height: 12px; border-radius: 3px; }
+.legend .ticks { display: flex; justify-content: space-between; font-size: 12px; font-variant-numeric: tabular-nums; }
+.legend .note { margin: 0; font-size: 12px; }
+.maps { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 560px), 1fr)); gap: 12px; }
+.map { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px; box-shadow: var(--shadow); }
+.map .head { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 6px; font-variant-numeric: tabular-nums; }
+.map .head .readout { color: var(--muted); font-size: 13px; text-align: right; }
+.map .frame { position: relative; background: var(--map-bg); border-radius: 6px; overflow: hidden; line-height: 0; }
+.map canvas { width: 100%; height: auto; display: block; cursor: crosshair; }
+.map canvas.overlay { position: absolute; inset: 0; pointer-events: none; }
+#tooltip { position: fixed; pointer-events: none; background: rgba(20, 24, 32, 0.92); color: #fff; padding: 6px 9px;
+  border-radius: 6px; font-size: 12.5px; line-height: 1.35; white-space: nowrap; z-index: 10; display: none;
+  font-variant-numeric: tabular-nums; }
+.tables { display: grid; gap: 12px; }
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { font-weight: 600; color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+td.num, th.num { text-align: right; white-space: nowrap; }
+tbody tr:last-child td { border-bottom: 0; }
+.settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; margin: 6px 0 0; }
+dt { color: var(--muted); }
+dd { margin: 0; font-variant-numeric: tabular-nums; }
+footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
+#error { display: none; }
+@media print {
+  body { background: #fff; }
+  .controls .segmented, #tooltip { display: none; }
+  .map, .card, .block { break-inside: avoid; box-shadow: none; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1><!--KITS:TITLE--></h1>
+    <div class="meta" id="meta"></div>
+    <div class="banner" id="stale" hidden></div>
+    <div class="banner" id="error"></div>
+  </header>
+
+  <div class="cards" id="summary"></div>
+
+  <h2>Field maps</h2>
+  <p class="note">Hover over a layer to read the value under the cursor; the same point is marked on every layer.
+    Coordinates are from the board's lower-left corner, Y up.</p>
+  <div class="controls">
+    <div class="segmented" id="modes" role="group" aria-label="Quantity"></div>
+    <label class="check" id="log-toggle"><input type="checkbox" id="log" checked> Log scale</label>
+    <div class="legend">
+      <div class="bar" id="legend-bar"></div>
+      <div class="ticks"><span id="legend-low"></span><span id="legend-mid"></span><span id="legend-high"></span></div>
+      <p class="note" id="legend-note"></p>
+    </div>
+  </div>
+  <div class="maps" id="maps"></div>
+
+  <h2>Simulation elements</h2>
+  <div class="tables"><!--KITS:TABLES--></div>
+
+  <h2>Settings</h2>
+  <div class="settings"><!--KITS:SETTINGS--></div>
+
+  <h2>Board stackup</h2>
+  <div class="tables"><!--KITS:STACKUP--></div>
+
+  <footer id="footer"></footer>
+</main>
+<div id="tooltip"></div>
+
+<script id="report-data" type="application/json">/*KITS:DATA*/null</script>
+<script>
+"use strict";
+const DATA = JSON.parse(document.getElementById("report-data").textContent);
+const CODES = 65534;
+const STEPS = 256;
+const state = { mode: DATA.modes[0].key, log: true, hover: null };
+const decoded = {};   // "layer|mode" -> Uint16Array
+const maps = [];      // per layer: {layer, canvas, overlay, readout}
+
+const $ = (id) => document.getElementById(id);
+// Names come from the project and board files: escape them wherever HTML is built.
+const esc = (text) => String(text).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+const modeInfo = (key) => DATA.modes.find((m) => m.key === key);
+
+// -- number formatting (like the app: 3 significant digits, SI prefix for volts) --
+function fmt(value, unit) {
+  if (value === null || value === undefined || !isFinite(value)) return "—";
+  if (unit === "V") {
+    const a = Math.abs(value);
+    for (const [scale, prefix] of [[1, ""], [1e-3, "m"], [1e-6, "µ"]]) {
+      if (a >= scale || scale === 1e-6) return `${sig(value / scale, 3)} ${prefix}V`;
+    }
+  }
+  return `${sig(value, 3)} ${unit}`.trim();
+}
+function sig(value, digits) {
+  if (value === 0) return "0";
+  const text = Number(value).toPrecision(digits);
+  return text.includes("e") ? Number(text).toString() : String(Number(text));
+}
+
+// -- colours ------------------------------------------------------------------------
+function lut(anchors) {
+  const out = new Uint8ClampedArray(STEPS * 3);
+  for (let i = 0; i < STEPS; i++) {
+    const t = (i / (STEPS - 1)) * (anchors.length - 1);
+    const k = Math.min(Math.floor(t), anchors.length - 2), f = t - k;
+    for (let c = 0; c < 3; c++) out[i * 3 + c] = anchors[k][c] + (anchors[k + 1][c] - anchors[k][c]) * f;
+  }
+  return out;
+}
+function scale(mode) {
+  const info = modeInfo(mode);
+  const log = info.log && state.log && info.log_range;
+  const [lo, hi] = log ? info.log_range : info.range;
+  return { info, log, lo, hi };
+}
+function position(value, s) {
+  const t = s.log
+    ? (Math.log10(Math.max(value, s.lo)) - Math.log10(s.lo)) / (Math.log10(s.hi) - Math.log10(s.lo))
+    : (value - s.lo) / (s.hi - s.lo);
+  return Math.min(Math.max(t, 0), 1);
+}
+
+// -- raster data ----------------------------------------------------------------------
+async function inflate(b64) {
+  const bytes = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate"));
+  return new Uint16Array(await new Response(stream).arrayBuffer());
+}
+async function codes(layer, mode) {
+  const key = `${layer.name}|${mode}`;
+  if (!decoded[key]) decoded[key] = await inflate(layer.rasters[mode].data);
+  return decoded[key];
+}
+function valueOf(raster, code) {
+  if (!code) return null;
+  const v = raster.lo + ((code - 1) / (CODES - 1)) * (raster.hi - raster.lo);
+  return raster.q === "log" ? Math.pow(10, v) : v;
+}
+
+// -- drawing ----------------------------------------------------------------------------
+const G = DATA.grid;
+function toPixel([x, y]) { return [(x - G.x0) / G.step, (y - G.y0) / G.step]; }
+function bodyPath(polygon) {
+  const path = new Path2D();
+  polygon.forEach((p, i) => { const [px, py] = toPixel(p); i ? path.lineTo(px, py) : path.moveTo(px, py); });
+  path.closePath();
+  return path;
+}
+function bodiesOn(layerName) {
+  return state.mode === "TEMPERATURE" ? DATA.bodies.filter((b) => b.layer === layerName) : [];
+}
+
+async function draw() {
+  const s = scale(state.mode);
+  const colors = lut(s.info.anchors);
+  for (const m of maps) {
+    const raster = m.layer.rasters[state.mode];
+    const data = await codes(m.layer, state.mode);
+    const ctx = m.canvas.getContext("2d");
+    const image = ctx.createImageData(G.width, G.height);
+    const px = image.data;
+    for (let i = 0; i < data.length; i++) {
+      const code = data[i];
+      if (!code) continue;  // no value here: transparent
+      const k = Math.round(position(valueOf(raster, code), s) * (STEPS - 1)) * 3;
+      px[i * 4] = colors[k]; px[i * 4 + 1] = colors[k + 1]; px[i * 4 + 2] = colors[k + 2]; px[i * 4 + 3] = 255;
+    }
+    ctx.putImageData(image, 0, 0);
+    for (const body of bodiesOn(m.layer.name)) {
+      const k = Math.round(position(body.temperature, s) * (STEPS - 1)) * 3;
+      ctx.fillStyle = `rgb(${colors[k]},${colors[k + 1]},${colors[k + 2]})`;
+      ctx.strokeStyle = "rgba(0,0,0,0.65)";
+      ctx.lineWidth = Math.max(1, G.width / 600);
+      for (const polygon of body.polygons) { const path = bodyPath(polygon); ctx.fill(path); ctx.stroke(path); }
+    }
+  }
+  drawLegend(s, colors);
+  updateHover();
+}
+
+function drawLegend(s, colors) {
+  const stops = [];
+  for (let i = 0; i <= 16; i++) {
+    const k = Math.round((i / 16) * (STEPS - 1)) * 3;
+    stops.push(`rgb(${colors[k]},${colors[k + 1]},${colors[k + 2]}) ${(i / 16) * 100}%`);
+  }
+  $("legend-bar").style.background = `linear-gradient(to right, ${stops.join(",")})`;
+  const unit = s.info.unit;
+  const mid = s.log ? Math.sqrt(s.lo * s.hi) : (s.lo + s.hi) / 2;
+  $("legend-low").textContent = (s.log ? "≤ " : "") + fmt(s.lo, unit);
+  $("legend-mid").textContent = fmt(mid, unit);
+  $("legend-high").textContent = (s.info.key === "CURRENT_DENSITY" ? "≥ " : "") + fmt(s.hi, unit);
+  $("legend-note").textContent = (s.log ? "Log scale. " : "") + s.info.note;
+  $("log-toggle").hidden = !s.info.log;
+}
+
+// -- hover ------------------------------------------------------------------------------
+function pointInPolygon(x, y, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const [xi, yi] = polygon[i], [xj, yj] = polygon[j];
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+function lookup(m, col, row) {
+  const x = G.x0 + (col + 0.5) * G.step, y = G.y0 + (row + 0.5) * G.step;
+  const body = bodiesOn(m.layer.name).find((b) => b.polygons.some((p) => pointInPolygon(x, y, p)));
+  if (body) return { body, value: body.temperature };
+  const data = decoded[`${m.layer.name}|${state.mode}`];
+  const code = data ? data[row * G.width + col] : 0;
+  return { value: valueOf(m.layer.rasters[state.mode], code) };
+}
+function updateHover(event) {
+  const tip = $("tooltip");
+  const unit = modeInfo(state.mode).unit;
+  for (const m of maps) {
+    const octx = m.overlay.getContext("2d");
+    octx.clearRect(0, 0, G.width, G.height);
+    if (!state.hover) { m.readout.textContent = ""; continue; }
+    const { col, row } = state.hover;
+    const hit = lookup(m, col, row);
+    m.readout.textContent = hit.body ? `${hit.body.name} body: ${fmt(hit.value, unit)}` : fmt(hit.value, unit);
+    octx.strokeStyle = "rgba(255,255,255,0.9)";
+    octx.lineWidth = Math.max(1, G.width / 500);
+    const r = G.width / 60;
+    octx.beginPath();
+    octx.moveTo(col + 0.5 - r, row + 0.5); octx.lineTo(col + 0.5 + r, row + 0.5);
+    octx.moveTo(col + 0.5, row + 0.5 - r); octx.lineTo(col + 0.5, row + 0.5 + r);
+    octx.stroke();
+  }
+  if (!state.hover) { tip.style.display = "none"; return; }
+  const m = maps[state.hover.map];
+  const hit = lookup(m, state.hover.col, state.hover.row);
+  const x = G.x0 + (state.hover.col + 0.5) * G.step - G.origin[0];
+  const y = G.origin[1] - (G.y0 + (state.hover.row + 0.5) * G.step);
+  let text = `<b>${esc(m.layer.name)}</b> · ${esc(fmt(hit.value, unit))}<br>x ${x.toFixed(2)}, y ${y.toFixed(2)} mm`;
+  if (hit.body) {
+    const b = hit.body;
+    text = `<b>${esc(b.name)}</b> body · ${esc(fmt(b.temperature, "°C"))}<br>` +
+      `${esc(fmt(b.power, "W"))}, ${esc(fmt(b.current, "A"))}`;
+  }
+  tip.innerHTML = text;
+  tip.style.display = "block";
+  if (event) {
+    const pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
+    tip.style.left = `${Math.min(event.clientX + pad, window.innerWidth - w - 4)}px`;
+    tip.style.top = `${Math.min(event.clientY + pad, window.innerHeight - h - 4)}px`;
+  }
+}
+
+// -- page ---------------------------------------------------------------------------------
+function buildPage() {
+  const s = DATA.summary;
+  $("meta").textContent = `Project ${DATA.project} · board ${DATA.board} · generated ${DATA.generated}`;
+  if (DATA.staleness) {
+    const banner = $("stale");
+    banner.hidden = false;
+    banner.textContent = `These results may be out of date: ${DATA.staleness}. Solve again for current results.`;
+  }
+  const cards = [
+    ["Joule power", fmt(s.power, "W")],
+    ["Max temperature", fmt(s.max_temperature, "°C")],
+    ["Max current density", fmt(s.max_density, "A/mm²")],
+    ["Voltage span", fmt(s.voltage_span, "V")],
+    ["Mesh", `${s.layers} layers · ${s.triangles.toLocaleString()} triangles`],
+  ];
+  $("summary").innerHTML = cards
+    .map(([label, value]) => `<div class="card stat"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div></div>`)
+    .join("");
+  $("footer").textContent = `Generated by KITS ${DATA.version}. Maps: ${G.width} × ${G.height} px, ` +
+    `${(G.step * 1000).toFixed(0)} µm per pixel; values between pixels aren't shown.`;
+
+  for (const mode of DATA.modes) {
+    const button = document.createElement("button");
+    button.textContent = mode.label;
+    button.dataset.mode = mode.key;
+    button.addEventListener("click", () => { state.mode = mode.key; syncButtons(); draw(); });
+    $("modes").appendChild(button);
+  }
+  syncButtons();
+  $("log").addEventListener("change", (e) => { state.log = e.target.checked; draw(); });
+
+  DATA.layers.forEach((layer, index) => {
+    const card = document.createElement("div");
+    card.className = "map";
+    card.innerHTML = `<div class="head"><b>${esc(layer.name)}</b><span class="readout"></span></div><div class="frame"></div>`;
+    const canvas = document.createElement("canvas");
+    const overlay = document.createElement("canvas");
+    overlay.className = "overlay";
+    for (const c of [canvas, overlay]) { c.width = G.width; c.height = G.height; }
+    canvas.setAttribute("role", "img");
+    canvas.setAttribute("aria-label", `${layer.name} result map`);
+    card.querySelector(".frame").append(canvas, overlay);
+    $("maps").appendChild(card);
+    const entry = { layer, canvas, overlay, readout: card.querySelector(".readout") };
+    maps.push(entry);
+    canvas.addEventListener("mousemove", (event) => {
+      const rect = canvas.getBoundingClientRect();
+      const col = Math.floor(((event.clientX - rect.left) / rect.width) * G.width);
+      const row = Math.floor(((event.clientY - rect.top) / rect.height) * G.height);
+      if (col < 0 || row < 0 || col >= G.width || row >= G.height) return;
+      state.hover = { map: index, col, row };
+      updateHover(event);
+    });
+    canvas.addEventListener("mouseleave", () => { state.hover = null; updateHover(); });
+  });
+}
+function syncButtons() {
+  for (const b of $("modes").children) b.setAttribute("aria-pressed", String(b.dataset.mode === state.mode));
+}
+
+if (!DATA) {
+  $("error").style.display = "block";
+  $("error").textContent = "This report has no data.";
+} else if (typeof DecompressionStream === "undefined") {
+  buildPage();
+  $("error").style.display = "block";
+  $("error").textContent = "This browser can't show the field maps (it lacks DecompressionStream); " +
+    "open the report in a current Chrome, Edge, Firefox or Safari.";
+} else {
+  buildPage();
+  draw();
+}
+</script>
+</body>
+</html>

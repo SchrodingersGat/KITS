@@ -134,6 +134,8 @@ def solve_project(project_path: str | Path, progress=None) -> tuple[SolveResults
         element_currents=dict(dc.element_currents) if dc else {},
         element_power=dict(dc.element_power) if dc else {},
         element_temperatures=dict(thermal.element_temperatures),
+        element_ambient_heat=dict(thermal.element_ambient_heat),
+        element_terminal_heat=dict(thermal.element_terminal_heat),
         heatsink_temperatures=dict(thermal.heatsink_temperatures),
         heatsink_heat=dict(thermal.heatsink_heat),
     )
