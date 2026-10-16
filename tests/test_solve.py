@@ -340,45 +340,99 @@ def test_resistive_element_in_series(bridged_board):
     assert dc.total_power == pytest.approx(current * 1e-3, rel=1e-9)  # P = V I, element included
 
 
+def _pad_mean(model, thermal, pads):
+    nodes, weights = model.pad_nodes("R1", pads)
+    return float(weights @ np.concatenate(list(thermal.temperature.values()))[nodes])
+
+
 def test_resistive_element_heat(bridged_board):
-    from kits.solve.elements import body_area_mm2
+    from kits.solve.elements import GENERIC_K_W, body_area_mm2
 
     settings = SolveSettings(convection_top_w_m2k=10.0, convection_bottom_w_m2k=10.0, ambient_c=25.0)
     model = _model(bridged_board, settings)
     electrodes = [Electrode("P1", "1", current=10.0), Electrode("P2", "1", current=-10.0)]
-    ideal = _element(resistance_ohm=0.01)
-    dc = model.solve_dc(electrodes, [ideal])
+    element = _element(resistance_ohm=0.01)
+    dc = model.solve_dc(electrodes, [element])
     # 10 A through 10 mΩ (to the 1e-12 leakage that keeps floating copper solvable).
     assert dc.element_power["R1"] == pytest.approx(1.0, rel=1e-6)
 
-    # Ideal contact: the heat goes into the board under the body, which also convects from its area.
-    thermal = model.solve_thermal(dc, elements=[ideal])
+    # The body takes the 1 W and passes it to its pads (default: an unclassified
+    # body, 50 K/W to each) and to ambient by convection from its plan area.
+    thermal = model.solve_thermal(dc, elements=[element])
     footprint = next(fp for fp in bridged_board.footprints if fp.reference == "R1")
-    assert body_area_mm2(footprint) == pytest.approx(14 * 6)
-    # No Fab/courtyard drawing: the body is the pads' bounding box, gap included.
-    nodes, weights = model.body_nodes(ideal)
-    temperature = np.concatenate(list(thermal.temperature.values()))
+    assert body_area_mm2(footprint) == pytest.approx(14 * 6)  # no Fab drawing: the pads' extent
     body = thermal.element_temperatures["R1"]
-    assert body == pytest.approx(float(weights @ temperature[nodes]))
+    to_a, to_b = thermal.element_terminal_heat["R1"]
+    assert to_a == pytest.approx((body - _pad_mean(model, thermal, ["1"])) / GENERIC_K_W, rel=1e-9)
+    assert to_b == pytest.approx((body - _pad_mean(model, thermal, ["2"])) / GENERIC_K_W, rel=1e-9)
     assert thermal.element_ambient_heat["R1"] == pytest.approx(10.0 * 84e-6 * (body - 25.0), rel=1e-9)
-    # Energy: board convection + the body's own loss to ambient = all Joule heat.
+    # The body is the hottest thing on the board, and is included in the max temperature.
+    assert body > max(float(t.max()) for t in thermal.temperature.values())
+    assert thermal.max_temperature == body
+    # Energy: the body's heat leaves through its pads and to ambient; the board convects the rest.
+    assert to_a + to_b + thermal.element_ambient_heat["R1"] == pytest.approx(dc.element_power["R1"], rel=1e-9)
     total_out = thermal.convected_power + thermal.element_ambient_heat["R1"]
     assert total_out == pytest.approx(dc.total_power, rel=1e-8)
 
-    # Through a 20 K/W junction-to-board resistance the body runs hotter, by exactly
-    # (heat into the board) x R above its pads.
-    jb = _element(resistance_ohm=0.01, thermal_resistance_board_k_w=20.0, thermal_resistance_ambient_k_w=50.0)
-    hot = model.solve_thermal(dc, elements=[jb])
-    pads = float(weights @ np.concatenate(list(hot.temperature.values()))[nodes])
-    to_ambient = hot.element_ambient_heat["R1"]
-    assert to_ambient == pytest.approx((hot.element_temperatures["R1"] - 25.0) / 50.0, rel=1e-9)
-    assert hot.element_temperatures["R1"] - pads == pytest.approx((1.0 - to_ambient) * 20.0, rel=1e-6)
-    assert hot.convected_power + to_ambient == pytest.approx(dc.total_power, rel=1e-8)
-    # Same default cooling as the ideal case: the junction runs hotter than the pads did.
-    junction = model.solve_thermal(
-        dc, elements=[_element(resistance_ohm=0.01, thermal_resistance_board_k_w=20.0)]
-    )
-    assert junction.element_temperatures["R1"] > body
+    # Lower resistances to the pads (e.g. from a datasheet) run the body cooler.
+    better = _element(resistance_ohm=0.01, thermal_resistance_a_k_w=5.0, thermal_resistance_b_k_w=5.0)
+    cooler = model.solve_thermal(dc, elements=[better])
+    assert cooler.element_temperatures["R1"] < body
+    # A fixed thermal resistance to ambient replaces convection from the body.
+    sinked = _element(resistance_ohm=0.01, thermal_resistance_ambient_k_w=50.0)
+    hot = model.solve_thermal(dc, elements=[sinked])
+    assert hot.element_ambient_heat["R1"] == pytest.approx((hot.element_temperatures["R1"] - 25.0) / 50.0)
+
+
+def test_heat_crosses_a_resistor_from_a_hot_pad_to_a_cold_one(bridged_board):
+    from kits.config import HeatLoad, HeatLoadKind
+
+    # No current: 1 W into P1 on the left strip only. R1 joins the left strip to the right one.
+    settings = SolveSettings(convection_top_w_m2k=10.0, convection_bottom_w_m2k=10.0, ambient_c=25.0)
+    model = _model(bridged_board, settings)
+    heat = [HeatLoad("P1", "1", HeatLoadKind.POWER, 1.0)]
+
+    def solve(element):
+        thermal = model.solve_thermal(None, heat, elements=[element] if element else [])
+        hot, cold = _pad_mean(model, thermal, ["1"]), _pad_mean(model, thermal, ["2"])
+        return thermal, hot, cold
+
+    alone, hot0, cold0 = solve(None)
+    thermal, hot, cold = solve(_element(thermal_resistance_a_k_w=10.0, thermal_resistance_b_k_w=10.0))
+    body = thermal.element_temperatures["R1"]
+    into_body, out_to_cold = thermal.element_terminal_heat["R1"]
+    # The body heats up from the hot pad and sits between the two pads' temperatures...
+    assert hot > body > cold and body > 25.0
+    assert into_body < 0 < out_to_cold  # heat flows hot pad -> body -> cold pad
+    assert -into_body == pytest.approx(out_to_cold + thermal.element_ambient_heat["R1"], rel=1e-8)
+    assert out_to_cold == pytest.approx((body - cold) / 10.0, rel=1e-9)
+    # ...so the cold side warms up and the hot side cools down, compared with no resistor.
+    assert cold > cold0 and hot < hot0
+    total_out = thermal.convected_power + thermal.element_ambient_heat["R1"]
+    assert total_out == pytest.approx(1.0, rel=1e-8)
+
+    # The better the part conducts, the closer the two sides get.
+    _, hot_tight, cold_tight = solve(_element(thermal_resistance_a_k_w=0.5, thermal_resistance_b_k_w=0.5))
+    _, hot_loose, cold_loose = solve(_element(thermal_resistance_a_k_w=500.0, thermal_resistance_b_k_w=500.0))
+    assert hot_tight - cold_tight < hot - cold < hot_loose - cold_loose
+
+
+def test_legacy_board_resistance_is_split_between_terminals():
+    from kits.config import ResistiveElement
+
+    data = {
+        "name": "R1",
+        "ref": "R1",
+        "resistance_ohm": 0.01,
+        "pads_a": {"name": "A", "pads": ["1"]},
+        "pads_b": {"name": "B", "pads": ["2"]},
+        "thermal_resistance_board_k_w": 20.0,
+    }
+    element = ResistiveElement.from_dict(data)
+    # 40 K/W to each terminal: 20 K/W with both in parallel.
+    assert element.terminal_thermal_resistances == (40.0, 40.0)
+    assert "thermal_resistance_board_k_w" not in element.to_dict()
+    assert ResistiveElement.from_dict(element.to_dict()) == element
 
 
 def test_mesh_options_reach_the_solver(tmp_path):
@@ -413,8 +467,9 @@ def test_solver_paths_agree(bridged_board, monkeypatch):
     settings = SolveSettings(convection_top_w_m2k=10.0, convection_bottom_w_m2k=10.0, ambient_c=25.0)
     model = _model(bridged_board, settings)
     electrodes = [Electrode("P1", "1", current=10.0), Electrode("P2", "1", current=-10.0)]
-    # A junction node is a zero diagonal in the sparse part, which PARDISO must still accept.
-    element = _element(resistance_ohm=0.01, thermal_resistance_board_k_w=20.0)
+    # A fully covered body (no convection) is a zero diagonal in the sparse part, which PARDISO
+    # must still accept; here the body has its own unknown joined to its pads by low-rank terms.
+    element = _element(resistance_ohm=0.01, thermal_resistance_a_k_w=20.0, thermal_resistance_b_k_w=5.0)
     loads = [HeatLoad("P2", "1", HeatLoadKind.TEMPERATURE, 30.0)]
 
     def solve():
@@ -496,24 +551,15 @@ def test_footprint_body_sources(tmp_path):
     assert source == "pads" and area.area == pytest.approx(14 * 6)
 
 
-def test_element_heat_enters_over_the_body_area(tmp_path):
+def test_element_body_area_sets_its_convection(tmp_path):
     from kits.solve.elements import default_ambient_conductance
 
-    # Rotated 90 degrees, the body is 5 wide (x 22.5..27.5) and 12 long (y -1..11): it
-    # covers the gap between the strips and overhangs the board edge, where there's no mesh.
+    # Rotated 90 degrees, the Fab body is 5 wide and 12 long: it overhangs the board
+    # edge, but convects from all of it (the heat reaches the board only through its pads).
     board, fp = _footprint(tmp_path, _FAB_RESISTOR)
     settings = SolveSettings(convection_top_w_m2k=10.0, convection_bottom_w_m2k=10.0, ambient_c=25.0)
     model = _model(board, settings)
     element = _element(resistance_ohm=0.01)
-    nodes, weights = model.body_nodes(element)
-    assert weights.sum() == pytest.approx(1.0)
-    f_cu = model.by_name["F.Cu"]
-    xy = f_cu.nodes_mm[nodes - f_cu.offset]
-    # Triangles whose centroid is inside count, so nodes reach up to one element (1 mm) out.
-    assert xy[:, 0].min() >= 22.5 - 1.0 and xy[:, 0].max() <= 27.5 + 1.0
-    assert xy[:, 1].min() >= 0 - 1e-6 and xy[:, 1].max() <= 10 + 1e-6  # clipped to the board
-    # Bare board in the gap between the strips is part of the body area.
-    assert ((xy[:, 0] > 22.5) & (xy[:, 0] < 27.5)).any()
 
     # Default cooling: convection from the 5 x 12 body.
     assert default_ambient_conductance(fp, settings) == pytest.approx(10.0 * 60e-6)

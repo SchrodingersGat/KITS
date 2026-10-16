@@ -85,6 +85,7 @@ _LABEL_GAP_PX = 4  # gap between a pad and its current label, screen pixels
 PAD_KEY_ROLE = 1
 HEATSINK_ROLE = 2  # item data: name of the heatsink an item draws
 MESH_AREA_ROLE = 3  # item data: name of the mesh area an item draws
+BODY_ROLE = 4  # item data: name of the element whose body temperature an item draws
 _MESH_TILES = 16  # overlay tiles per axis
 _GRID_MIN_PX = 8  # never draw grid lines closer than this on screen
 _GRID_ORIGIN_PX = 8  # half-size of the origin marker
@@ -229,6 +230,7 @@ class BoardScene(QGraphicsScene):
         self._element_markers: LayerItem | None = None
         self._heatsink_markers: LayerItem | None = None
         self._heatsinks_visible = True
+        self._elements: list[ResistiveElement] = []
         self._mesh_area_markers: LayerItem | None = None
         self._mesh_areas_visible = True
         self._elements_visible = True
@@ -485,6 +487,7 @@ class BoardScene(QGraphicsScene):
         Args:
             elements: The project's resistive elements.
         """
+        self._elements = list(elements)  # their bodies are drawn on the temperature map
         if self._element_markers is not None:
             self.removeItem(self._element_markers)
         self._element_markers = LayerItem()
@@ -505,7 +508,7 @@ class BoardScene(QGraphicsScene):
         for element in elements:
             footprint = footprints.get(element.ref)
             if footprint is not None:
-                # The body's plan area: where the element's I²R goes into the board.
+                # The body's plan area: it convects from here (and is coloured here by temperature).
                 area, source = footprint_body(footprint)
                 for polygon in shapely.get_parts(area):
                     if polygon.is_empty or polygon.geom_type != "Polygon":
@@ -653,6 +656,15 @@ class BoardScene(QGraphicsScene):
         self._mesh_areas_visible = visible
         if self._mesh_area_markers is not None:
             self._mesh_area_markers.setVisible(visible)
+
+    @property
+    def mesh_areas_visible(self) -> bool:
+        """Whether mesh areas are shown."""
+        return (
+            self._mesh_areas_visible
+            and self._mesh_area_markers is not None
+            and self._mesh_area_markers.isVisible()
+        )
 
     @property
     def mesh_area_count(self) -> int:
@@ -1017,7 +1029,43 @@ class BoardScene(QGraphicsScene):
             groups.append((path, colors_[int(index[group[0]])]))
         overlay = CachedOverlayItem(groups, filled=True, parent=container)
         overlay.setOpacity(_RESULTS_ALPHA / 255)
+        if self._results_mode is DisplayMode.TEMPERATURE:
+            self._add_body_temperatures(container, layer.layer, colors_)
         return container
+
+    def _add_body_temperatures(self, container: LayerItem, layer: str, palette: list[QColor]) -> None:
+        """Fill each resistive element's body with its solved temperature, on its side's outer layer.
+
+        Args:
+            container: The layer's results overlay, which the bodies are drawn over.
+            layer: The overlay's copper layer; bodies of footprints on it are drawn.
+            palette: The temperature colour map.
+        """
+        temperatures = self._results.element_temperatures
+        footprints = {fp.reference: fp for fp in self.board.footprints}
+        for element in self._elements:
+            footprint = footprints.get(element.ref)
+            if footprint is None or footprint.side != layer or element.name not in temperatures:
+                continue
+            temperature = temperatures[element.name]
+            index = color_indices(np.array([temperature]), *self._results_range, steps=len(palette))[0]
+            area, _source = footprint_body(footprint)
+            for polygon in shapely.get_parts(area):
+                if polygon.is_empty or polygon.geom_type != "Polygon":
+                    continue
+                body = QGraphicsPathItem(polygon_path(list(polygon.exterior.coords)), container)
+                body.setBrush(palette[int(index)])
+                body.setPen(_cosmetic_pen(QColor(0, 0, 0, 160), 1.0))
+                body.setToolTip(f"{element.name} body: {format_value(temperature, DisplayMode.TEMPERATURE)}")
+                body.setData(BODY_ROLE, element.name)
+
+    @property
+    def body_temperature_count(self) -> int:
+        """Number of element bodies drawn on the active layer's temperature overlay."""
+        overlay = self._results_overlays.get(self._active_layer)
+        if overlay is None:
+            return 0
+        return sum(1 for item in overlay.childItems() if item.data(BODY_ROLE))
 
     def _update_mesh_visibility(self) -> None:
         """Show only the active layer's overlay, and only while that layer is visible."""

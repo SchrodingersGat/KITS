@@ -1,3 +1,5 @@
+import dataclasses
+
 import pytest
 
 pytest.importorskip("PySide6")
@@ -329,6 +331,18 @@ def test_mesh_areas_are_drawn_edited_and_saved(window, kits_v9_path, monkeypatch
     assert refine.bounds == (20, 10, 28, 16) and refine.size_mm == pytest.approx(0.1)
     assert areas.table.rowCount() == 2 and window.scene.mesh_area_count == 2
     assert window.document.heatsinks == []  # rectangles went to the mesh, not a heatsink
+
+    # Areas are part of the mesh display: hidden with it, whatever their own checkbox says.
+    assert window.scene.mesh_areas_visible
+    window.show_mesh_action.setChecked(False)
+    assert not window.scene.mesh_areas_visible and not areas.show_areas.isEnabled()
+    window.document.set_mesh_settings(dataclasses.replace(project.mesh, max_size_mm=1.5))  # redraw
+    assert not window.scene.mesh_areas_visible
+    window.show_mesh_action.setChecked(True)
+    assert window.scene.mesh_areas_visible and areas.show_areas.isEnabled()
+    areas.show_areas.setChecked(False)
+    assert not window.scene.mesh_areas_visible
+    areas.show_areas.setChecked(True)
 
     # Disabling an area hides it from the board, but keeps it in the project.
     areas.table.item(1, 0).setCheckState(Qt.CheckState.Unchecked)
@@ -931,8 +945,8 @@ def test_resistive_elements_panel(app, window, bridged_kits, monkeypatch):
     # Edit: typed SI values, thermal resistances; invalid entries disable OK.
     def edit(dialog):
         dialog.resistance.setText("4R7")
-        dialog.board_default.setChecked(False)
-        dialog.board_theta.setValue(20.0)
+        dialog.terminal_default[0].setChecked(False)
+        dialog.terminal_theta[0].setValue(20.0)
         dialog.group_pads[1].item(0).setCheckState(Qt.CheckState.Checked)  # pad 1 in both groups
         assert dialog.element is None and "both groups" in dialog.error.text()
         dialog.group_pads[1].item(0).setCheckState(Qt.CheckState.Unchecked)
@@ -946,7 +960,8 @@ def test_resistive_elements_panel(app, window, bridged_kits, monkeypatch):
     panel.table.selectRow(0)
     panel.edit_selected()
     shunt = doc.resistive_element("Shunt")
-    assert shunt.resistance_ohm == pytest.approx(5e-3) and shunt.thermal_resistance_board_k_w == 20.0
+    assert shunt.resistance_ohm == pytest.approx(5e-3) and shunt.thermal_resistance_a_k_w == 20.0
+    assert shunt.thermal_resistance_b_k_w is None  # left at the body-type default
     assert shunt.thermal_resistance_ambient_k_w is None
 
     # Show/hide stays in sync.
@@ -964,6 +979,21 @@ def test_resistive_elements_panel(app, window, bridged_kits, monkeypatch):
     assert results.element_power["Shunt"] == pytest.approx(25 * 5e-3, rel=1e-6)
     assert results.element_temperatures["Shunt"] > 25.0
     assert "Shunt" in window.solve_panel.status.text()
+    # The body is drawn on the temperature map of its side (F.Cu), and the scale covers it.
+    from kits.gui.field_display import DisplayMode
+
+    scene = window.scene
+    mode = window.solve_panel.mode
+    mode.setCurrentIndex(mode.findData(DisplayMode.TEMPERATURE))
+    scene.set_active_layer("F.Cu")
+    assert scene.body_temperature_count == 1
+    assert scene.results_range[1] >= results.element_temperatures["Shunt"]
+    assert results.max_temperature_c >= results.element_temperatures["Shunt"]
+    scene.set_active_layer("B.Cu")
+    assert scene.body_temperature_count == 0  # a top-side part
+    mode.setCurrentIndex(mode.findData(DisplayMode.CURRENT_DENSITY))
+    scene.set_active_layer("F.Cu")
+    assert scene.body_temperature_count == 0  # only on the temperature map
     assert load_kits_project(bridged_kits).resistive_elements == doc.resistive_elements
 
     # Remove; results go stale.

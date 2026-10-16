@@ -1037,8 +1037,19 @@ class MainWindow(QMainWindow):
             checked: New state of the "Show mesh" action.
         """
         self.mesh_panel.show_mesh.setChecked(checked)
+        # The mesh areas belong to the mesh display: hidden with it.
+        self.mesh_panel.areas.show_areas.setEnabled(checked)
         if self.scene is not None:
             self.scene.set_mesh_visible(checked)
+            self.scene.set_mesh_areas_visible(self._mesh_areas_shown())
+
+    def _mesh_areas_shown(self) -> bool:
+        """Whether mesh areas are drawn: with the mesh display on and "Show mesh areas" ticked.
+
+        Returns:
+            True to draw them.
+        """
+        return self.show_mesh_action.isChecked() and self.mesh_panel.areas.show_areas.isChecked()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Ask about unsaved changes, and kill any running mesher, before closing.
@@ -1433,10 +1444,11 @@ class MainWindow(QMainWindow):
         """Show or hide the mesh areas on the board.
 
         Args:
-            checked: New state of the panel's "Show mesh areas" checkbox.
+            checked: New state of the panel's "Show mesh areas" checkbox (they also
+                need the mesh display on).
         """
         if self.scene is not None:
-            self.scene.set_mesh_areas_visible(checked)
+            self.scene.set_mesh_areas_visible(self._mesh_areas_shown())
 
     def _show_mesh_areas(self, *_args) -> None:
         """Redraw the mesh areas on the board and update the areas table's grid frame.
@@ -1450,7 +1462,7 @@ class MainWindow(QMainWindow):
         self.mesh_panel.areas.frame.origin = (origin.x(), origin.y())
         self.mesh_panel.areas.refresh()
         project = self.document.project
-        self.scene.set_mesh_areas_visible(self.mesh_panel.areas.show_areas.isChecked())
+        self.scene.set_mesh_areas_visible(self._mesh_areas_shown())
         self.scene.set_mesh_areas([a for a in project.mesh.areas if a.enabled] if project else [])
 
     def _on_show_heatsinks_toggled(self, checked: bool) -> None:

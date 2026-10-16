@@ -41,11 +41,11 @@ except ImportError:
     pypardiso = None
 
 from ..config import HeatLoad, HeatLoadKind, Heatsink, ResistiveElement, SolveSettings
-from ..ingest.model import Board
+from ..ingest.model import Board, Footprint
 from ..mesh.geometry import footprint_body, mask_openings, meshed_holes, pad_area
 from ..mesh.mesher import layer_heights
 from ..mesh.model import BoardMesh
-from .elements import default_ambient_conductance
+from .elements import default_ambient_conductance, terminal_thermal_resistances
 from .fem import (
     MM,
     LayerFEM,
@@ -160,9 +160,10 @@ class ThermalResult:
         load_temperatures: Area-weighted mean temperature of each heat load's pad, °C.
         heatsink_temperatures: Temperature of each heatsink, °C, keyed by name.
         heatsink_heat: Heat each heatsink takes from the board (and sheds to ambient), W.
-        element_temperatures: Body temperature of each resistive element, °C (its
-            pads' mean temperature when the board contact is ideal), keyed by name.
+        element_temperatures: Body temperature of each resistive element, °C, keyed by name.
         element_ambient_heat: Heat each resistive element sheds straight to ambient, W.
+        element_terminal_heat: Heat from each element's body into terminal A's and
+            B's pads, W (negative where the board heats the body through that terminal).
     """
 
     temperature: dict[str, np.ndarray]
@@ -171,13 +172,16 @@ class ThermalResult:
     load_temperatures: dict[tuple[str, str], float] = field(default_factory=dict)
     element_temperatures: dict[str, float] = field(default_factory=dict)
     element_ambient_heat: dict[str, float] = field(default_factory=dict)
+    element_terminal_heat: dict[str, tuple[float, float]] = field(default_factory=dict)
     heatsink_temperatures: dict[str, float] = field(default_factory=dict)
     heatsink_heat: dict[str, float] = field(default_factory=dict)
 
     @property
     def max_temperature(self) -> float:
-        """Highest nodal temperature on any layer, °C."""
-        return max(float(t.max()) for t in self.temperature.values())
+        """Highest temperature on any layer or of any element body, °C."""
+        return max(
+            [*(float(t.max()) for t in self.temperature.values()), *self.element_temperatures.values()]
+        )
 
 
 class LayeredModel:
@@ -288,46 +292,22 @@ class LayeredModel:
             raise SolveError(f"pad {label} has no copper in the mesh{hint}")
         return found
 
-    def body_nodes(self, element: ResistiveElement) -> tuple[np.ndarray, np.ndarray]:
-        """Global nodes under a resistive element's body, with their lumped area weights.
-
-        The body is the footprint's plan area (:func:`kits.mesh.geometry.footprint_body`)
-        on the outer copper layer of the footprint's side, copper and bare board
-        alike. If no mesh lies under it, the element's pads are used instead.
+    def footprint(self, element: ResistiveElement) -> Footprint:
+        """The footprint a resistive element belongs to.
 
         Args:
             element: The element.
 
         Returns:
-            ``(nodes, weights)``, the weights summing to 1.
+            The footprint.
 
         Raises:
-            SolveError: If the footprint or its pads can't be found.
+            SolveError: If the board has no footprint with the element's reference.
         """
         footprint = next((fp for fp in self.board.footprints if fp.reference == element.ref), None)
         if footprint is None:
             raise SolveError(f"no footprint {element.ref} on the board (resistive element {element.name})")
-        area, _source = footprint_body(footprint)
-        side = footprint.side if footprint.side in self.by_name else self.layers[0].layer
-        found = self.contact_nodes(area, side) if not area.is_empty else None
-        return found if found is not None else self.pad_nodes(element.ref, element.all_pads)
-
-    def contact_nodes(self, area: BaseGeometry, layer: str) -> tuple[np.ndarray, np.ndarray] | None:
-        """Nodes where something pressed onto a board face touches it, with area weights.
-
-        Heat only crosses into the board where the solder mask is open on that
-        face (the whole area if the face has no mask); copper and bare board count.
-
-        Args:
-            area: The contact area in board millimetres.
-            layer: The face's outer copper layer.
-
-        Returns:
-            ``(nodes, weights)`` summing to 1, or None if nothing exposed lies under the area.
-        """
-        if layer in self.mask_openings:
-            area = area.intersection(self.mask_openings[layer])
-        return self.area_nodes({layer: area}, copper_only=False) if not area.is_empty else None
+        return footprint
 
     def heatsink_contacts(
         self, heatsink: Heatsink, elements: Sequence[ResistiveElement]
@@ -705,15 +685,15 @@ class LayeredModel:
         a thermal resistance ``R`` ties the pad to ambient with a total
         conductance ``1/R``.
 
-        A resistive element's ``I²R`` (from ``dc``) heats its body, whose plan
-        area (Fab outline, courtyard or pads' bounding box) covers part of the
-        board on the footprint's side. With ideal board contact the heat goes
-        straight into the board under the body where the solder mask is open
-        (its exposed pads, usually), shared by area; otherwise the
-        body is a node joined to that area's mean temperature through the
-        thermal resistance to the board. The body also loses heat to ambient
-        through its thermal resistance to ambient, or by default by convection
-        from its plan area.
+        A resistive element's body is one temperature (an extra unknown). It
+        takes the element's ``I²R`` (from ``dc``) and is joined to each
+        terminal's pads (their exposed copper, area-weighted) through that
+        terminal's thermal resistance, given on the element or defaulted from
+        the body type (:func:`~kits.solve.elements.default_body_thermal`). Heat
+        flows out through the pads into the board, and from a hot terminal
+        through the body to a cold one even with no current. The body also loses
+        heat to ambient through its thermal resistance to ambient, or by default
+        by convection from its plan area (Fab outline, courtyard or pads' extent).
 
         Args:
             dc: The DC solution supplying Joule heat, or None for no current flow.
@@ -780,14 +760,14 @@ class LayeredModel:
         k = k + sp.diags(tie)
         rhs = rhs + tie * s.ambient_c
 
-        # Resistive elements: the body takes I²R and is tied to its pads (directly,
-        # or through a junction node — an extra unknown — when a thermal resistance
-        # to the board is given) and to ambient. These ties act on the area-weighted
-        # mean of many nodes, which as a matrix is a dense block (thousands of nodes
-        # under a large part), so they're kept as low-rank terms and applied matrix-free.
+        # Resistive elements: the body is an extra unknown that takes I²R, joined
+        # to each terminal's pads through that terminal's thermal resistance and
+        # to ambient. Heat also crosses the part this way, from a hot pad to a cold
+        # one. A terminal tie acts on the area-weighted mean of the pads' nodes,
+        # which as a matrix is a dense block (thousands of nodes under a large
+        # part), so it's kept as a low-rank term and applied matrix-free.
         low_rank: list[LowRank] = []
-        junctions = [e for e in elements if e.thermal_resistance_board_k_w is not None]
-        extra_nodes = len(junctions) + len(heatsinks)  # one unknown each
+        extra_nodes = len(elements) + len(heatsinks)  # one unknown each
         n = self.size + extra_nodes
         if extra_nodes:
             k = sp.block_diag((k, sp.csr_matrix((extra_nodes, extra_nodes))))
@@ -797,7 +777,7 @@ class LayeredModel:
                 np.concatenate([values, extra]),
                 np.append(fixed, extra.astype(bool)),
             )
-        junction_index = {e.name: self.size + i for i, e in enumerate(junctions)}
+        body_index = {e.name: self.size + i for i, e in enumerate(elements)}
         # Heatsinks on components: which element bodies each covers, and how much
         # of each body's top is covered (it no longer convects there).
         contacts = {
@@ -809,33 +789,32 @@ class LayeredModel:
                 covered[name] = min(1.0, covered.get(name, 0.0) + fraction)
         bodies = {}
         for e in elements:
-            nodes, weights = self.body_nodes(e)
-            if e.name in junction_index:
-                j = junction_index[e.name]
-                to_board = np.concatenate([[1.0], -weights])
+            footprint = self.footprint(e)
+            j = body_index[e.name]
+            terminals = []
+            for group, resistance in zip(e.groups, terminal_thermal_resistances(footprint, e), strict=True):
+                nodes, weights = self.pad_nodes(e.ref, group.pads)
                 low_rank.append(
-                    (np.concatenate([[j], nodes]), to_board, 1.0 / e.thermal_resistance_board_k_w)
+                    (np.concatenate([[j], nodes]), np.concatenate([[1.0], -weights]), 1 / resistance)
                 )
-                nodes, weights = np.array([j]), np.array([1.0])
+                terminals.append((nodes, weights, 1 / resistance))
             if e.thermal_resistance_ambient_k_w is not None:
                 g_ambient = 1.0 / e.thermal_resistance_ambient_k_w
             else:
-                footprint = next(fp for fp in self.board.footprints if fp.reference == e.ref)
                 g_ambient = default_ambient_conductance(footprint, s) * (1.0 - covered.get(e.name, 0.0))
             power = dc.element_power.get(e.name, 0.0) if dc is not None else 0.0
-            rhs[nodes] += (power + g_ambient * s.ambient_c) * weights
-            low_rank.append((nodes, weights, g_ambient))
-            bodies[e.name] = (nodes, weights, g_ambient)
+            k = k + sp.coo_matrix(([g_ambient], ([j], [j])), shape=(n, n))
+            rhs[j] += power + g_ambient * s.ambient_c
+            bodies[e.name] = (j, g_ambient, terminals)
         sinks = {}
         for i, hs in enumerate(heatsinks):
-            j = self.size + len(junctions) + i
+            j = self.size + len(elements) + i
             if hs.mount == "components":
                 # On top of element bodies: the contact resistance is shared by overlap area.
                 total = sum(area for _, area, _ in contacts[hs.name])
                 for name, area, _ in contacts[hs.name]:
-                    nodes, weights, _ = bodies[name]
                     g = area / total / hs.thermal_resistance_board_k_w
-                    low_rank.append((np.concatenate([[j], nodes]), np.concatenate([[1.0], -weights]), g))
+                    k = k + _rank_one(np.array([j, bodies[name][0]]), np.array([1.0, -1.0]), g, n)
             else:
                 nodes, g = self.heatsink_conductances(hs)
                 k = k + _star(j, nodes, g, n)
@@ -860,10 +839,13 @@ class LayeredModel:
             else:
                 load_heat[key] = -float(weights @ (temperature[nodes] - s.ambient_c)) / load.value
             load_temperatures[key] = float(weights @ temperature[nodes])
-        element_temperatures, element_ambient_heat = {}, {}
-        for name, (nodes, weights, g_ambient) in bodies.items():
-            element_temperatures[name] = float(weights @ temperature[nodes])
-            element_ambient_heat[name] = g_ambient * (element_temperatures[name] - s.ambient_c)
+        element_temperatures, element_ambient_heat, element_terminal_heat = {}, {}, {}
+        for name, (j, g_ambient, terminals) in bodies.items():
+            body = float(temperature[j])
+            element_temperatures[name] = body
+            element_ambient_heat[name] = g_ambient * (body - s.ambient_c)
+            heat = [g * (body - float(weights @ temperature[nodes])) for nodes, weights, g in terminals]
+            element_terminal_heat[name] = (heat[0], heat[1])
         heatsink_temperatures = {name: float(temperature[j]) for name, (j, _) in sinks.items()}
         heatsink_heat = {
             name: g * (heatsink_temperatures[name] - s.ambient_c) for name, (_, g) in sinks.items()
@@ -878,6 +860,7 @@ class LayeredModel:
             load_temperatures=load_temperatures,
             element_temperatures=element_temperatures,
             element_ambient_heat=element_ambient_heat,
+            element_terminal_heat=element_terminal_heat,
         )
 
 

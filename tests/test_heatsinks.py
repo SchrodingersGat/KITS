@@ -162,7 +162,7 @@ def test_heatsink_contact_through_copper_and_mask(tmp_path):
     )
 
 
-def test_element_body_heat_goes_through_mask_openings(tmp_path):
+def test_element_heat_goes_through_its_pads_mask_openings(tmp_path):
     from kits.config import PadGroup, ResistiveElement
 
     resistor = """  (footprint "T:R" (layer "F.Cu") (at 25 5)
@@ -175,10 +175,12 @@ def test_element_body_heat_goes_through_mask_openings(tmp_path):
     path.write_text(_MASKED_HEADER + _strip("F.Cu") + resistor + ")\n")
     model = _model(load_board(path), SETTINGS)
     element = ResistiveElement("R1", "R1", PadGroup("A", ["1"]), PadGroup("B", ["2"]), 0.01)
-    nodes, _ = model.body_nodes(element)
-    x = model.layers[0].nodes_mm[nodes - model.layers[0].offset][:, 0]
-    # The 12 mm body is all under mask except its two exposed pads (x 19..21 and 29..31).
-    assert ((x < 22) | (x > 28)).all()
+    # Each terminal reaches the board at its exposed pad only (x 19..21 and 29..31), never
+    # through the mask under the 12 mm body.
+    for group, (lo, hi) in zip(element.groups, ((19, 21), (29, 31)), strict=True):
+        nodes, _ = model.pad_nodes(element.ref, group.pads)
+        x = model.layers[0].nodes_mm[nodes - model.layers[0].offset][:, 0]
+        assert x.min() >= lo - 1e-6 and x.max() <= hi + 1e-6
 
 
 def test_command_line_solve_with_a_heatsink(tmp_path):

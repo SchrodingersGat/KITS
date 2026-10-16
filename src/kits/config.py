@@ -644,8 +644,10 @@ class ResistiveElement:
     """A lumped resistor between two pad groups of one footprint (resistor, MOSFET, fuse...).
 
     Current through it is ``(V_a - V_b) / R`` from the area-weighted mean
-    potentials of the two groups; its ``I²R`` heats the element body, which is
-    tied to its pads and to ambient.
+    potentials of the two groups; its ``I²R`` heats the element body. The body
+    is one temperature, joined to each terminal's pads through its own thermal
+    resistance (so heat also crosses the part from a hot pad to a cold one) and
+    to ambient.
 
     Attributes:
         name: Unique element name, e.g. ``"R5"`` or ``"Q1 channel"``.
@@ -653,9 +655,10 @@ class ResistiveElement:
         group_a: One terminal's pads.
         group_b: The other terminal's pads.
         resistance_ohm: Resistance between the groups, Ω.
-        thermal_resistance_board_k_w: Body-to-board thermal resistance, K/W; None
-            for ideal contact (the heat goes straight into the board under the
-            body's plan area: Fab outline, else courtyard, else the pads' extent).
+        thermal_resistance_a_k_w: Body to terminal A's pads, K/W; None for the
+            default for the footprint's body type
+            (:func:`kits.solve.elements.default_body_thermal`).
+        thermal_resistance_b_k_w: Body to terminal B's pads, K/W; None for the default.
         thermal_resistance_ambient_k_w: Body-to-ambient thermal resistance, K/W;
             None for convection from the body (``1 / (h · area)``, see
             :func:`kits.solve.elements.default_ambient_conductance`).
@@ -667,7 +670,8 @@ class ResistiveElement:
     group_a: PadGroup
     group_b: PadGroup
     resistance_ohm: float
-    thermal_resistance_board_k_w: float | None = None
+    thermal_resistance_a_k_w: float | None = None
+    thermal_resistance_b_k_w: float | None = None
     thermal_resistance_ambient_k_w: float | None = None
     enabled: bool = True
 
@@ -675,6 +679,11 @@ class ResistiveElement:
     def groups(self) -> tuple[PadGroup, PadGroup]:
         """``(group_a, group_b)``."""
         return (self.group_a, self.group_b)
+
+    @property
+    def terminal_thermal_resistances(self) -> tuple[float | None, float | None]:
+        """``(body → A, body → B)`` thermal resistances, K/W (None where defaulted)."""
+        return (self.thermal_resistance_a_k_w, self.thermal_resistance_b_k_w)
 
     @property
     def all_pads(self) -> list[str]:
@@ -700,7 +709,8 @@ class ResistiveElement:
             raise ConfigError(f"element {self.name}: pad {', '.join(sorted(shared))} is in both groups")
         values = {
             "resistance": self.resistance_ohm,
-            "thermal resistance to board": self.thermal_resistance_board_k_w,
+            f"thermal resistance to {self.group_a.name or 'terminal A'}": self.thermal_resistance_a_k_w,
+            f"thermal resistance to {self.group_b.name or 'terminal B'}": self.thermal_resistance_b_k_w,
             "thermal resistance to ambient": self.thermal_resistance_ambient_k_w,
         }
         for label, value in values.items():
@@ -721,8 +731,10 @@ class ResistiveElement:
             "pads_a": self.group_a.to_dict(),
             "pads_b": self.group_b.to_dict(),
         }
-        if self.thermal_resistance_board_k_w is not None:
-            data["thermal_resistance_board_k_w"] = self.thermal_resistance_board_k_w
+        if self.thermal_resistance_a_k_w is not None:
+            data["thermal_resistance_a_k_w"] = self.thermal_resistance_a_k_w
+        if self.thermal_resistance_b_k_w is not None:
+            data["thermal_resistance_b_k_w"] = self.thermal_resistance_b_k_w
         if self.thermal_resistance_ambient_k_w is not None:
             data["thermal_resistance_ambient_k_w"] = self.thermal_resistance_ambient_k_w
         if not self.enabled:
@@ -757,13 +769,19 @@ class ResistiveElement:
             return None if data.get(key) is None else float(data[key])
 
         try:
+            to_a, to_b = optional("thermal_resistance_a_k_w"), optional("thermal_resistance_b_k_w")
+            # Older projects gave one body-to-board resistance: the two terminals in parallel.
+            legacy = optional("thermal_resistance_board_k_w")
+            if legacy is not None and to_a is None and to_b is None:
+                to_a = to_b = 2 * legacy
             element = cls(
                 name=str(data["name"]),
                 ref=str(data["ref"]),
                 group_a=PadGroup.from_dict(data.get("pads_a"), "pads_a"),
                 group_b=PadGroup.from_dict(data.get("pads_b"), "pads_b"),
                 resistance_ohm=float(data["resistance_ohm"]),
-                thermal_resistance_board_k_w=optional("thermal_resistance_board_k_w"),
+                thermal_resistance_a_k_w=to_a,
+                thermal_resistance_b_k_w=to_b,
                 thermal_resistance_ambient_k_w=optional("thermal_resistance_ambient_k_w"),
                 enabled=_enabled_from(data, f"resistive element {data.get('name')}"),
             )

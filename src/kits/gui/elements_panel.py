@@ -29,7 +29,13 @@ from PySide6.QtWidgets import (
 from ..config import ConfigError, PadGroup, ResistiveElement, SolveSettings
 from ..ingest.model import Footprint
 from ..mesh.geometry import footprint_body
-from ..solve.elements import auto_pad_groups, default_ambient_conductance, pad_numbers, parse_resistance
+from ..solve.elements import (
+    auto_pad_groups,
+    default_ambient_conductance,
+    default_body_thermal,
+    pad_numbers,
+    parse_resistance,
+)
 from .document import Document
 from .field_display import format_resistance
 from .sources_panel import make_enable_box
@@ -38,7 +44,7 @@ DEFAULT_RESISTANCE_OHM = 0.01  # when the footprint value isn't a resistance (e.
 DEFAULT_THETA_K_W = 10.0
 MIN_THETA_K_W = 0.001
 MAX_THETA_K_W = 1e6
-_COLUMNS = ["Name", "Terminals", "R", "Rθ board", "Rθ ambient"]
+_COLUMNS = ["Name", "Terminals", "R", "Rθ body→A / B", "Rθ ambient"]
 _NAME_ROLE = Qt.ItemDataRole.UserRole
 _ERROR_STYLE = "color: #e05050;"
 
@@ -102,6 +108,7 @@ class ElementDialog(QDialog):
         """
         super().__init__(parent)
         self.setWindowTitle(f"Resistive element on {footprint.reference}")
+        self._footprint = footprint
         self._ref = footprint.reference
         self._taken = taken_names
         self._element: ResistiveElement | None = None
@@ -144,14 +151,25 @@ class ElementDialog(QDialog):
         ambient_text = (
             f"≈ {1 / ambient_default:.3g} K/W" if ambient_default > 0 else "none: no convection on that side"
         )
-        self.board_default, self.board_theta, board_row = _theta_editor(
-            "Ideal contact (heat goes into the board under the body)"
-        )
+        # Body to each terminal's pads: defaulted from the body type (label set in _validate).
+        self.terminal_default: list[QCheckBox] = []
+        self.terminal_theta: list[QDoubleSpinBox] = []
+        terminal_rows = []
+        for _ in range(2):
+            check, spin, row = _theta_editor("")
+            check.setToolTip(
+                "Typical value for the footprint's body type (from its library name and reference).\n"
+                "Enter a datasheet figure instead where you have one."
+            )
+            self.terminal_default.append(check)
+            self.terminal_theta.append(spin)
+            terminal_rows.append(row)
         self.ambient_default, self.ambient_theta, ambient_row = _theta_editor(
             f"Convection from the body ({ambient_text})"
         )
         for check, spin, value in (
-            (self.board_default, self.board_theta, element.thermal_resistance_board_k_w),
+            (self.terminal_default[0], self.terminal_theta[0], element.thermal_resistance_a_k_w),
+            (self.terminal_default[1], self.terminal_theta[1], element.thermal_resistance_b_k_w),
             (self.ambient_default, self.ambient_theta, element.thermal_resistance_ambient_k_w),
         ):
             check.setChecked(value is None)
@@ -170,12 +188,21 @@ class ElementDialog(QDialog):
         self.body_label = QLabel(body_text)
         self.body_label.setToolTip(
             "The component body's plan area, from the footprint's Fab outline, else its courtyard,\n"
-            "else its pads. The element's I²R heats the board over this area, and the body\n"
-            "loses heat to ambient from it."
+            "else its pads. The body loses heat to ambient from it, and is drawn over it on the\n"
+            "temperature map."
         )
         thermal_form.addRow("Body:", self.body_label)
-        thermal_form.addRow("To board:", board_row)
+        self._terminal_labels = [QLabel(), QLabel()]
+        for label, row in zip(self._terminal_labels, terminal_rows, strict=True):
+            thermal_form.addRow(label, row)
         thermal_form.addRow("To ambient:", ambient_row)
+        note = QLabel(
+            "The element's I²R heats the body, which passes it to the board through each terminal's "
+            "pads, and to ambient. Heat also crosses the part from a hotter terminal to a cooler one."
+        )
+        note.setWordWrap(True)
+        note.setEnabled(False)
+        thermal_form.addRow(note)
 
         self.error = QLabel()
         self.error.setStyleSheet(_ERROR_STYLE)
@@ -199,9 +226,9 @@ class ElementDialog(QDialog):
 
         self.name.textChanged.connect(self._validate)
         self.resistance.textChanged.connect(self._validate)
-        for widget in (self.board_default, self.ambient_default):
+        for widget in (*self.terminal_default, self.ambient_default):
             widget.toggled.connect(self._validate)
-        for widget in (self.board_theta, self.ambient_theta):
+        for widget in (*self.terminal_theta, self.ambient_theta):
             widget.valueChanged.connect(self._validate)
         self._validate()
 
@@ -236,6 +263,16 @@ class ElementDialog(QDialog):
         error = ""
         resistance = parse_resistance(self.resistance.text())
         name = self.name.text().strip()
+        groups = [PadGroup(self.group_names[i].text().strip(), self._checked_pads(i)) for i in range(2)]
+        # The default depends on the groups (a package's die sits on the larger terminal).
+        default = default_body_thermal(
+            self._footprint, ResistiveElement(name, self._ref, groups[0], groups[1], resistance or 1.0)
+        )
+        for i, (label, check, value) in enumerate(
+            zip(self._terminal_labels, self.terminal_default, (default.a_k_w, default.b_k_w), strict=True)
+        ):
+            label.setText(f"To {groups[i].name or 'AB'[i]}:")
+            check.setText(f"Default: {default.body_type}, {value:g} K/W")
         if resistance is None:
             error = "Enter a positive resistance, e.g. 10m, 4R7 or 2k2."
         elif name in self._taken:
@@ -244,12 +281,15 @@ class ElementDialog(QDialog):
             element = ResistiveElement(
                 name=name,
                 ref=self._ref,
-                group_a=PadGroup(self.group_names[0].text().strip(), self._checked_pads(0)),
-                group_b=PadGroup(self.group_names[1].text().strip(), self._checked_pads(1)),
+                group_a=groups[0],
+                group_b=groups[1],
                 resistance_ohm=resistance,
-                thermal_resistance_board_k_w=None
-                if self.board_default.isChecked()
-                else self.board_theta.value(),
+                thermal_resistance_a_k_w=(
+                    None if self.terminal_default[0].isChecked() else self.terminal_theta[0].value()
+                ),
+                thermal_resistance_b_k_w=(
+                    None if self.terminal_default[1].isChecked() else self.terminal_theta[1].value()
+                ),
                 thermal_resistance_ambient_k_w=(
                     None if self.ambient_default.isChecked() else self.ambient_theta.value()
                 ),
@@ -450,7 +490,7 @@ class ElementsPanel(QWidget):
                 e.name if e.name == e.ref else f"{e.name} ({e.ref})",
                 f"{a.name}: {', '.join(a.pads)}  ↔  {b.name}: {', '.join(b.pads)}",
                 format_resistance(e.resistance_ohm),
-                _theta_text(e.thermal_resistance_board_k_w, "ideal"),
+                " / ".join(_theta_text(v, "default") for v in e.terminal_thermal_resistances),
                 _theta_text(e.thermal_resistance_ambient_k_w, "convection"),
             ]
             items = []

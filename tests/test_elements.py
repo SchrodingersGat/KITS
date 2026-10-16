@@ -22,7 +22,7 @@ def _element(name: str = "Q1", **kwargs) -> ResistiveElement:
 def test_round_trip(tmp_path):
     project = KitsProject(
         tmp_path / "p.kits",
-        resistive_elements=[_element(), _element(name="Q1 hot", thermal_resistance_board_k_w=2.5)],
+        resistive_elements=[_element(), _element(name="Q1 hot", thermal_resistance_b_k_w=2.5)],
     )
     project.save()
     data = yaml.safe_load(project.path.read_text(encoding="utf-8"))
@@ -33,13 +33,62 @@ def test_round_trip(tmp_path):
         "pads_a": {"name": "S", "pads": ["1", "2", "3"]},
         "pads_b": {"name": "D", "pads": ["5"]},
     }
-    assert data["resistive_elements"][1]["thermal_resistance_board_k_w"] == 2.5
+    assert data["resistive_elements"][1]["thermal_resistance_b_k_w"] == 2.5
+    assert "thermal_resistance_a_k_w" not in data["resistive_elements"][1]  # default: from the body type
     assert "thermal_resistance_ambient_k_w" not in data["resistive_elements"][1]  # default: convection
     assert load_kits_project(project.path).resistive_elements == project.resistive_elements
 
     project.resistive_elements = []
     project.save()
     assert "resistive_elements" not in yaml.safe_load(project.path.read_text(encoding="utf-8"))
+
+
+def _part(ref, lib_id, pads):
+    lines = "".join(
+        f'    (pad "{n}" smd rect (at {x} 0) (size {w} {h}) (layers "F.Cu") (net {n} "N{n}"))\n'
+        for n, x, w, h in pads
+    )
+    return (
+        f'  (footprint "{lib_id}" (layer "F.Cu") (at 25 5)\n    (property "Reference" "{ref}")\n{lines}  )\n'
+    )
+
+
+@pytest.mark.parametrize(
+    "ref, lib_id, pads, expected",
+    [
+        # Chip parts: alumina body, split evenly.
+        ("R1", "Resistor_SMD:R_0603_1608Metric", [(1, -1, 1, 1), (2, 1, 1, 1)], ("chip 0603", 50.0, 50.0)),
+        ("R2", "prj:R_2512_6432Metric", [(1, -3, 1, 3), (2, 3, 1, 3)], ("chip 2512", 50.0, 50.0)),
+        ("F1", "Fuse:Fuse_1206_3216Metric", [(1, -1, 1, 1), (2, 1, 1, 1)], ("chip 1206", 50.0, 50.0)),
+        # A MOSFET: the die sits on the drain tab (pad 2, the larger), whichever terminal it is.
+        ("Q1", "Package_TO_SOT_SMD:TO-252-2", [(1, -3, 1, 1), (2, 2, 6, 6)], ("power package", 15.0, 1.5)),
+        (
+            "Q2",
+            "Package_TO_SOT_SMD:SOT-23",
+            [(1, -1, 1, 1), (2, 1, 2, 2)],
+            ("small-signal package", 150.0, 60.0),
+        ),
+        # Power semiconductors are recognised by package even without a Q reference.
+        ("U1", "Package_DFN_QFN:DFN-8", [(1, -1, 4, 4), (2, 3, 1, 1)], ("power package", 1.5, 15.0)),
+        ("L1", "Inductor_SMD:L_Wuerth_MAPI-3015", [(1, -1, 1, 2), (2, 1, 1, 2)], ("inductor", 10.0, 10.0)),
+        ("X1", "Custom:Thing", [(1, -1, 1, 1), (2, 1, 1, 1)], ("unclassified body", 50.0, 50.0)),
+    ],
+)
+def test_default_body_thermal_from_body_type(tmp_path, ref, lib_id, pads, expected):
+    from kits.ingest import load_board
+    from kits.solve.elements import default_body_thermal, terminal_thermal_resistances
+
+    path = tmp_path / "part.kicad_pcb"
+    path.write_text(_HEADER + _part(ref, lib_id, pads) + ")\n")
+    footprint = next(fp for fp in load_board(path).footprints if fp.reference == ref)
+    element = ResistiveElement(ref, ref, PadGroup("A", ["1"]), PadGroup("B", ["2"]), 0.01)
+    default = default_body_thermal(footprint, element)
+    assert (default.body_type, default.a_k_w, default.b_k_w) == expected
+    # A value entered on the element replaces the default for that terminal only.
+    override = ResistiveElement(
+        ref, ref, element.group_a, element.group_b, 0.01, thermal_resistance_a_k_w=3.0
+    )
+    assert terminal_thermal_resistances(footprint, override) == (3.0, expected[2])
 
 
 _VALID = {
@@ -65,7 +114,9 @@ def _without(key: str) -> dict:
         ([_VALID | {"pads_b": {"name": "D", "pads": [1]}}], "both groups"),
         ([_VALID | {"pads_b": {"name": "", "pads": [5]}}], "needs a name"),
         ([_VALID | {"resistance_ohm": 0}], "resistance must be a positive"),
-        ([_VALID | {"thermal_resistance_board_k_w": -1}], "to board must be a positive"),
+        ([_VALID | {"thermal_resistance_a_k_w": -1}], "to S must be a positive"),
+        ([_VALID | {"thermal_resistance_b_k_w": 0}], "to D must be a positive"),
+        ([_VALID | {"thermal_resistance_board_k_w": -1}], "to S must be a positive"),  # legacy key
         ([_VALID | {"thermal_resistance_ambient_k_w": float("nan")}], "to ambient must be"),
         ([_VALID, _VALID], "more than one resistive element"),
     ],

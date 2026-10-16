@@ -21,6 +21,9 @@ from .solver import SolveSettings
 # 5: element bodies only heat the board through mask openings.
 # 6: heatsinks conduct through solder mask (reduced) and block convection under them.
 SOLVER_VERSION = 6
+# Bumped when the resistive element thermal model changes; only affects results with elements.
+# 2: the body is its own temperature, joined to each terminal's pads.
+ELEMENT_MODEL_VERSION = 2
 
 
 def inputs_hash(
@@ -58,6 +61,7 @@ def inputs_hash(
         payload["stackup"] = sorted(stackup.items())
     if elements:
         payload["elements"] = sorted(json.dumps(e.to_dict(), sort_keys=True) for e in elements)
+        payload["element_model"] = ELEMENT_MODEL_VERSION
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
@@ -132,8 +136,8 @@ class SolveResults:
 
     @property
     def max_temperature_c(self) -> float:
-        """Highest temperature on any layer."""
-        return max(float(r.temperature.max()) for r in self.layers)
+        """Highest temperature on any layer or of any element body."""
+        return max([*(float(r.temperature.max()) for r in self.layers), *self.element_temperatures.values()])
 
     def save_npz(self, path: str | Path) -> None:
         """Save to a ``.npz`` file (no pickled objects).

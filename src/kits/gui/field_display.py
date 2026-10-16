@@ -136,6 +136,8 @@ def supports_log(mode: DisplayMode) -> bool:
 def value_range(results: SolveResults, mode: DisplayMode, log: bool = False) -> tuple[float, float]:
     """Colour scale limits shared by all layers, so layers can be compared.
 
+    For temperature, the element body temperatures are included too.
+
     Args:
         results: The solve results.
         mode: Quantity shown.
@@ -147,6 +149,9 @@ def value_range(results: SolveResults, mode: DisplayMode, log: bool = False) -> 
         ``(low, high)`` in display units; ``high > low`` (and ``low > 0`` for log).
     """
     parts = [values[shown] for values, shown in (triangle_values(r, mode) for r in results.layers)]
+    if mode is DisplayMode.TEMPERATURE and results.element_temperatures:
+        # Element bodies are drawn on the temperature map, and are often its hottest parts.
+        parts.append(np.array(list(results.element_temperatures.values()), float))
     values = np.concatenate(parts) if parts else np.zeros(1)
     if values.size == 0:
         values = np.zeros(1)
