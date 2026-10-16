@@ -984,7 +984,13 @@ def test_resistive_elements_panel(app, window, bridged_kits, monkeypatch):
 
     scene = window.scene
     mode = window.solve_panel.mode
+    # The toolbar drop-down switches the display, and follows the panel's choice.
+    box = window.display_mode_box
+    assert box.isEnabled()
+    box.setCurrentIndex(box.findData(DisplayMode.VOLTAGE))
+    assert window.solve_panel.display_mode is DisplayMode.VOLTAGE
     mode.setCurrentIndex(mode.findData(DisplayMode.TEMPERATURE))
+    assert box.currentData() is DisplayMode.TEMPERATURE
     scene.set_active_layer("F.Cu")
     assert scene.body_temperature_count == 1
     assert scene.results_range[1] >= results.element_temperatures["Shunt"]
@@ -1006,9 +1012,12 @@ def test_toolbar_quick_actions(window, kits_v9_path):
     from kits.gui import colors
 
     toolbar = window.toolbar
-    buttons = [a for a in toolbar.actions() if not a.isSeparator()]
+    buttons = [a for a in toolbar.actions() if not a.isSeparator()][:2]
     assert buttons == [window.build_mesh_action, window.solve_action]
     assert not any(a.isEnabled() for a in buttons)  # no board yet
+    # After Solve: the display mode drop-down (disabled until there are results).
+    box = window.display_mode_box
+    assert toolbar.widgetForAction(toolbar.actions()[-1]) is box and not box.isEnabled()
     assert "F9" in window.solve_action.toolTip()
     # Distinct solid colours so they stand out on the dark theme.
     mesh_style, solve_style = (toolbar.widgetForAction(a).styleSheet() for a in buttons[:2])

@@ -10,6 +10,7 @@ from PySide6.QtCore import QPointF, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QDragEnterEvent, QDropEvent, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDockWidget,
     QFileDialog,
     QLabel,
@@ -34,7 +35,7 @@ from .board_scene import BoardScene
 from .board_view import BoardView
 from .document import Document
 from .elements_panel import ElementsPanel
-from .field_display import format_value
+from .field_display import DisplayMode, format_value
 from .heat_loads_panel import HeatLoadsPanel
 from .heatsinks_panel import HeatsinksPanel
 from .layer_panel import LayerPanel
@@ -347,7 +348,7 @@ class MainWindow(QMainWindow):
         ]
 
     def _create_toolbar(self) -> None:
-        """Add the toolbar with quick actions: build the mesh and solve."""
+        """Add the toolbar with quick actions: build the mesh, solve, and the displayed result."""
         self.toolbar = QToolBar("Toolbar", self)
         self.toolbar.setObjectName("MainToolbar")
         self.toolbar.setMovable(False)
@@ -365,6 +366,33 @@ class MainWindow(QMainWindow):
             act.setToolTip(f"{tip} ({shortcut})" if shortcut else tip)
             self.toolbar.addAction(act)
             colors.style_action_button(self.toolbar.widgetForAction(act), color)
+
+        # Which result the overlay shows; mirrors the Solve panel's "Display" choice.
+        self.toolbar.addSeparator()
+        self.toolbar.addWidget(QLabel(" Display: "))
+        self.display_mode_box = QComboBox()
+        for mode in DisplayMode:
+            self.display_mode_box.addItem(mode.label, mode)
+        self.display_mode_box.setToolTip("Result shown on the board (solve first)")
+        self.display_mode_box.setEnabled(False)
+        self.toolbar.addWidget(self.display_mode_box)
+        panel_mode = self.solve_panel.mode
+        self.display_mode_box.setCurrentIndex(panel_mode.currentIndex())
+        self.display_mode_box.currentIndexChanged.connect(panel_mode.setCurrentIndex)
+        panel_mode.currentIndexChanged.connect(self._sync_display_mode_box)
+        self.document.results_changed.connect(
+            lambda results: self.display_mode_box.setEnabled(results is not None)
+        )
+
+    def _sync_display_mode_box(self, index: int) -> None:
+        """Show the Solve panel's display choice in the toolbar.
+
+        Args:
+            index: The panel's selected index.
+        """
+        self.display_mode_box.blockSignals(True)
+        self.display_mode_box.setCurrentIndex(index)
+        self.display_mode_box.blockSignals(False)
 
     def _create_menus(self) -> None:
         """Populate the File, Edit, Project, View and Mesh menus."""
