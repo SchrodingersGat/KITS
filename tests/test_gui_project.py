@@ -1021,8 +1021,12 @@ def test_toolbar_quick_actions(window, kits_v9_path):
     assert buttons == [window.build_mesh_action, window.solve_action]
     assert not any(a.isEnabled() for a in buttons)  # no board yet
     # After Solve: the display mode drop-down (disabled until there are results).
+    widgets = [toolbar.widgetForAction(a) for a in toolbar.actions()]
     box = window.display_mode_box
-    assert toolbar.widgetForAction(toolbar.actions()[-1]) is box and not box.isEnabled()
+    assert box in widgets and not box.isEnabled()
+    # Then the layer selector, after it (empty and disabled with no board).
+    assert widgets.index(window.layer_box) > widgets.index(box)
+    assert window.layer_box.count() == 0 and not window.layer_box.isEnabled()
     assert "F9" in window.solve_action.toolTip()
     # Distinct solid colours so they stand out on the dark theme.
     mesh_style, solve_style = (toolbar.widgetForAction(a).styleSheet() for a in buttons[:2])
@@ -1035,6 +1039,26 @@ def test_toolbar_quick_actions(window, kits_v9_path):
     assert all(a.isEnabled() for a in buttons)
     view_menu = next(a.menu() for a in window.menuBar().actions() if a.text() == "&View")
     assert window.toolbar.toggleViewAction() in view_menu.actions()  # can be hidden from the View menu
+
+
+def test_toolbar_layer_selector_follows_the_active_layer(window, kits_v9_path):
+    assert window.open_path(kits_v9_path)
+    box, scene = window.layer_box, window.scene
+    # The board's copper layers, top to bottom; the active one selected.
+    assert [box.itemText(i) for i in range(box.count())] == ["F.Cu", "In1.Cu", "B.Cu"]
+    assert box.isEnabled() and box.currentText() == scene.active_layer == "F.Cu"
+    # Choosing a layer in the toolbar makes it active (and selects it in the Layers panel)...
+    box.setCurrentIndex(box.findText("B.Cu"))
+    assert scene.active_layer == "B.Cu"
+    assert window.layer_panel._list.currentItem().text() == "B.Cu"
+    # ...and selecting one in the Layers panel updates the toolbar.
+    window.layer_panel.select_layer("In1.Cu")
+    assert scene.active_layer == "In1.Cu" and box.currentText() == "In1.Cu"
+    window.layer_panel.select_layer("Edge.Cuts")  # not copper: ignored
+    assert scene.active_layer == "In1.Cu"
+    # Closing the project empties it.
+    window.close_project()
+    assert box.count() == 0 and not box.isEnabled()
 
 
 def test_heatsinks_panel(app, window, strip_kits, monkeypatch):

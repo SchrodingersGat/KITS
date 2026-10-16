@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 _NAME_ROLE = Qt.ItemDataRole.UserRole
 
 
-def _swatch(color: QColor) -> QIcon:
+def swatch(color: QColor) -> QIcon:
     """Make a small solid-colour icon for a layer list entry.
 
     Args:
@@ -111,12 +111,28 @@ class LayerPanel(QWidget):
         self._list.clear()
         self._copper = {name for name, _, is_copper in layers if is_copper}
         for name, color, _ in layers:
-            item = QListWidgetItem(_swatch(color), name)
+            item = QListWidgetItem(swatch(color), name)
             item.setData(_NAME_ROLE, name)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Checked)
             self._list.addItem(item)
         self._list.blockSignals(False)
+
+    def select_layer(self, name: str) -> None:
+        """Select a copper layer in the list, making it the active layer.
+
+        Emits ``active_layer_changed`` if the selection changes.
+
+        Args:
+            name: KiCad layer name; ignored unless it is a listed copper layer.
+        """
+        if name not in self._copper:
+            return
+        for row in range(self._list.count()):
+            item = self._list.item(row)
+            if item.data(_NAME_ROLE) == name:
+                self._list.setCurrentItem(item)
+                return
 
     def _set_all(self, visible: bool) -> None:
         """Check or uncheck every layer.

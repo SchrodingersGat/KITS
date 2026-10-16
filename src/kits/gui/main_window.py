@@ -39,7 +39,7 @@ from .elements_panel import ElementsPanel
 from .field_display import DisplayMode, format_value
 from .heat_loads_panel import HeatLoadsPanel
 from .heatsinks_panel import HeatsinksPanel
-from .layer_panel import LayerPanel
+from .layer_panel import LayerPanel, swatch
 from .mesh_job import MeshJob
 from .mesh_panel import MeshPanel
 from .results_panel import ResultsPanel
@@ -403,6 +403,40 @@ class MainWindow(QMainWindow):
         self.document.results_changed.connect(
             lambda results: self.display_mode_box.setEnabled(results is not None)
         )
+
+        # Which copper layer is active (drawn on top, with its mesh and results);
+        # mirrors the selection in the Layers panel.
+        self.toolbar.addWidget(QLabel("  Layer: "))
+        self.layer_box = QComboBox()
+        self.layer_box.setToolTip("Copper layer shown on top, with its mesh and results")
+        self.layer_box.setEnabled(False)
+        self.layer_box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.layer_box.currentIndexChanged.connect(
+            lambda index: (
+                self.layer_panel.select_layer(self.layer_box.itemData(index)) if index >= 0 else None
+            )
+        )
+        self.toolbar.addWidget(self.layer_box)
+
+    def _load_layer_box(self) -> None:
+        """List the board's copper layers in the toolbar, top to bottom, selecting the active one."""
+        self.layer_box.blockSignals(True)
+        self.layer_box.clear()
+        if self.scene is not None:
+            for layer in self.scene.layers.values():
+                if layer.is_copper:
+                    self.layer_box.addItem(swatch(layer.color), layer.name, layer.name)
+        self.layer_box.setEnabled(self.layer_box.count() > 0)
+        self.layer_box.blockSignals(False)
+        self._sync_layer_box()
+
+    def _sync_layer_box(self) -> None:
+        """Show the scene's active layer in the toolbar's layer selector."""
+        active = self.scene.active_layer if self.scene is not None else None
+        index = self.layer_box.findData(active) if active else -1
+        self.layer_box.blockSignals(True)
+        self.layer_box.setCurrentIndex(index)
+        self.layer_box.blockSignals(False)
 
     def _sync_display_mode_box(self, index: int) -> None:
         """Show the Solve panel's display choice in the toolbar.
@@ -1162,6 +1196,7 @@ class MainWindow(QMainWindow):
                 )
         else:
             self.layer_panel.set_layers([])
+        self._load_layer_box()
 
         self.info_panel.set_project(kicad)
         self._refresh_3d()
@@ -1316,6 +1351,7 @@ class MainWindow(QMainWindow):
         """
         if self.scene is not None:
             self.scene.set_active_layer(name)
+        self._sync_layer_box()
         self._show_markers()
         self._update_probe()
 
