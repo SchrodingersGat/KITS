@@ -68,8 +68,9 @@ def test_thicker_copper_needs_a_new_solve_not_a_new_mesh(strip_board):
     # Same mesh, 2 oz copper: exactly half the resistance.
     thick = LayeredModel(strip_board.with_thickness_overrides({"F.Cu": 0.07}), mesh).solve_dc(electrodes)
     r_base = base.resistance(("P1", "1"), ("P2", "1"))
-    assert r_base == pytest.approx(R_SQUARE * 32 / 6, rel=1e-6)
-    assert thick.resistance(("P1", "1"), ("P2", "1")) == pytest.approx(r_base / 2, rel=1e-6)
+    # (The solder joints at the pads add under 1%, and don't scale exactly with the copper.)
+    assert r_base == pytest.approx(R_SQUARE * 32 / 6, rel=0.01)
+    assert thick.resistance(("P1", "1"), ("P2", "1")) == pytest.approx(r_base / 2, rel=0.01)
     # Layer heights follow the edited stackup, not the mesh.
     thin = LayeredModel(strip_board.with_thickness_overrides({"dielectric 1": 0.5}), mesh)
     assert thin.by_name["F.Cu"].z - thin.by_name["B.Cu"].z == pytest.approx((0.5 + 0.035) * 1e-3)

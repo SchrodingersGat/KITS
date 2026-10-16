@@ -63,6 +63,12 @@ from .fem import (
 # KiCad's default solder mask thickness, when the stackup doesn't give one.
 DEFAULT_MASK_THICKNESS_MM = 0.01
 
+# Conductance per unit area of a solder joint between a pad and what's soldered to
+# it (a lead, end cap or connector pin): SAC solder (σ ≈ 7.5e6 S/m), ~50 µm thick.
+# About 7 µΩ for a 1 mm² pad, negligible next to the copper, but it lets current
+# enter a pad over its area instead of making the whole pad one potential.
+SOLDER_CONTACT_S_PER_M2 = 1.5e11
+
 # Leakage to 0 V, relative to the mean diagonal, so copper islands not connected
 # to any electrode stay solvable. Small enough not to affect driven currents.
 _LEAKAGE = 1e-12
@@ -113,9 +119,11 @@ class DCResult:
         current_density: Volumetric current density magnitude per triangle, A/m²
             (zero on bare-board triangles).
         sheet_power: Joule power per unit area per triangle, W/m².
-        barrel_heat: Global nodal Joule power from via/plated barrels, W.
+        barrel_heat: Global nodal Joule power from via/plated barrels and the
+            solder joints of terminals (at their pads), W.
         electrode_currents: Current into the board at each electrode, A.
-        electrode_voltages: Area-weighted mean potential of each electrode's pad, V.
+        electrode_voltages: Potential of each electrode: the terminal's for a voltage
+            electrode, the pad's area-weighted mean for a current electrode, V.
         total_power: Total Joule power, W, including resistive elements.
         element_currents: Current through each resistive element from group A to
             group B, A, keyed by element name.
@@ -248,17 +256,21 @@ class LayeredModel:
         """
         return self.pad_nodes(electrode.ref, electrode.pad)
 
-    def pad_nodes(self, ref: str, number: str | Sequence[str]) -> tuple[np.ndarray, np.ndarray]:
+    def pad_nodes(
+        self, ref: str, number: str | Sequence[str], normalize: bool = True
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Global nodes covered by a pad (or several), with their lumped area weights.
 
         Args:
             ref: Footprint reference.
             number: Pad number, or several (a pad group); every pad of the
                 footprint with one of them is included.
+            normalize: Return each node's share of the area (summing to 1); False
+                for its lumped area in mm².
 
         Returns:
-            ``(nodes, weights)``: global node indices on the pads' copper (all
-            their layers) and each node's share of the pads' copper area.
+            ``(nodes, weights)``: global node indices on the pads' exposed copper
+            (all their layers) and each node's share (or area) of it.
 
         Raises:
             SolveError: If a pad doesn't exist or none has meshed copper.
@@ -280,7 +292,7 @@ class LayeredModel:
             layer: area.intersection(self.mask_openings[layer]) if layer in self.mask_openings else area
             for layer, area in areas.items()
         }
-        found = self.area_nodes(exposed, copper_only=True)
+        found = self.area_nodes(exposed, copper_only=True, normalize=normalize)
         if found is None:
             if self.area_nodes(areas, copper_only=True) is not None:
                 raise SolveError(
@@ -405,17 +417,17 @@ class LayeredModel:
         return lf.offset + local, lumped[local]
 
     def area_nodes(
-        self, areas: dict[str, BaseGeometry], copper_only: bool
+        self, areas: dict[str, BaseGeometry], copper_only: bool, normalize: bool = True
     ) -> tuple[np.ndarray, np.ndarray] | None:
         """Global nodes of the triangles inside some areas, with lumped area weights.
 
         Args:
             areas: ``{layer: area}`` in board millimetres.
             copper_only: Only count copper triangles.
+            normalize: Scale the weights to sum to 1; False keeps each node's lumped area, mm².
 
         Returns:
-            ``(nodes, weights)`` with the weights summing to 1, or None if no
-            triangle's centroid falls inside the areas.
+            ``(nodes, weights)``, or None if no triangle's centroid falls inside the areas.
         """
         nodes, weights = [], []
         for lf in self.layers:
@@ -436,7 +448,7 @@ class LayeredModel:
         if not nodes:
             return None
         weights = np.concatenate(weights)
-        return np.concatenate(nodes), weights / weights.sum()
+        return np.concatenate(nodes), weights / weights.sum() if normalize else weights
 
     def barrel_links(self, conductivity: float) -> list[tuple[int, int, float]]:
         """Discrete conductances of all plated barrels between their layers.
@@ -479,14 +491,19 @@ class LayeredModel:
     ) -> DCResult:
         """Solve for potentials and currents with the given electrodes.
 
-        Voltage electrodes are equipotential pads. Current electrodes spread their
-        current over the pad's copper area. If no electrode fixes a voltage, the
-        first sink (negative current) is grounded and its current follows from the
-        others, which must then sum to zero.
+        Current electrodes spread their current over the pad's copper area. A
+        voltage electrode is a terminal (the connector pin soldered to the pad)
+        held at that voltage. If no electrode fixes a voltage, the first sink
+        (negative current) is grounded and its current follows from the others,
+        which must then sum to zero.
 
-        A resistive element's pad groups are its terminals: each group is
-        equipotential (its pads are soldered to one lead frame or end cap, so its
-        nodes are merged into one unknown), and a conductance ``1/R`` joins the two.
+        A resistive element's pad groups are its terminals: each is one
+        potential (its pads are soldered to one lead frame or end cap), and a
+        conductance ``1/R`` joins the two. A terminal is an extra unknown joined
+        to every node of its pads' exposed copper through the solder joint
+        (:data:`SOLDER_CONTACT_S_PER_M2`, by area), so current enters the pad over
+        its area and spreads through its copper, and the pads show the current
+        density they carry. The joints' Joule heat goes to the pads.
 
         Args:
             electrodes: The pads driving the board.
@@ -515,38 +532,57 @@ class LayeredModel:
                 e for e in electrodes if e is not ground
             ]
 
-        rhs = np.zeros(self.size)
-        fixed = np.zeros(self.size, dtype=bool)
-        values = np.zeros(self.size)
-        electrode_nodes = {}
-        for e in electrodes:
-            nodes, weights = self.electrode_nodes(e)
-            electrode_nodes[(e.ref, e.pad)] = (nodes, weights)
-            if e.voltage is not None:
-                fixed[nodes] = True
-                values[nodes] = e.voltage
-            elif e.current is not None:
-                rhs[nodes] += e.current * weights
+        # Terminals (element ends, voltage electrodes): one extra unknown each,
+        # soldered to its pads' nodes. Each is (nodes, contact conductance per node).
+        contacts: list[tuple[np.ndarray, np.ndarray]] = []
 
-        # Merge each element terminal's nodes into one unknown: x = merge @ y.
-        terminals = {e.name: tuple(self.pad_nodes(e.ref, g.pads)[0] for g in e.groups) for e in elements}
-        merge = _merge_matrix(self.size, [nodes for pair in terminals.values() for nodes in pair])
-        label = merge.indices  # reduced unknown of each node (one entry per row)
-        size = merge.shape[1]
-        k_r = merge.T @ k @ merge
+        def terminal(ref: str, pads: str | Sequence[str]) -> int:
+            """Add a terminal soldered to some pads.
+
+            Args:
+                ref: Footprint reference.
+                pads: Pad number(s).
+
+            Returns:
+                The terminal's unknown.
+            """
+            nodes, area_mm2 = self.pad_nodes(ref, pads, normalize=False)
+            contacts.append((nodes, area_mm2 * MM * MM * SOLDER_CONTACT_S_PER_M2))
+            return self.size + len(contacts) - 1
+
+        electrode_nodes, electrode_terminal, injected = {}, {}, {}
+        for e in electrodes:
+            key = (e.ref, e.pad)
+            electrode_nodes[key] = self.electrode_nodes(e)
+            if e.voltage is not None:
+                electrode_terminal[key] = (terminal(e.ref, e.pad), e.voltage)
+            elif e.current is not None:
+                injected[key] = e.current
+        element_terminals = {e.name: tuple(terminal(e.ref, g.pads) for g in e.groups) for e in elements}
+
+        n = self.size + len(contacts)
+        k = sp.block_diag((k, sp.csr_matrix((len(contacts), len(contacts)))), format="csr")
+        for i, (nodes, g) in enumerate(contacts):
+            k = k + _star(self.size + i, nodes, g, n)
         for e in elements:
-            a, b = (label[nodes[0]] for nodes in terminals[e.name])
-            k_r = k_r + _rank_one(np.array([a, b]), np.array([1.0, -1.0]), 1.0 / e.resistance_ohm, size)
-        k_r = k_r.tocsr()
-        rhs_r = merge.T @ rhs
-        fixed_r = np.zeros(size, dtype=bool)
-        fixed_r[label[fixed]] = True
-        values_r = np.zeros(size)
-        values_r[label[fixed]] = values[fixed]
-        reduced_nodes = {key: (np.unique(label[nodes]), None) for key, (nodes, _) in electrode_nodes.items()}
+            a, b = element_terminals[e.name]
+            k = k + _rank_one(np.array([a, b]), np.array([1.0, -1.0]), 1.0 / e.resistance_ohm, n)
+        k = k.tocsr()
+        rhs = np.zeros(n)
+        for key, current in injected.items():
+            nodes, weights = electrode_nodes[key]
+            rhs[nodes] += current * weights
+        fixed = np.zeros(n, dtype=bool)
+        values = np.zeros(n)
+        for t, voltage in electrode_terminal.values():
+            fixed[t], values[t] = True, voltage
+        check_nodes = {
+            key: (np.array([electrode_terminal[key][0]]) if key in electrode_terminal else nodes, None)
+            for key, (nodes, _) in electrode_nodes.items()
+        }
 
         try:
-            _check_connectivity(k_r, rhs_r, fixed_r, reduced_nodes)
+            _check_connectivity(k, rhs, fixed, check_nodes)
         except SolveError as exc:
             if self.mesh_settings.tracks == "all" and not self.mesh_settings.active_areas("exclude"):
                 raise
@@ -554,18 +590,21 @@ class LayeredModel:
                 f"{exc}. The mesh leaves out some tracks or areas: add the nets carrying this current "
                 "to the meshed tracks, or check the exclusion areas"
             ) from exc
-        y = _solve_with_fixed(k_r, rhs_r, fixed_r, values_r)
-        voltage = y[label]
+        y = _solve_with_fixed(k, rhs, fixed, values)
+        voltage = y[: self.size]
 
-        residual = k_r @ y - rhs_r  # current into the board at fixed unknowns
+        residual = k @ y - rhs  # current into the board at the fixed terminals
         currents, potentials = {}, {}
         for key, (nodes, weights) in electrode_nodes.items():
-            currents[key] = float(residual[reduced_nodes[key][0]].sum() + rhs[nodes].sum())
-            potentials[key] = float(voltage[nodes] @ weights)
+            if key in electrode_terminal:
+                t = electrode_terminal[key][0]
+                currents[key], potentials[key] = float(residual[t]), float(y[t])
+            else:
+                currents[key], potentials[key] = injected[key], float(voltage[nodes] @ weights)
 
         element_currents, element_power = {}, {}
         for e in elements:
-            a, b = (label[nodes[0]] for nodes in terminals[e.name])
+            a, b = element_terminals[e.name]
             current = float(y[a] - y[b]) / e.resistance_ohm
             element_currents[e.name] = current
             element_power[e.name] = current**2 * e.resistance_ohm
@@ -586,6 +625,8 @@ class LayeredModel:
             p = g * (voltage[a] - voltage[b]) ** 2
             barrel_heat[a] += p / 2
             barrel_heat[b] += p / 2
+        for i, (nodes, g) in enumerate(contacts):  # solder joints: their heat goes to the pad
+            np.add.at(barrel_heat, nodes, g * (voltage[nodes] - y[self.size + i]) ** 2)
         total_power += float(barrel_heat.sum())
         total_power += sum(element_power.values())
 
@@ -909,7 +950,8 @@ def _solve_with_fixed(k: sp.csr_matrix, rhs: np.ndarray, fixed: np.ndarray, valu
     """Solve ``k x = rhs`` with some unknowns fixed, regularising floating parts.
 
     Nodes with no conductance at all (bare board) are fixed at 0 V; a tiny
-    leakage keeps copper islands that touch no electrode solvable.
+    leakage keeps copper islands that touch no fixed voltage solvable. Copper
+    connected to a fixed voltage gets none, so its solution is exact.
 
     Args:
         k: Global stiffness.
@@ -922,32 +964,13 @@ def _solve_with_fixed(k: sp.csr_matrix, rhs: np.ndarray, fixed: np.ndarray, valu
     """
     diagonal = k.diagonal()
     fixed = fixed | (diagonal == 0)
+    _, component = connected_components(k, directed=False)
+    grounded = np.zeros(component.max() + 1, dtype=bool)
+    grounded[component[fixed & (diagonal != 0)]] = True
+    floating = ~fixed & ~grounded[component]
     leak = _LEAKAGE * diagonal[diagonal > 0].mean()
-    k = k + sp.diags(np.where(fixed, 0, leak))
+    k = k + sp.diags(np.where(floating, leak, 0))
     return _solve_partitioned(k.tocsr(), rhs, fixed, values)
-
-
-def _merge_matrix(size: int, groups: list[np.ndarray]) -> sp.csr_matrix:
-    """Map each unknown to a reduced one, merging every group of nodes into one.
-
-    Groups that share a node are merged together.
-
-    Args:
-        size: Number of unknowns.
-        groups: Node index arrays to make equipotential.
-
-    Returns:
-        ``(size, reduced)`` 0/1 matrix with one entry per row: ``x = M @ y``.
-    """
-    rows = [np.repeat(g[0], len(g)) for g in groups if len(g)]
-    cols = [g for g in groups if len(g)]
-    if rows:
-        rows, cols = np.concatenate(rows), np.concatenate(cols)
-    else:
-        rows = cols = np.zeros(0, dtype=int)
-    graph = sp.coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(size, size))
-    count, label = connected_components(graph, directed=False)
-    return sp.csr_matrix((np.ones(size), (np.arange(size), label)), shape=(size, count))
 
 
 def _star(center: int, nodes: np.ndarray, conductances: np.ndarray, size: int) -> sp.coo_matrix:

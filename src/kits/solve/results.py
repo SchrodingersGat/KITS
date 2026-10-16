@@ -20,7 +20,7 @@ from .solver import SolveSettings
 # 4: solder mask (convection through the mask; pads only contact where the mask is open).
 # 5: element bodies only heat the board through mask openings.
 # 6: heatsinks conduct through solder mask (reduced) and block convection under them.
-SOLVER_VERSION = 6
+SOLVER_VERSION = 7  # 7: terminals and voltage electrodes soldered to their pads (not merged)
 # Bumped when the resistive element thermal model changes; only affects results with elements.
 # 2: the body is its own temperature, joined to each terminal's pads.
 ELEMENT_MODEL_VERSION = 2

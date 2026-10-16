@@ -81,11 +81,13 @@ def test_strip_resistance_matches_sheet_resistance(strip_board):
     model = _model(strip_board)
     dc = model.solve_dc([Electrode("P1", "1", voltage=1.0), Electrode("P2", "1", voltage=0.0)])
     expected = R_SQUARE * (41 - 9) / 6  # 32 mm long, 6 mm wide between pad edges
-    assert dc.resistance(("P1", "1"), ("P2", "1")) == pytest.approx(expected, rel=1e-6)
-    # Current conservation and Joule power.
+    # Plus a little for the solder joints: current enters each pad within ~0.1 mm of its edge.
+    resistance = dc.resistance(("P1", "1"), ("P2", "1"))
+    assert expected < resistance < expected * 1.01
+    # Current conservation and Joule power (the joints' included).
     i1, i2 = dc.electrode_currents[("P1", "1")], dc.electrode_currents[("P2", "1")]
     assert i1 == pytest.approx(-i2, rel=1e-7)
-    assert dc.total_power == pytest.approx(1.0**2 / expected, rel=1e-6)
+    assert dc.total_power == pytest.approx(1.0**2 / resistance, rel=1e-6)
     # Uniform current density I / (W t) in the strip between the pads.
     j = dc.current_density["F.Cu"]
     assert np.median(j[j > 0]) == pytest.approx(i1 / (6e-3 * T_CU), rel=1e-3)
@@ -169,7 +171,8 @@ def test_electrode_covers_every_pad_with_the_number(tmp_path):
     assert len(board.find_pads("P1", "1")) == 2
     dc = _model(board).solve_dc([Electrode("P1", "1", voltage=1.0), Electrode("P2", "1", voltage=0.0)])
     # Together the two halves span the full strip width, so the strip result is unchanged.
-    assert dc.resistance(("P1", "1"), ("P2", "1")) == pytest.approx(R_SQUARE * 32 / 6, rel=1e-6)
+    # (The solder joints at the pads add under 1%.)
+    assert dc.resistance(("P1", "1"), ("P2", "1")) == pytest.approx(R_SQUARE * 32 / 6, rel=0.01)
 
 
 def test_one_sided_convection_still_balances(strip_board):
@@ -205,7 +208,7 @@ def test_copper_weight_from_stackup_sets_sheet_resistance(tmp_path):
     dc = _model(load_board(path)).solve_dc(
         [Electrode("P1", "1", voltage=1.0), Electrode("P2", "1", voltage=0.0)]
     )
-    assert dc.resistance(("P1", "1"), ("P2", "1")) == pytest.approx(R_SQUARE * 32 / 6 / 2, rel=1e-6)
+    assert dc.resistance(("P1", "1"), ("P2", "1")) == pytest.approx(R_SQUARE * 32 / 6 / 2, rel=0.01)
 
 
 # -- heat loads ---------------------------------------------------------------------------
@@ -343,6 +346,30 @@ def test_resistive_element_in_series(bridged_board):
 def _pad_mean(model, thermal, pads):
     nodes, weights = model.pad_nodes("R1", pads)
     return float(weights @ np.concatenate(list(thermal.temperature.values()))[nodes])
+
+
+def test_current_density_shows_inside_soldered_pads(bridged_board):
+    # Current enters R1's pads (x 18..22 and 28..32) and the grounded sink P2 (x 41..45)
+    # through their solder joints, so the pads' copper carries (and shows) current.
+    model = _model(bridged_board)
+    electrodes = [Electrode("P1", "1", current=10.0), Electrode("P2", "1", current=-10.0)]
+    dc = model.solve_dc(electrodes, [_element()])
+    f_cu = model.by_name["F.Cu"]
+    density = dc.current_density["F.Cu"]
+    centroid = f_cu.nodes_mm[f_cu.mesh.t].mean(axis=0)
+    strip = 10.0 / (6e-3 * T_CU)  # uniform I / (W t) along the strips
+
+    def peak(x0, x1):
+        inside = (centroid[:, 0] > x0) & (centroid[:, 0] < x1) & f_cu.copper
+        return density[inside].max()
+
+    # Merged into one potential (as before), they carried exactly none. The current
+    # transfers within ~0.1 mm of where it enters the pad, finer than this 1 mm mesh,
+    # so only part of it shows here.
+    for x0, x1 in ((18, 22), (28, 32), (41, 45)):  # R1's two pads, and P2
+        assert peak(x0, x1) > 0.02 * strip
+    # Each terminal is still one potential at its end cap: the element current is exact.
+    assert dc.element_currents["R1"] == pytest.approx(10.0, rel=1e-9)
 
 
 def test_resistive_element_heat(bridged_board):
