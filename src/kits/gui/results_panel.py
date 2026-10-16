@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence, QLinearGradient, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QFormLayout,
@@ -32,6 +33,64 @@ from .field_display import (
 
 _WARNING_STYLE = "color: #e0a030;"
 _LEGEND_SIZE = (220, 14)
+_NUMBER = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+
+# Results tables: key -> (title, column headings). The first column names the item;
+# the rest are right-aligned numbers.
+RESULT_TABLES = {
+    "sources": ("Current sources", ["Pad", "Current", "Voltage"]),
+    "loads": ("Heat loads", ["Pad", "Heat into board", "Pad temperature"]),
+    "elements": (
+        "Resistive elements",
+        ["Element", "Current", "Power", "Body temp.", "Heat to A", "Heat to B", "Heat to ambient"],
+    ),
+    "heatsinks": ("Heatsinks", ["Heatsink", "Heat", "Temperature"]),
+}
+_TABLE_TIPS = {
+    "sources": "Current into the board at each source pad (negative: a sink), and the pad's voltage",
+    "loads": "Heat into the board at each heat load's pad (negative: taken out), and its mean temperature",
+    "elements": (
+        "Current from terminal A to B, I²R power and body temperature. Heat to a terminal is\n"
+        "positive where the body heats its pads (negative where the board heats the body)."
+    ),
+    "heatsinks": "Heat each heatsink takes from the board (and sheds to ambient), and its temperature",
+}
+
+
+def _number(value: float | None, unit: str, digits: int = 4, signed: bool = False) -> str:
+    """Format a table number with its unit.
+
+    Args:
+        value: The number, or None for a dash.
+        unit: Unit text.
+        digits: Significant digits.
+        signed: Show ``+`` on positive values.
+
+    Returns:
+        e.g. ``"+1.234 W"`` or ``"—"``.
+    """
+    if value is None:
+        return "—"
+    return f"{value:+.{digits}g} {unit}" if signed else f"{value:.{digits}g} {unit}"
+
+
+def copy_cells(table: QTableWidget) -> str:
+    """Copy a table's selected cells to the clipboard as tab-separated rows.
+
+    Args:
+        table: The table.
+
+    Returns:
+        The copied text (empty if nothing is selected).
+    """
+    cells = sorted((i.row(), i.column(), i.text()) for i in table.selectedItems())
+    rows: dict[int, list[str]] = {}
+    for row, _column, text in cells:
+        rows.setdefault(row, []).append(text)
+    text = "\n".join("\t".join(values) for _row, values in sorted(rows.items()))
+    if text:
+        QApplication.clipboard().setText(text)
+    return text
 
 
 class ResultsPanel(QWidget):
@@ -71,6 +130,11 @@ class ResultsPanel(QWidget):
         )
         self.report_button.setEnabled(False)
         self.report_button.clicked.connect(self.report_requested)
+        # One table per kind of simulation element, shown when it has rows.
+        self.tables: dict[str, QTableWidget] = {}
+        self._table_groups: dict[str, QGroupBox] = {}
+        for key, (title, headers) in RESULT_TABLES.items():
+            self._table_groups[key], self.tables[key] = self._build_table(title, headers, _TABLE_TIPS[key])
 
         self.mode = QComboBox()
         for mode in DisplayMode:
@@ -121,6 +185,8 @@ class ResultsPanel(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.addWidget(self.summary)
         layout.addWidget(self.report_button)
+        for group in self._table_groups.values():
+            layout.addWidget(group)
         layout.addWidget(display)
         layout.addWidget(self._build_markers_group())
         layout.addStretch(1)
@@ -248,6 +314,140 @@ class ResultsPanel(QWidget):
             self.legend_note.setText("Scale shared by all layers. Select a layer in the Layers panel.")
         self.legend_high.setText(high_text)
 
+    # -- results tables ------------------------------------------------------------
+
+    def _build_table(self, title: str, headers: list[str], tip: str) -> tuple[QGroupBox, QTableWidget]:
+        """Create one read-only results table in its group box (hidden until it has rows).
+
+        Args:
+            title: Group title.
+            headers: Column headings; the first column names the item.
+            tip: Explanation shown on hover.
+
+        Returns:
+            ``(group, table)``.
+        """
+        table = QTableWidget(0, len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)  # sized to its rows
+        table.setWordWrap(False)
+        table.setToolTip(f"{tip}\nCtrl+C copies the selected cells (tab-separated).")
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column in range(1, len(headers)):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+            table.horizontalHeaderItem(column).setTextAlignment(_NUMBER)
+        copy = QShortcut(QKeySequence.StandardKey.Copy, table, lambda: copy_cells(table))
+        copy.setContext(Qt.ShortcutContext.WidgetShortcut)
+        group = QGroupBox(title)
+        QVBoxLayout(group).addWidget(table)
+        group.hide()
+        return group, table
+
+    def _set_rows(self, key: str, rows: list[list[str]]) -> None:
+        """Fill one results table, sizing it to its rows; hidden when there are none.
+
+        Args:
+            key: The table (a :data:`RESULT_TABLES` key).
+            rows: Cell texts per row.
+        """
+        table = self.tables[key]
+        table.setRowCount(len(rows))
+        for r, cells in enumerate(rows):
+            for c, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if c:
+                    item.setTextAlignment(_NUMBER)
+                table.setItem(r, c, item)
+        table.resizeRowsToContents()
+        height = table.horizontalHeader().height() + 2 * table.frameWidth()
+        height += sum(table.rowHeight(r) for r in range(len(rows)))
+        if table.horizontalScrollBar().isVisible():
+            height += table.horizontalScrollBar().height()
+        table.setFixedHeight(height)
+        self._table_groups[key].setVisible(bool(rows))
+
+    def _fill_tables(self, results) -> None:
+        """Show each simulation element's results in its table.
+
+        Args:
+            results: The :class:`~kits.solve.results.SolveResults`, or None to empty the tables.
+        """
+        if results is None:
+            for key in self.tables:
+                self._set_rows(key, [])
+            return
+        temperature = DisplayMode.TEMPERATURE
+
+        def degrees(value: float | None) -> str:
+            """Format a temperature (or a dash).
+
+            Args:
+                value: °C, or None.
+
+            Returns:
+                The text.
+            """
+            return "—" if value is None else format_value(value, temperature)
+
+        self._set_rows(
+            "sources",
+            [
+                [
+                    label,
+                    _number(results.electrode_currents.get(label), "A", signed=True),
+                    format_value(voltage, DisplayMode.VOLTAGE),
+                ]
+                for label, voltage in sorted(results.electrode_voltages.items())
+            ],
+        )
+        self._set_rows(
+            "loads",
+            [
+                [label, _number(heat, "W", signed=True), degrees(results.load_temperatures.get(label))]
+                for label, heat in sorted(results.load_heat.items())
+            ],
+        )
+        elements = []
+        for name, body in sorted(results.element_temperatures.items()):
+            to_a, to_b = results.element_terminal_heat.get(name, (None, None))
+            elements.append(
+                [
+                    name,
+                    _number(results.element_currents.get(name), "A", signed=True),
+                    _number(results.element_power.get(name), "W"),
+                    degrees(body),
+                    _number(to_a, "W", signed=True),
+                    _number(to_b, "W", signed=True),
+                    _number(results.element_ambient_heat.get(name), "W"),
+                ]
+            )
+        self._set_rows("elements", elements)
+        self._set_rows(
+            "heatsinks",
+            [
+                [name, _number(results.heatsink_heat.get(name), "W"), degrees(temperature_c)]
+                for name, temperature_c in sorted(results.heatsink_temperatures.items())
+            ],
+        )
+
+    def table_rows(self, key: str) -> list[list[str]]:
+        """The cell texts of one results table.
+
+        Args:
+            key: The table (a :data:`RESULT_TABLES` key).
+
+        Returns:
+            Rows of cell texts.
+        """
+        table = self.tables[key]
+        return [
+            [table.item(r, c).text() for c in range(table.columnCount())] for r in range(table.rowCount())
+        ]
+
     def refresh(self, *_args) -> None:
         """Update the summary text and which controls are usable.
 
@@ -257,28 +457,10 @@ class ResultsPanel(QWidget):
         doc = self._document
         results = doc.results
         style, lines = "", []
+        self._fill_tables(results)
         if results is not None:
             lines.append(f"Joule power: {results.total_power_w:.4g} W")
             lines.append(f"Max temperature: {results.max_temperature_c:.1f} °C")
-            for label, voltage in sorted(results.electrode_voltages.items()):
-                lines.append(f"  {label}: {format_value(voltage, DisplayMode.VOLTAGE)}")
-            if results.load_heat:
-                lines.append("Heat loads (heat into the board, pad temperature):")
-            for label, heat in sorted(results.load_heat.items()):
-                temperature = format_value(results.load_temperatures[label], DisplayMode.TEMPERATURE)
-                lines.append(f"  {label}: {heat:+.4g} W, {temperature}")
-            if results.element_temperatures:
-                lines.append("Resistive elements (current, power, body temperature):")
-            for name, body in sorted(results.element_temperatures.items()):
-                current = results.element_currents.get(name, 0.0)
-                power = results.element_power.get(name, 0.0)
-                temperature = format_value(body, DisplayMode.TEMPERATURE)
-                lines.append(f"  {name}: {current:+.4g} A, {power:.4g} W, {temperature}")
-            if results.heatsink_temperatures:
-                lines.append("Heatsinks (heat taken from the board, temperature):")
-            for name, temperature in sorted(results.heatsink_temperatures.items()):
-                shown = format_value(temperature, DisplayMode.TEMPERATURE)
-                lines.append(f"  {name}: {results.heatsink_heat.get(name, 0.0):.4g} W, {shown}")
             if doc.results_from_file:
                 lines.append("Reloaded from the project's saved results.")
             staleness = doc.results_staleness

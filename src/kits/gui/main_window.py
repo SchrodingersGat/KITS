@@ -69,6 +69,7 @@ _KICAD_FILTER = f"KiCad project or board (*{KICAD_PROJECT_SUFFIX} *{BOARD_SUFFIX
 _KICAD_SUFFIXES = (KICAD_PROJECT_SUFFIX, BOARD_SUFFIX)
 _LAST_DIR_KEY = "paths/last_open_dir"
 _PROGRESS_STEPS = 1000
+_STALE_STYLE = "color: #e0a030; font-weight: bold;"  # results out of date (as in the panels)
 
 
 def _scrollable(panel: QWidget) -> QScrollArea:
@@ -171,6 +172,8 @@ class MainWindow(QMainWindow):
         self._last_cursor: QPointF | None = None
         self._click_marker: int | None = None  # marker added by the latest click
         self._draw_target = "heatsink"  # what a rectangle drawn on the board is for
+        self._max_temperature_label = QLabel()  # highest temperature in the results
+        self.statusBar().addPermanentWidget(self._max_temperature_label)
         self._probe_label = QLabel()
         self._probe_label.setToolTip("Solved value under the cursor, on the active layer")
         self.statusBar().addPermanentWidget(self._probe_label)
@@ -210,6 +213,18 @@ class MainWindow(QMainWindow):
         self.document.mesh_changed.connect(self._on_mesh_changed)
         self.document.results_changed.connect(self._on_results_changed)
         self.document.results_changed.connect(self._update_state)  # Generate Report needs results
+        for signal in (  # the max temperature, and whether it's still current
+            self.document.project_changed,
+            self.document.board_changed,
+            self.document.results_changed,
+            self.document.sources_changed,
+            self.document.heat_loads_changed,
+            self.document.elements_changed,
+            self.document.stackup_changed,
+            self.document.heatsinks_changed,
+            self.document.settings_changed,
+        ):
+            signal.connect(self._update_max_temperature)
         self.solve_panel.solve_requested.connect(self.solve)
         self.results_panel.report_requested.connect(self.generate_report)
         self.results_panel.mode_changed.connect(self._on_display_mode_changed)
@@ -1186,6 +1201,36 @@ class MainWindow(QMainWindow):
         """Note a cancelled report."""
         self._finish_report_job()
         self.statusBar().showMessage("Report cancelled", 5000)
+
+    def _update_max_temperature(self, *_args) -> None:
+        """Show the results' highest temperature in the status bar, and where it is.
+
+        Args:
+            *_args: Ignored signal arguments.
+        """
+        label = self._max_temperature_label
+        results = self.document.results
+        if results is None:
+            label.clear()
+            label.setToolTip("")
+            label.hide()
+            return
+        hottest = results.max_temperature_c
+        bodies = results.element_temperatures
+        if bodies and max(bodies.values()) >= hottest:
+            where = f"{max(bodies, key=bodies.get)} body"
+        else:
+            where = max(results.layers, key=lambda r: float(r.temperature.max())).layer
+        text = f"Max {format_value(hottest, DisplayMode.TEMPERATURE)}"
+        tip = f"Highest temperature in the results: {where}"
+        staleness = self.document.results_staleness
+        if staleness:
+            text += " (out of date)"
+            tip += f"\n{staleness}; solve again to update."
+        label.setText(text)
+        label.setStyleSheet(_STALE_STYLE if staleness else "font-weight: bold;")
+        label.setToolTip(tip)
+        label.show()
 
     def _on_results_changed(self, results) -> None:
         """Show (or clear) the results overlay and its legend.

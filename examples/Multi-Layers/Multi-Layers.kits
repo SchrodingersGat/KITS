@@ -4,6 +4,7 @@ mesh:
   min_size_mm: 0.01
   min_circle_points: 36
   corner_size_mm: 0.02
+  via_rings: false
 ambient_temperature_c: 25.0
 materials:
   copper:
@@ -14,6 +15,9 @@ materials:
     thermal_conductivity_w_mk: 0.3
   solder_mask:
     thermal_conductivity_w_mk: 0.25
+  via_fill:
+    type: none
+    thermal_conductivity_w_mk: 0.3
 convection:
   top_w_m2k: 10.0
   bottom_w_m2k: 10.0

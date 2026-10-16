@@ -14,6 +14,9 @@ materials:
     thermal_conductivity_w_mk: 0.3
   solder_mask:
     thermal_conductivity_w_mk: 0.25
+  via_fill:
+    type: none
+    thermal_conductivity_w_mk: 0.3
 convection:
   top_w_m2k: 14.0
   bottom_w_m2k: 10.0
@@ -35,6 +38,7 @@ heatsinks:
   thermal_resistance_board_k_w: 1.0
   thermal_resistance_ambient_k_w: 10.0
   mount: components
+  enabled: false
 resistive_elements:
 - name: R1
   ref: R1

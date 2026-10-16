@@ -231,7 +231,7 @@ class SolveResults:
         """
         reason = self.mesh_fingerprint.staleness(mesh_fingerprint)
         if reason is not None:
-            return reason.replace("saved mesh", "results")
+            return reason.replace("the saved mesh was built", "the results were computed")
         if self.inputs != inputs:
             return (
                 "The current sources, heat loads, elements, heatsinks, layer thicknesses or solver settings "

@@ -493,6 +493,8 @@ def test_solve_in_child_process_shows_overlay_and_reloads(app, window, strip_kit
     assert panel.solve_button.isEnabled() and window.solve_action.isEnabled()
     assert window.document.results is None and not shown.legend.isVisibleTo(shown)
     assert "No results yet" in shown.summary.text()
+    max_label = window._max_temperature_label
+    assert max_label.isHidden()  # nothing to show in the status bar yet
 
     window.solve()
     assert window.solve_job_running and not panel.solve_button.isEnabled()
@@ -505,8 +507,23 @@ def test_solve_in_child_process_shows_overlay_and_reloads(app, window, strip_kit
     scene = window.scene
     assert scene.results_overlay_visible("F.Cu")
     # The results are summarised in the Results tab (not the Solve tab), which is brought forward.
-    assert "Joule power" in shown.summary.text() and "P1.1" in shown.summary.text()
+    assert "Joule power" in shown.summary.text()
+    # Each source in its own table row: pad, current, voltage.
+    sources = shown.table_rows("sources")
+    assert [row[0] for row in sources] == ["P1.1", "P2.1"]
+    assert sources[0][1] == "+5 A" and sources[1][1] == "-5 A" and sources[1][2].endswith("V")
+    assert not shown._table_groups["sources"].isHidden() and shown._table_groups["elements"].isHidden()
+    # Ctrl+C copies selected cells as tab-separated text.
+    from kits.gui.results_panel import copy_cells
+
+    table = shown.tables["sources"]
+    table.selectAll()
+    assert copy_cells(table).splitlines()[0] == "\t".join(sources[0])
     assert "Joule power" not in panel.status.text()
+    # The status bar shows the highest temperature, and where it is.
+    assert not max_label.isHidden()
+    assert max_label.text() == f"Max {results.max_temperature_c:.3g} °C"
+    assert "F.Cu" in max_label.toolTip() or "B.Cu" in max_label.toolTip()
     assert not window._results_dock.isHidden()
     assert shown.legend_high.text().startswith("≥") and "A/mm²" in shown.legend_high.text()
 
@@ -532,6 +549,8 @@ def test_solve_in_child_process_shows_overlay_and_reloads(app, window, strip_kit
     window.document.set_source_current("P2", "1", -6.0)
     assert "current sources" in window.document.results_staleness
     assert "solve again" in panel.status.text()
+    assert window._max_temperature_label.text().endswith("(out of date)")
+    assert "solve again" in window._max_temperature_label.toolTip()
 
 
 def test_solve_disabled_without_balanced_sources(window, strip_kits, monkeypatch):
@@ -897,7 +916,8 @@ def test_heat_loads_panel(app, window, strip_kits):
     results = doc.results
     assert results is not None and results.load_heat["P2.1"] == 3.0
     assert results.load_heat["P1.1"] < 0  # the 10 K/W heatsink takes some of it out
-    assert "Heat loads" in window.results_panel.summary.text()
+    loads = {row[0]: row for row in window.results_panel.table_rows("loads")}
+    assert loads["P2.1"][1] == "+3 W" and loads["P1.1"][1].startswith("-") and loads["P2.1"][2].endswith("°C")
     assert load_kits_project(strip_kits).heat_loads == doc.heat_loads  # saved before solving
 
     # Remove via the panel; editing a load makes the results stale.
@@ -997,7 +1017,13 @@ def test_resistive_elements_panel(app, window, bridged_kits, monkeypatch):
     assert results.element_currents["Shunt"] == pytest.approx(5.0, rel=1e-6)
     assert results.element_power["Shunt"] == pytest.approx(25 * 5e-3, rel=1e-6)
     assert results.element_temperatures["Shunt"] > 25.0
-    assert "Shunt" in window.results_panel.summary.text()
+    if results.max_temperature_c == results.element_temperatures["Shunt"]:  # the body is the hottest
+        assert "Shunt body" in window._max_temperature_label.toolTip()
+    (shunt_row,) = window.results_panel.table_rows("elements")
+    assert shunt_row[:3] == ["Shunt", "+5 A", "0.125 W"] and shunt_row[3].endswith("°C")
+    # Heat out through each terminal and to ambient balances the power.
+    to_a, to_b, ambient = (float(cell.split()[0]) for cell in shunt_row[4:])
+    assert to_a + to_b + ambient == pytest.approx(0.125, rel=1e-3)
     assert "Results tab" in window.solve_panel.status.text()  # the Solve tab points there
     # The body is drawn on the temperature map of its side (F.Cu), and the scale covers it.
     from kits.gui.field_display import DisplayMode
@@ -1168,7 +1194,8 @@ def test_heatsinks_panel(app, window, strip_kits, monkeypatch):
         lambda: not window.solve_job_running and doc.results is not None and doc.results_staleness is None,
     )
     assert doc.results.heatsink_heat["HS1"] > 0
-    assert "Heatsinks" in window.results_panel.summary.text()
+    ((name, heat, temperature),) = window.results_panel.table_rows("heatsinks")
+    assert name == "HS1" and heat.endswith("W") and temperature.endswith("°C")
     assert load_kits_project(strip_kits).heatsinks == doc.heatsinks
 
     # 3D: a block under the board.
