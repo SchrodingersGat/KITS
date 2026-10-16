@@ -24,6 +24,8 @@ Thumbs.db
 # KITS output (meshes, results)
 kits_output/
 
+examples/**/*.html
+
 # Kicad Files
 *.lck
 *.kicad_pcb-bak
