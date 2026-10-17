@@ -39,6 +39,7 @@ from .cached_overlay import CachedOverlayItem
 from .field_display import (
     DisplayMode,
     FieldProbe,
+    VectorSampler,
     color_indices,
     colormap,
     format_resistance,
@@ -86,6 +87,12 @@ PAD_KEY_ROLE = 1
 HEATSINK_ROLE = 2  # item data: name of the heatsink an item draws
 MESH_AREA_ROLE = 3  # item data: name of the mesh area an item draws
 BODY_ROLE = 4  # item data: name of the element whose body temperature an item draws
+VECTOR_ROLE = 5  # item data: True on the flow arrows of a results overlay
+_VECTOR_SPACING_PX = 30  # flow arrows are about this many screen pixels apart, at any zoom
+_VECTOR_ARROWS_ACROSS = 40  # ...or this many along the board's longer side, before a view is known
+_VECTOR_MIN_SPACING_MM = 0.01  # closest arrow spacing, however far the view zooms in
+_VECTOR_MIN_LENGTH = 0.2  # shortest arrow, as a fraction of the longest (weak flow stays visible)
+_Z_VECTORS = 960  # flow arrows: over the results, under the mesh
 _MESH_TILES = 16  # overlay tiles per axis
 _GRID_MIN_PX = 8  # never draw grid lines closer than this on screen
 _GRID_ORIGIN_PX = 8  # half-size of the origin marker
@@ -231,6 +238,12 @@ class BoardScene(QGraphicsScene):
         self._heatsink_markers: LayerItem | None = None
         self._heatsinks_visible = True
         self._elements: list[ResistiveElement] = []
+        self._vectors_visible = False
+        self._vector_view: tuple[QRectF, float] | None = None  # visible area and zoom, for the arrows
+        self._vector_samplers: dict[str, VectorSampler] = {}
+        self._vector_item: LayerItem | None = None
+        self._vector_count = 0
+        self._vector_spacing = 0.0
         self._mesh_area_markers: LayerItem | None = None
         self._mesh_areas_visible = True
         self._elements_visible = True
@@ -820,6 +833,7 @@ class BoardScene(QGraphicsScene):
         for overlay in self._results_overlays.values():
             self.removeItem(overlay)
         self._results_overlays = {}
+        self._vector_samplers = {}
         self._probes = {}
         self._results = results
         if mode is not None:
@@ -986,6 +1000,7 @@ class BoardScene(QGraphicsScene):
                 self._results_overlays[self._active_layer] = self._build_results_overlay(layer)
         for name, overlay in self._results_overlays.items():
             overlay.setVisible(show and name == self._active_layer)
+        self._rebuild_vectors()  # they follow the shown layer, quantity and results
 
     def _build_results_overlay(self, layer: LayerResult) -> LayerItem:
         """Create filled, colour-binned triangles for one layer's results.
@@ -1032,6 +1047,116 @@ class BoardScene(QGraphicsScene):
         if self._results_mode is DisplayMode.TEMPERATURE:
             self._add_body_temperatures(container, layer.layer, colors_)
         return container
+
+    def set_vector_view(self, rect: QRectF, pixels_per_mm: float) -> None:
+        """Tell the scene what the view shows, so flow arrows fit the zoom.
+
+        Arrows are drawn only over this area, about :data:`_VECTOR_SPACING_PX`
+        screen pixels apart: closer together (in mm) the further the view zooms in.
+
+        Args:
+            rect: The visible area, scene coordinates (mm).
+            pixels_per_mm: The view's zoom.
+        """
+        self._vector_view = (rect, pixels_per_mm)
+        if self._vectors_visible:
+            self._rebuild_vectors()
+
+    def set_vectors_visible(self, visible: bool) -> None:
+        """Show or hide flow arrows over the results.
+
+        Args:
+            visible: Whether arrows are drawn.
+        """
+        if visible == self._vectors_visible:
+            return
+        self._vectors_visible = visible
+        self._rebuild_vectors()
+
+    @property
+    def vectors_visible(self) -> bool:
+        """Whether flow arrows are drawn over the results."""
+        return self._vectors_visible
+
+    @property
+    def vector_count(self) -> int:
+        """Number of flow arrows drawn (0 when hidden)."""
+        return self._vector_count
+
+    @property
+    def vector_spacing(self) -> float | None:
+        """Spacing of the drawn flow arrows, mm (None when none are drawn)."""
+        return self._vector_spacing if self._vector_count else None
+
+    def _arrow_spacing(self, layer: LayerResult) -> float:
+        """Arrow spacing for the current zoom: about :data:`_VECTOR_SPACING_PX` pixels.
+
+        Snapped to a power of two in mm, so arrows stay put while zooming within a
+        step, and halve or double in spacing between steps.
+
+        Args:
+            layer: The layer (its size sets the spacing before any view is known).
+
+        Returns:
+            The spacing, mm.
+        """
+        if self._vector_view is not None and self._vector_view[1] > 0:
+            target = _VECTOR_SPACING_PX / self._vector_view[1]
+        else:
+            size = layer.nodes.max(axis=0) - layer.nodes.min(axis=0)
+            target = float(size.max()) / _VECTOR_ARROWS_ACROSS
+        return float(2.0 ** np.round(np.log2(max(target, _VECTOR_MIN_SPACING_MM))))
+
+    def _rebuild_vectors(self) -> None:
+        """Redraw the flow arrows over the visible part of the active layer's results."""
+        if self._vector_item is not None:
+            self.removeItem(self._vector_item)
+            self._vector_item = None
+        self._vector_count = 0
+        overlay = self._results_overlays.get(self._active_layer)
+        if not self._vectors_visible or overlay is None or not overlay.isVisible():
+            return
+        layer = self._results.layer(self._active_layer)
+        if layer.layer not in self._vector_samplers:
+            self._vector_samplers[layer.layer] = VectorSampler(layer)
+        sampler = self._vector_samplers[layer.layer]
+        spacing = self._vector_spacing = self._arrow_spacing(layer)
+        bounds = None
+        if self._vector_view is not None:
+            rect = self._vector_view[0]
+            bounds = (rect.left(), rect.top(), rect.right(), rect.bottom())
+        mode = self._results_mode
+        points, vectors = sampler.sample(mode, spacing, bounds)
+        self._vector_count = len(points)
+        if not len(points):
+            return
+        magnitude = np.hypot(vectors[:, 0], vectors[:, 1])
+        if mode is DisplayMode.TEMPERATURE:
+            reference = sampler.reference(mode)
+        else:
+            reference = value_range(self._results, DisplayMode.CURRENT_DENSITY)[1]
+        length = 0.85 * spacing * np.clip(magnitude / max(reference, 1e-30), _VECTOR_MIN_LENGTH, 1.0)
+        direction = vectors / magnitude[:, None]
+        path = QPainterPath()
+        for (px, py), (dx, dy), size in zip(
+            points.tolist(), direction.tolist(), length.tolist(), strict=True
+        ):
+            tail = QPointF(px - dx * size / 2, py - dy * size / 2)
+            tip = QPointF(px + dx * size / 2, py + dy * size / 2)
+            path.moveTo(tail)
+            path.lineTo(tip)
+            head = 0.35 * size
+            for side in (1, -1):  # two barbs, 25° either side of the shaft
+                cos, sin = np.cos(np.radians(155)), side * np.sin(np.radians(155))
+                path.moveTo(tip)
+                path.lineTo(tip.x() + head * (dx * cos - dy * sin), tip.y() + head * (dx * sin + dy * cos))
+        self._vector_item = LayerItem()
+        self._vector_item.setZValue(_Z_VECTORS)
+        self.addItem(self._vector_item)
+        for color, width in ((QColor(0, 0, 0, 170), 3.0), (QColor(255, 255, 255, 235), 1.3)):
+            item = QGraphicsPathItem(path, self._vector_item)
+            item.setPen(_cosmetic_pen(color, width))
+            item.setData(VECTOR_ROLE, True)
 
     def _add_body_temperatures(self, container: LayerItem, layer: str, palette: list[QColor]) -> None:
         """Fill each resistive element's body with its solved temperature, on its side's outer layer.

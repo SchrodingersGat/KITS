@@ -1,5 +1,6 @@
 import dataclasses
 
+import numpy as np
 import pytest
 
 pytest.importorskip("PySide6")
@@ -697,6 +698,7 @@ def test_layers_panel_overlay_toggles(app, window, strip_kits):
     assert list(boxes) == [
         "Mesh",
         "Results",
+        "Vectors",
         "Current sources",
         "Heat loads",
         "Resistive elements",
@@ -704,7 +706,8 @@ def test_layers_panel_overlay_toggles(app, window, strip_kits):
         "Markers",
         "Grid",
     ]
-    assert all(box.isChecked() for box in boxes.values())
+    assert all(box.isChecked() for name, box in boxes.items() if name != "Vectors")
+    assert not boxes["Vectors"].isChecked()  # flow arrows start off (V)
     scene = window.scene
 
     # Checkbox -> action and board.
@@ -1080,6 +1083,58 @@ def test_toolbar_quick_actions(window, kits_v9_path):
     assert all(a.isEnabled() for a in buttons)
     view_menu = next(a.menu() for a in window.menuBar().actions() if a.text() == "&View")
     assert window.toolbar.toggleViewAction() in view_menu.actions()  # can be hidden from the View menu
+
+
+def test_flow_vectors_toggle(app, window, strip_kits):
+    assert window.open_path(strip_kits)
+    window.solve()
+    _wait(app, lambda: not window.solve_job_running)
+    scene, action, box = window.scene, window.show_vectors_action, window.results_panel.show_vectors
+    assert action.shortcut().toString() == "V" and not action.isChecked() and scene.vector_count == 0
+    assert "Vectors" in window.layer_panel.overlay_boxes
+
+    action.trigger()  # V: arrows on, the overlay rebuilt with them
+    assert (
+        scene.vectors_visible and box.isChecked() and window.layer_panel.overlay_boxes["Vectors"].isChecked()
+    )
+    assert scene.results_overlay_visible("F.Cu") and scene.vector_count > 50
+    # They follow the display mode (heat flow in the temperature view covers the bare board too).
+    copper_arrows = scene.vector_count
+    mode = window.results_panel.mode
+    from kits.gui.field_display import DisplayMode
+
+    mode.setCurrentIndex(mode.findData(DisplayMode.TEMPERATURE))
+    assert scene.vector_count > copper_arrows
+    box.setChecked(False)  # the Results tab checkbox works too
+    assert not action.isChecked() and not scene.vectors_visible and scene.vector_count == 0
+    assert scene.results_overlay_visible("F.Cu")  # rebuilt without arrows
+
+
+def test_flow_vectors_follow_the_zoom(app, window, strip_kits):
+    window.resize(1000, 700)
+    window.show()
+    assert window.open_path(strip_kits)
+    window.solve()
+    _wait(app, lambda: not window.solve_job_running)
+    scene, view = window.scene, window.view
+    window.show_vectors_action.trigger()
+    fitted = scene.vector_spacing
+    # About _VECTOR_SPACING_PX pixels apart on screen, as a power of two in mm.
+    assert fitted * view.pixels_per_mm == pytest.approx(30, rel=0.5)
+    assert np.log2(fitted) == pytest.approx(round(np.log2(fitted)))
+
+    # Zoom in: once zooming pauses the arrows are redrawn closer together, over the visible area only.
+    for _ in range(4):
+        view.zoom_in()
+    _wait(app, lambda: scene.vector_spacing is not None and scene.vector_spacing < fitted)
+    zoomed = scene.vector_spacing
+    assert zoomed * view.pixels_per_mm == pytest.approx(30, rel=0.5)
+    visible = view.visible_scene_rect()
+    assert scene.vector_count * zoomed**2 <= visible.width() * visible.height() * 1.2
+    # And back out: further apart again.
+    for _ in range(4):
+        view.zoom_out()
+    _wait(app, lambda: scene.vector_spacing == fitted)
 
 
 def test_pass_fail_limits(app, window, strip_kits):

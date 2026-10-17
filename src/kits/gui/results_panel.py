@@ -108,6 +108,7 @@ class ResultsPanel(QWidget):
         mode_changed(DisplayMode): The displayed quantity changed.
         log_scale_toggled(bool): The log colour scale option changed.
         show_results_toggled(bool): The results overlay was toggled.
+        show_vectors_toggled(bool): The flow arrows on the results were toggled.
         show_markers_toggled(bool): The markers were toggled.
         report_requested(): The user asked for an HTML report of the results.
     """
@@ -116,6 +117,7 @@ class ResultsPanel(QWidget):
     mode_changed = Signal(object)
     log_scale_toggled = Signal(bool)
     show_results_toggled = Signal(bool)
+    show_vectors_toggled = Signal(bool)
     show_markers_toggled = Signal(bool)
 
     def __init__(self, document: Document, parent=None):
@@ -163,6 +165,12 @@ class ResultsPanel(QWidget):
         self.show_results = QCheckBox("Show results")
         self.show_results.setChecked(True)
         self.show_results.toggled.connect(self.show_results_toggled)
+        self.show_vectors = QCheckBox("Show vectors")
+        self.show_vectors.setToolTip(
+            "Arrows showing where current flows, or heat in the temperature view;\n"
+            "longer arrows mean more flow (V)"
+        )
+        self.show_vectors.toggled.connect(self.show_vectors_toggled)
 
         self.legend_bar = QLabel()
         self.legend_low = QLabel()
@@ -191,6 +199,7 @@ class ResultsPanel(QWidget):
         display_form.addRow("Show:", self.mode)
         display_form.addRow(self.log_scale)
         display_form.addRow(self.show_results)
+        display_form.addRow(self.show_vectors)
         display_form.addRow(self.legend)
 
         layout = QVBoxLayout(self)
@@ -547,7 +556,7 @@ class ResultsPanel(QWidget):
         self.summary.setText("\n".join(lines))
 
         has_results = results is not None
-        for widget in (self.mode, self.show_results, self.legend):
+        for widget in (self.mode, self.show_results, self.show_vectors, self.legend):
             widget.setEnabled(has_results)
         self._update_log_enabled()
         self.legend.setVisible(has_results)

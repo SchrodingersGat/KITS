@@ -12,6 +12,7 @@ from ..postprocess.fields import (  # noqa: F401 (re-exported for the GUI)
     LOG_MAX_DECADES,
     DisplayMode,
     FieldProbe,
+    VectorSampler,
     color_indices,
     format_resistance,
     format_value,
@@ -19,6 +20,7 @@ from ..postprocess.fields import (  # noqa: F401 (re-exported for the GUI)
     supports_log,
     triangle_values,
     value_range,
+    vector_field,
 )
 
 

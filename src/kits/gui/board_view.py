@@ -30,6 +30,7 @@ class BoardView(QGraphicsView):
     double_clicked = Signal(QPointF)  # left double-click, scene position (mm)
     rect_drawn = Signal(QRectF)  # rectangle drawn in draw mode, scene coordinates (mm)
     rect_draw_cancelled = Signal()
+    view_changed = Signal()  # zoomed, panned, fitted or resized: the visible area changed
 
     def __init__(self, parent=None):
         """Configure rendering, anchors and mouse tracking.
@@ -130,6 +131,29 @@ class BoardView(QGraphicsView):
         if self._cursor_pos is not None:
             self._update_cursor_lines(self._cursor_pos + QPoint(dx, dy))
             self._update_cursor_lines(self._cursor_pos)
+        self.view_changed.emit()
+
+    def resizeEvent(self, event) -> None:
+        """Note that the visible area changed.
+
+        Args:
+            event: The resize event.
+        """
+        super().resizeEvent(event)
+        self.view_changed.emit()
+
+    def visible_scene_rect(self) -> QRectF:
+        """The part of the scene the viewport shows.
+
+        Returns:
+            The rectangle in scene coordinates (mm).
+        """
+        return self.mapToScene(self.viewport().rect()).boundingRect()
+
+    @property
+    def pixels_per_mm(self) -> float:
+        """The current zoom: screen pixels per scene millimetre."""
+        return self.transform().m11()
 
     def leaveEvent(self, event) -> None:
         """Hide the crosshair when the mouse leaves the view.
@@ -154,6 +178,7 @@ class BoardView(QGraphicsView):
             self.fitInView(
                 rect.adjusted(-margin, -margin, margin, margin), Qt.AspectRatioMode.KeepAspectRatio
             )
+            self.view_changed.emit()
 
     def zoom_to_fit(self) -> None:
         """Re-fit the rect last passed to :meth:`fit_to_rect`, if any."""
@@ -170,6 +195,7 @@ class BoardView(QGraphicsView):
         current = self.transform().m11()
         factor = max(_MIN_SCALE / current, min(_MAX_SCALE / current, factor))
         self.scale(factor, factor)
+        self.view_changed.emit()
 
     def zoom_in(self) -> None:
         """Zoom in one step about the view centre."""

@@ -70,6 +70,7 @@ _KICAD_FILTER = f"KiCad project or board (*{KICAD_PROJECT_SUFFIX} *{BOARD_SUFFIX
 _KICAD_SUFFIXES = (KICAD_PROJECT_SUFFIX, BOARD_SUFFIX)
 _LAST_DIR_KEY = "paths/last_open_dir"
 _PROGRESS_STEPS = 1000
+_VECTOR_VIEW_DELAY_MS = 80  # redraw flow arrows this long after zooming or panning stops
 _STALE_STYLE = "color: #e0a030; font-weight: bold;"  # results out of date (as in the panels)
 
 
@@ -190,6 +191,7 @@ class MainWindow(QMainWindow):
         for label, act in (
             ("Mesh", self.show_mesh_action),
             ("Results", self.show_results_action),
+            ("Vectors", self.show_vectors_action),
             ("Current sources", self.show_sources_action),
             ("Heat loads", self.show_heat_loads_action),
             ("Resistive elements", self.show_elements_action),
@@ -234,6 +236,7 @@ class MainWindow(QMainWindow):
         self.results_panel.mode_changed.connect(self._on_display_mode_changed)
         self.results_panel.log_scale_toggled.connect(lambda _on: self._on_display_mode_changed())
         self.results_panel.show_results_toggled.connect(self.show_results_action.setChecked)
+        self.results_panel.show_vectors_toggled.connect(self.show_vectors_action.setChecked)
         self.results_panel.show_markers_toggled.connect(self.show_markers_action.setChecked)
         self.document.markers_changed.connect(self._show_markers)
         self.sources_panel.show_sources_toggled.connect(self.show_sources_action.setChecked)
@@ -251,6 +254,12 @@ class MainWindow(QMainWindow):
         self.layer_panel.visibility_changed.connect(self._on_layer_visibility)
         self.layer_panel.active_layer_changed.connect(self._on_active_layer)
         self.view.cursor_moved.connect(self._on_cursor_moved)
+        # Flow arrows fit the zoom: redraw them once zooming or panning pauses.
+        self._vector_view_timer = QTimer(self)
+        self._vector_view_timer.setSingleShot(True)
+        self._vector_view_timer.setInterval(_VECTOR_VIEW_DELAY_MS)
+        self._vector_view_timer.timeout.connect(self._push_vector_view)
+        self.view.view_changed.connect(self._vector_view_timer.start)
         self.view.clicked.connect(self._on_board_clicked)
         self.view.double_clicked.connect(self._on_board_double_clicked)
         self.sources_panel.pad_selected.connect(self._on_source_row_selected)
@@ -376,6 +385,10 @@ class MainWindow(QMainWindow):
             "element's figures (Ctrl+Shift+R)"
         )
         self.show_results_action = toggle("Show &results", True, self._on_show_results_toggled, Qt.Key.Key_R)
+        self.show_vectors_action = toggle("Show &vectors", False, self._on_show_vectors_toggled, Qt.Key.Key_V)
+        self.show_vectors_action.setToolTip(
+            "Arrows on the results showing where current flows (heat, in the temperature view) (V)"
+        )
         self.show_markers_action = toggle("Show mar&kers", True, self._on_show_markers_toggled, Qt.Key.Key_K)
         self.show_sources_action = toggle(
             "Show current &sources", True, self._on_show_sources_toggled, Qt.Key.Key_S
@@ -525,6 +538,7 @@ class MainWindow(QMainWindow):
         view_menu.addAction(self.show_elements_action)
         view_menu.addAction(self.show_heatsinks_action)
         view_menu.addAction(self.show_results_action)
+        view_menu.addAction(self.show_vectors_action)
         view_menu.addAction(self.show_markers_action)
         view_menu.addSeparator()
         view_menu.addAction(self.toolbar.toggleViewAction())
@@ -1293,6 +1307,22 @@ class MainWindow(QMainWindow):
         self._show_markers()
         self._update_probe()
 
+    def _on_show_vectors_toggled(self, checked: bool) -> None:
+        """Show or hide flow arrows over the results, keeping the panel in sync.
+
+        Args:
+            checked: New state of the "Show vectors" action.
+        """
+        self.results_panel.show_vectors.setChecked(checked)
+        if self.scene is not None:
+            self._push_vector_view()
+            self.scene.set_vectors_visible(checked)
+
+    def _push_vector_view(self) -> None:
+        """Give the scene the view's visible area and zoom, which set where flow arrows go."""
+        if self.scene is not None:
+            self.scene.set_vector_view(self.view.visible_scene_rect(), self.view.pixels_per_mm)
+
     def _on_show_results_toggled(self, checked: bool) -> None:
         """Show or hide the results overlay, keeping the panel checkbox in sync.
 
@@ -1405,6 +1435,8 @@ class MainWindow(QMainWindow):
         """
         old_scene = self.scene
         self.scene = BoardScene(kicad.board, self) if kicad else None
+        if self.scene is not None:
+            self.scene.set_vectors_visible(self.show_vectors_action.isChecked())
         self._apply_settings()
         self.view.setScene(self.scene)
         if old_scene is not None:
@@ -1415,6 +1447,7 @@ class MainWindow(QMainWindow):
                 [(lay.name, lay.color, lay.is_copper) for lay in self.scene.layers.values()]
             )
             self.view.fit_to_rect(self.scene.board_rect())
+            self._push_vector_view()
             b = kicad.board
             if b.has_outline:
                 self.statusBar().showMessage(

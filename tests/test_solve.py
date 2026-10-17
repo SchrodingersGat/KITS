@@ -462,6 +462,49 @@ def test_legacy_board_resistance_is_split_between_terminals():
     assert ResistiveElement.from_dict(element.to_dict()) == element
 
 
+def test_flow_vectors(strip_board):
+    from kits.config import HeatLoad, HeatLoadKind
+    from kits.postprocess.fields import DisplayMode, triangle_gradients, vector_field
+    from kits.solve.results import LayerResult
+
+    model = _model(strip_board)
+    dc = model.solve_dc([Electrode("P1", "1", current=10.0), Electrode("P2", "1", current=-10.0)])
+    heat = [HeatLoad("P1", "1", HeatLoadKind.POWER, 1.0)]
+    thermal = model.solve_thermal(dc, heat)
+    f_cu = model.by_name["F.Cu"]
+    layer = LayerResult(
+        "F.Cu",
+        f_cu.nodes_mm,
+        f_cu.mesh.t.T,
+        f_cu.copper,
+        dc.voltage["F.Cu"],
+        thermal.temperature["F.Cu"],
+        dc.current_density["F.Cu"],
+    )
+    # The gradient of a linear field is exact on every triangle.
+    x, y = layer.nodes.T
+    np.testing.assert_allclose(
+        triangle_gradients(layer, 2 * x - 3 * y), np.tile([2.0, -3.0], (len(layer.triangles), 1))
+    )
+
+    # Current flows from P1 (x = 5..9) to P2 (x = 41..45): along +x, at I / (W t) mid-strip.
+    points, vectors = vector_field(layer, DisplayMode.CURRENT_DENSITY, 1.0)
+    middle = (points[:, 0] > 15) & (points[:, 0] < 35)
+    assert middle.sum() > 50
+    assert (vectors[middle, 0] > 0).all()
+    np.testing.assert_allclose(np.hypot(*vectors[middle].T), 10.0 / (6 * T_CU * 1e3), rtol=0.02)
+    assert (points[:, 1] > 1.9).all() and (points[:, 1] < 8.1).all()  # only on the copper strip
+    # Voltage shows the same current flow.
+    _, same = vector_field(layer, DisplayMode.VOLTAGE, 1.0)
+    np.testing.assert_allclose(same, vectors)
+
+    # Heat flows away from the hot end (P1, plus the Joule heat), over the whole board.
+    points, vectors = vector_field(layer, DisplayMode.TEMPERATURE, 1.0)
+    hot_side = (points[:, 0] > 10) & (points[:, 0] < 20) & (points[:, 1] > 3) & (points[:, 1] < 7)
+    assert (vectors[hot_side, 0] > 0).mean() > 0.9
+    assert (points[:, 1] < 2).any()  # bare board too
+
+
 def test_via_plating_and_fill(two_layer_board):
     from kits.mesh.geometry import board_holes
 

@@ -248,21 +248,46 @@ def locate_points(
         ``(triangle, weights)``: index per point (-1 off the mesh, e.g. in a hole)
         and ``(P, 3)`` barycentric weights (zero where not found).
     """
-    corners = nodes[triangles]  # (M, 3, 2)
-    tree = shapely.STRtree(shapely.polygons(corners))
-    hits = tree.query(shapely.points(points), predicate="intersects")
-    triangle = np.full(len(points), -1)
-    first = np.unique(hits[0], return_index=True)
-    triangle[first[0]] = hits[1][first[1]]
-    weights = np.zeros((len(points), 3))
-    found = triangle >= 0
-    a, b, c = (corners[triangle[found], k] for k in range(3))
-    q = points[found]
-    det = (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (c[:, 0] - a[:, 0]) * (b[:, 1] - a[:, 1])
-    l1 = ((q[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (c[:, 0] - a[:, 0]) * (q[:, 1] - a[:, 1])) / det
-    l2 = ((b[:, 0] - a[:, 0]) * (q[:, 1] - a[:, 1]) - (q[:, 0] - a[:, 0]) * (b[:, 1] - a[:, 1])) / det
-    weights[found] = np.column_stack([1 - l1 - l2, l1, l2])
-    return triangle, weights
+    return TriangleLocator(nodes, triangles).locate(points)
+
+
+class TriangleLocator:
+    """A spatial index of a mesh's triangles, for locating many points (built once, reused)."""
+
+    def __init__(self, nodes: np.ndarray, triangles: np.ndarray):
+        """Index a mesh.
+
+        Args:
+            nodes: ``(N, 2)`` node coordinates.
+            triangles: ``(M, 3)`` node indices.
+        """
+        self._corners = nodes[triangles]  # (M, 3, 2)
+        self._tree = shapely.STRtree(shapely.polygons(self._corners))
+
+    def locate(self, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Find the triangle containing each point, with barycentric weights.
+
+        Args:
+            points: ``(P, 2)`` points, same units as the nodes.
+
+        Returns:
+            ``(triangle, weights)``: index per point (-1 off the mesh, e.g. in a hole)
+            and ``(P, 3)`` barycentric weights (zero where not found).
+        """
+        corners = self._corners
+        hits = self._tree.query(shapely.points(points), predicate="intersects")
+        triangle = np.full(len(points), -1)
+        first = np.unique(hits[0], return_index=True)
+        triangle[first[0]] = hits[1][first[1]]
+        weights = np.zeros((len(points), 3))
+        found = triangle >= 0
+        a, b, c = (corners[triangle[found], k] for k in range(3))
+        q = points[found]
+        det = (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (c[:, 0] - a[:, 0]) * (b[:, 1] - a[:, 1])
+        l1 = ((q[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (c[:, 0] - a[:, 0]) * (q[:, 1] - a[:, 1])) / det
+        l2 = ((b[:, 0] - a[:, 0]) * (q[:, 1] - a[:, 1]) - (q[:, 0] - a[:, 0]) * (b[:, 1] - a[:, 1])) / det
+        weights[found] = np.column_stack([1 - l1 - l2, l1, l2])
+        return triangle, weights
 
 
 def sample_layer(layer: LayerResult, points: np.ndarray) -> dict[DisplayMode, np.ndarray]:
@@ -297,6 +322,135 @@ def sample_layer(layer: LayerResult, points: np.ndarray) -> dict[DisplayMode, np
     density[on_copper] = layer.current_density[triangle[on_copper]] / 1e6  # A/m² -> A/mm²
     out[DisplayMode.CURRENT_DENSITY] = density
     return out
+
+
+def triangle_gradients(layer: LayerResult, nodal: np.ndarray) -> np.ndarray:
+    """Gradient of a nodal (linear) field on each triangle, constant within it.
+
+    Args:
+        layer: The layer's mesh.
+        nodal: ``(N,)`` values at its nodes.
+
+    Returns:
+        ``(M, 2)`` gradients, value per millimetre, in board axes.
+    """
+    p = layer.nodes[layer.triangles]  # (M, 3, 2)
+    f = nodal[layer.triangles]  # (M, 3)
+    dx1, dy1 = p[:, 1, 0] - p[:, 0, 0], p[:, 1, 1] - p[:, 0, 1]
+    dx2, dy2 = p[:, 2, 0] - p[:, 0, 0], p[:, 2, 1] - p[:, 0, 1]
+    df1, df2 = f[:, 1] - f[:, 0], f[:, 2] - f[:, 0]
+    det = dx1 * dy2 - dx2 * dy1
+    det = np.where(det == 0, np.inf, det)  # degenerate: no gradient
+    return np.column_stack([(df1 * dy2 - df2 * dy1) / det, (df2 * dx1 - df1 * dx2) / det])
+
+
+class VectorSampler:
+    """Flow arrows for one layer on a grid of any spacing and extent.
+
+    Current density and voltage show where current flows, along ``-grad V``
+    with the current density's magnitude (on copper only). Temperature shows
+    where heat flows, along ``-grad T`` with ``|grad T|`` as the magnitude.
+
+    The triangle index and per-triangle flows are built on first use and kept,
+    so resampling (e.g. as a view zooms and pans) only locates the new points.
+    """
+
+    def __init__(self, layer: LayerResult):
+        """Prepare to sample a layer.
+
+        Args:
+            layer: The layer's results.
+        """
+        self.layer = layer
+        self._locator: TriangleLocator | None = None
+        self._flows: dict[bool, np.ndarray] = {}  # heat? -> (M, 2) flow per triangle
+
+    def flow(self, mode: DisplayMode) -> np.ndarray:
+        """Flow vector of each triangle for a displayed quantity.
+
+        Args:
+            mode: The displayed quantity.
+
+        Returns:
+            ``(M, 2)`` vectors: A/mm² of current (zero off copper), or K/mm down the
+            temperature gradient for :attr:`DisplayMode.TEMPERATURE`.
+        """
+        heat = mode is DisplayMode.TEMPERATURE
+        if heat not in self._flows:
+            layer = self.layer
+            if heat:
+                flow = -triangle_gradients(layer, layer.temperature)
+            else:
+                field = -triangle_gradients(layer, layer.voltage)
+                length = np.hypot(field[:, 0], field[:, 1])
+                unit = np.divide(field, length[:, None], out=np.zeros_like(field), where=length[:, None] > 0)
+                flow = unit * (np.where(layer.copper, layer.current_density, 0.0) / 1e6)[:, None]
+            self._flows[heat] = flow
+        return self._flows[heat]
+
+    def reference(self, mode: DisplayMode) -> float:
+        """A typical large flow on this layer: the 95th percentile of its triangles' flow.
+
+        Args:
+            mode: The displayed quantity.
+
+        Returns:
+            The magnitude (0 if there's no flow).
+        """
+        magnitude = np.hypot(*self.flow(mode).T)
+        moving = magnitude[magnitude > 0]
+        return float(np.percentile(moving, 95)) if moving.size else 0.0
+
+    def sample(
+        self, mode: DisplayMode, spacing: float, bounds: tuple[float, float, float, float] | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Flow arrows on a grid over (part of) the layer.
+
+        The grid is anchored to the board's origin, at ``(i + 1/2) * spacing``, so
+        sampling a moved or resized region keeps the arrows that are still in it
+        exactly where they were.
+
+        Args:
+            mode: The displayed quantity.
+            spacing: Grid spacing, mm.
+            bounds: ``(x0, y0, x1, y1)`` region to cover, mm; the whole layer if None.
+
+        Returns:
+            ``(points, vectors)``: ``(K, 2)`` arrow positions (mm) and ``(K, 2)`` flow
+            vectors there (A/mm² for current, K/mm for heat), for grid points on the
+            mesh (and on copper, for current) where there's some flow.
+        """
+        layer = self.layer
+        lo, hi = layer.nodes.min(axis=0), layer.nodes.max(axis=0)
+        if bounds is not None:
+            lo, hi = np.maximum(lo, bounds[:2]), np.minimum(hi, bounds[2:])
+        xs = (np.arange(np.ceil(lo[0] / spacing - 0.5), np.floor(hi[0] / spacing - 0.5) + 1) + 0.5) * spacing
+        ys = (np.arange(np.ceil(lo[1] / spacing - 0.5), np.floor(hi[1] / spacing - 0.5) + 1) + 0.5) * spacing
+        if not len(xs) or not len(ys):
+            return np.zeros((0, 2)), np.zeros((0, 2))
+        gx, gy = np.meshgrid(xs, ys)
+        points = np.column_stack([gx.ravel(), gy.ravel()])
+        if self._locator is None:
+            self._locator = TriangleLocator(layer.nodes, layer.triangles)
+        triangle, _ = self._locator.locate(points)
+        keep = triangle >= 0
+        vectors = self.flow(mode)[np.maximum(triangle, 0)]
+        keep &= np.hypot(vectors[:, 0], vectors[:, 1]) > 0
+        return points[keep], vectors[keep]
+
+
+def vector_field(layer: LayerResult, mode: DisplayMode, spacing: float) -> tuple[np.ndarray, np.ndarray]:
+    """Flow arrows on a regular grid over a whole layer (see :class:`VectorSampler`).
+
+    Args:
+        layer: The layer's results.
+        mode: The displayed quantity.
+        spacing: Grid spacing, mm.
+
+    Returns:
+        ``(points, vectors)``, as :meth:`VectorSampler.sample`.
+    """
+    return VectorSampler(layer).sample(mode, spacing)
 
 
 class FieldProbe:
