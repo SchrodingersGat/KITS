@@ -35,6 +35,7 @@ from ..solve.elements import (
     default_body_thermal,
     pad_numbers,
     parse_resistance,
+    suggest_resistance,
 )
 from .document import Document
 from .field_display import format_resistance
@@ -121,7 +122,16 @@ class ElementDialog(QDialog):
         self.name = QLineEdit(element.name)
         self.resistance = QLineEdit(format_resistance(element.resistance_ohm).replace(" ", ""))
         self.resistance.setToolTip("Ohms, with an optional SI prefix: 10m, 4.7, 4R7, 2k2, 10mΩ")
-        value_hint = QLabel(f"Footprint value: {footprint.value or '—'}")
+        suggestion = suggest_resistance(footprint)
+        if suggestion is not None:
+            hint = f"From the part's {suggestion.source}: {format_resistance(suggestion.ohms)}"
+        else:
+            hint = (
+                f"Value {footprint.value or '—'} isn't a resistance, and no field gives one "
+                "(e.g. Resistance or Rds(on)): enter it from the datasheet"
+            )
+        value_hint = QLabel(hint)
+        value_hint.setWordWrap(True)
         value_hint.setEnabled(False)
 
         groups = QGridLayout()
@@ -433,7 +443,9 @@ class ElementsPanel(QWidget):
             ref=footprint.reference,
             group_a=groups[0],
             group_b=groups[1],
-            resistance_ohm=parse_resistance(footprint.value) or DEFAULT_RESISTANCE_OHM,
+            resistance_ohm=suggestion.ohms
+            if (suggestion := suggest_resistance(footprint))
+            else DEFAULT_RESISTANCE_OHM,
         )
         dialog = ElementDialog(footprint, suggestion, taken, self._document.solve_settings, self)
         element = self.run_dialog(dialog)

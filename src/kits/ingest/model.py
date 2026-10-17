@@ -231,7 +231,9 @@ class Footprint:
     """A placed footprint and its pads; ``rotation`` in degrees CCW as displayed.
 
     ``body_graphics`` holds the footprint's Fab and courtyard drawings (board
-    coordinates), which outline the component body.
+    coordinates), which outline the component body. ``properties`` holds every
+    field of the footprint (KiCad copies the schematic symbol's fields onto it,
+    e.g. ``"MPN"`` or a user's ``"Rds(on)"``), by name.
     """
 
     reference: str
@@ -242,6 +244,7 @@ class Footprint:
     side: str  # F.Cu or B.Cu
     pads: list[Pad] = field(default_factory=list)
     body_graphics: list[Graphic] = field(default_factory=list)
+    properties: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

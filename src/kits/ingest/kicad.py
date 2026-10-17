@@ -531,11 +531,15 @@ class _BoardReader:
         """
         pos, rot = _at(node)
         reference, value_text = "", ""
+        properties: dict[str, str] = {}
         self._fp_mask_margin = _float(node, "solder_mask_margin", None)
         for prop in children(node, "property"):
-            if len(prop) >= 3 and prop[1] == "Reference":
+            if len(prop) < 3:
+                continue
+            properties[str(prop[1])] = str(prop[2])
+            if prop[1] == "Reference":
                 reference = str(prop[2])
-            elif len(prop) >= 3 and prop[1] == "Value":
+            elif prop[1] == "Value":
                 value_text = str(prop[2])
         for text in children(node, "fp_text"):  # KiCad <= 7
             if len(text) >= 3 and text[1] == "reference" and not reference:
@@ -550,6 +554,7 @@ class _BoardReader:
             position=pos,
             rotation=rot,
             side=str(value(node, "layer", "F.Cu")),
+            properties=properties,
         )
         for item in children(node):
             kw = item[0]

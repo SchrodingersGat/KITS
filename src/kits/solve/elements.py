@@ -275,3 +275,68 @@ def parse_resistance(text: str) -> float | None:
     digits = f"{whole or '0'}.{fraction or trailing or '0'}"
     value = float(digits) * _SI_PREFIX[prefix]
     return value if value > 0 else None
+
+
+# Footprint fields (named any way: case, spaces and punctuation are ignored) that
+# hold a part's resistance, in order of preference: an explicit resistance, then
+# a transistor's on-resistance.
+RESISTANCE_FIELDS = ("resistance", "r", "rdson", "rdsonmax", "rdsontyp", "rds", "ron", "onresistance")
+# "Rds(on) = 1.5 mΩ" or "RDSon 1m5" written in a free-text field such as Description.
+_ON_RESISTANCE_TEXT = re.compile(r"r\s*_?\s*ds\s*[\(_]?\s*on\s*\)?\s*(?:max|typ)?\s*[:=]?\s*", re.IGNORECASE)
+
+
+def _field_key(name: str) -> str:
+    """A field name reduced for matching: lower case, letters and digits only.
+
+    Args:
+        name: The field name, e.g. ``"R_DS(on) max"``.
+
+    Returns:
+        e.g. ``"rdsonmax"``.
+    """
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+@dataclass(frozen=True)
+class ResistanceSuggestion:
+    """A resistance read from a footprint's fields.
+
+    Attributes:
+        ohms: The resistance.
+        source: Where it came from, e.g. ``"Value"`` or ``"field 'Rds(on)'"``.
+    """
+
+    ohms: float
+    source: str
+
+
+def suggest_resistance(footprint: Footprint) -> ResistanceSuggestion | None:
+    """The resistance of a part, from its schematic fields (copied onto the footprint).
+
+    In order: the Value field (``"10m"``, ``"4R7"``); a field named for a
+    resistance (:data:`RESISTANCE_FIELDS`, e.g. ``"Resistance"``, ``"Rds(on)"``);
+    an on-resistance written in any field's text (``"Rds(on) = 1.5 mΩ"``).
+
+    Args:
+        footprint: The footprint.
+
+    Returns:
+        The resistance and where it came from, or None if no field gives one
+        (e.g. a MOSFET whose Value is a part number and has no on-resistance field).
+    """
+    found = parse_resistance(footprint.value)
+    if found is not None:
+        return ResistanceSuggestion(found, "Value")
+    fields = {_field_key(name): (name, text) for name, text in footprint.properties.items()}
+    for key in RESISTANCE_FIELDS:
+        if key in fields:
+            name, text = fields[key]
+            found = parse_resistance(text.strip())
+            if found is not None:
+                return ResistanceSuggestion(found, f"field '{name}'")
+    for name, text in footprint.properties.items():
+        for match in _ON_RESISTANCE_TEXT.finditer(text):
+            found = parse_resistance(text[match.end() :])
+            if found is not None:
+                return ResistanceSuggestion(found, f"field '{name}' ({text.strip()[:40]})")
+    return None

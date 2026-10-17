@@ -91,6 +91,56 @@ def test_default_body_thermal_from_body_type(tmp_path, ref, lib_id, pads, expect
     assert terminal_thermal_resistances(footprint, override) == (3.0, expected[2])
 
 
+def _footprint_with(value: str, **properties: str):
+    from kits.ingest.model import Footprint
+
+    return Footprint(
+        "Q1", value, "Package:TO-252-2", (0.0, 0.0), 0.0, "F.Cu", properties={"Value": value, **properties}
+    )
+
+
+@pytest.mark.parametrize(
+    "value, properties, ohms, source",
+    [
+        # The Value field, as for resistors.
+        ("10m", {}, 0.01, "Value"),
+        ("4R7", {"Rds(on)": "1m"}, 4.7, "Value"),  # the Value wins
+        # A MOSFET: the Value is a part number; a field names its on-resistance.
+        ("IAUS300N10S5N015T", {"Rds(on)": "1.5mΩ"}, 0.0015, "field 'Rds(on)'"),
+        ("IAUS300N10S5N015T", {"R_DS(on) max": "1m5"}, 0.0015, "field 'R_DS(on) max'"),
+        ("BSC010N04", {"RDSON": "1.0 mOhm"}, 0.001, "field 'RDSON'"),
+        ("SHUNT-X", {"Resistance": "500u"}, 0.0005, "field 'Resistance'"),
+        ("SHUNT-X", {"Resistance": "n/a", "Rds": "2m"}, 0.002, "field 'Rds'"),  # unparsable: next field
+        # Written in a free-text field.
+        (
+            "IAUS300N10S5N015T",
+            {"Description": "N-ch MOSFET, 100V, RDS(on) = 2.3 mOhm"},
+            0.0023,
+            "Description",
+        ),
+    ],
+)
+def test_suggest_resistance_from_part_fields(value, properties, ohms, source):
+    from kits.solve.elements import suggest_resistance
+
+    suggestion = suggest_resistance(_footprint_with(value, **properties))
+    assert suggestion.ohms == pytest.approx(ohms) and source in suggestion.source
+
+
+def test_no_resistance_suggestion():
+    from kits.solve.elements import suggest_resistance
+
+    # A part number and a rating aren't resistances.
+    assert suggest_resistance(_footprint_with("IAUS300N10S5N015T", Rating="100V 300A", MPN="X")) is None
+
+
+def test_footprint_fields_are_kept(board_v9_path):
+    from kits.ingest import load_board
+
+    (footprint,) = load_board(board_v9_path).footprints
+    assert footprint.properties == {"Reference": "R1", "Value": "10k"}
+
+
 _VALID = {
     "name": "Q1",
     "ref": "Q1",
