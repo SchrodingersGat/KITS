@@ -509,6 +509,9 @@ def test_solve_in_child_process_shows_overlay_and_reloads(app, window, strip_kit
     assert scene.results_overlay_visible("F.Cu")
     # The results are summarised in the Results tab (not the Solve tab), which is brought forward.
     assert "Joule power" in shown.summary.text()
+    # No resistive elements: all of it is copper loss.
+    assert f"Copper losses: {results.total_power_w:.4g} W (100.0%)" in shown.summary.text()
+    assert "Resistive element losses: 0 W (0.0%)" in shown.summary.text()
     # Each source in its own table row: pad, current, voltage.
     sources = shown.table_rows("sources")
     assert [row[0] for row in sources] == ["P1.1", "P2.1"]
@@ -1022,6 +1025,13 @@ def test_resistive_elements_panel(app, window, bridged_kits, monkeypatch):
     assert results.element_temperatures["Shunt"] > 25.0
     if results.max_temperature_c == results.element_temperatures["Shunt"]:  # the body is the hottest
         assert "Shunt body" in window._max_temperature_label.toolTip()
+    # The losses split: the shunt's I²R, and the copper's share of the rest.
+    assert results.element_losses_w == pytest.approx(25 * 5e-3, rel=1e-6)
+    assert results.copper_losses_w + results.element_losses_w == pytest.approx(results.total_power_w)
+    summary = window.results_panel.summary.text()
+    share = 100 * results.element_losses_w / results.total_power_w
+    assert f"Resistive element losses: {results.element_losses_w:.4g} W ({share:.1f}%)" in summary
+    assert f"Copper losses: {results.copper_losses_w:.4g} W ({100 - share:.1f}%)" in summary
     (shunt_row,) = window.results_panel.table_rows("elements")
     assert shunt_row[:3] == ["Shunt", "+5 A", "0.125 W"] and shunt_row[3].endswith("°C")
     # Heat out through each terminal and to ambient balances the power.

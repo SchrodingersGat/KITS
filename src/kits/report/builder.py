@@ -267,6 +267,51 @@ def _element_rows(project: KitsProject, board: Board, results: SolveResults) -> 
     return rows
 
 
+def _losses(results: SolveResults) -> str:
+    """Where the Joule power goes: the copper, and each resistive element.
+
+    Args:
+        results: The results.
+
+    Returns:
+        The section's HTML.
+    """
+    total = results.total_power_w
+
+    def share(watts: float) -> str:
+        """Percentage of the total.
+
+        Args:
+            watts: Part of the total.
+
+        Returns:
+            e.g. ``"20.7%"`` (a dash if there's no loss at all).
+        """
+        return f"{100 * watts / total:.1f}%" if total > 0 else "—"
+
+    rows = [
+        [
+            "Copper (tracks, pours, vias, solder joints)",
+            _num(results.copper_losses_w, "W"),
+            share(results.copper_losses_w),
+        ]
+    ]
+    for name, watts in sorted(results.element_power.items(), key=lambda item: -item[1]):
+        rows.append([f"Resistive element {_e(name)}", _num(watts, "W"), share(watts)])
+    if results.element_power:
+        rows.append(
+            ["All resistive elements", _num(results.element_losses_w, "W"), share(results.element_losses_w)]
+        )
+    rows.append(["<b>Total</b>", f"<b>{_num(total, 'W')}</b>", "<b>100%</b>" if total > 0 else "—"])
+    return _table(
+        "Losses",
+        "Joule power (I²R) dissipated in the copper and in each resistive element, "
+        "and its share of the total.",
+        ["Where", "Power", "Share"],
+        rows,
+    )
+
+
 def _tables(project: KitsProject, board: Board, results: SolveResults) -> str:
     """Every input and its results, as HTML sections.
 
@@ -301,6 +346,7 @@ def _tables(project: KitsProject, board: Board, results: SolveResults) -> str:
             numeric={1, 2, 4, 5},
         )
     )
+    sections.append(_losses(results))
     multiplier = project.current_multiplier
     sources = [
         [
@@ -631,6 +677,8 @@ def report_data(
         "verdict": verdict(check_limits(results, project.limits)),
         "summary": {
             "power": results.total_power_w,
+            "copper_losses": results.copper_losses_w,
+            "element_losses": results.element_losses_w,
             "max_temperature": results.max_temperature_c,
             "max_density": max_density,
             "voltage_span": max(voltages) - min(voltages) if voltages else 0.0,

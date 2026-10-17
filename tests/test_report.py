@@ -82,6 +82,16 @@ def test_report_contents(bridged_project, tmp_path):
     assert data["summary"]["max_temperature"] == pytest.approx(results.max_temperature_c)
     for heading in ("Current sources", "Heat loads", "Resistive elements", "Settings", "Board stackup"):
         assert heading in page
+    # Total losses and where they go: the copper and each element, with their shares.
+    summary = data["summary"]
+    assert summary["element_losses"] == pytest.approx(results.element_losses_w)
+    assert summary["copper_losses"] + summary["element_losses"] == pytest.approx(summary["power"])
+    losses = page[page.index("<h3>Losses</h3>") : page.index("<h3>Current sources</h3>")]
+    assert (
+        "Copper (tracks, pours, vias, solder joints)" in losses and "Resistive element R1 &lt;b&gt;" in losses
+    )
+    share = 100 * results.element_losses_w / results.total_power_w
+    assert f"{share:.1f}%" in losses and "100%" in losses
     # The verdict, and the limits table.
     assert data["verdict"] is False
     assert "Pass/fail limits" in page and '<b class="fail">FAIL</b>' in page

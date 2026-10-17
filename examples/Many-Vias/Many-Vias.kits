@@ -28,6 +28,13 @@ current_sources:
 - ref: J2
   pad: '1'
   current_a: -10.0
+stackup_edits:
+  board_hash: 0f90546b016fed3cce7cd0f91fd03643fa98bda4557bb806a42abcdeea86e3de
+  thickness_mm:
+    In1.Cu: 0.07
+    F.Cu: 0.07
+    In2.Cu: 0.07
+    B.Cu: 0.07
 heatsinks:
 - name: HS1
   side: bottom

@@ -540,6 +540,13 @@ class ResultsPanel(QWidget):
         self._fill_tables(results)
         if results is not None:
             lines.append(f"Joule power: {results.total_power_w:.4g} W")
+            total = results.total_power_w
+            for label, watts in (
+                ("Copper losses", results.copper_losses_w),
+                ("Resistive element losses", results.element_losses_w),
+            ):
+                share = f" ({100 * watts / total:.1f}%)" if total > 0 else ""
+                lines.append(f"    {label}: {watts:.4g} W{share}")
             lines.append(f"Max temperature: {results.max_temperature_c:.1f} °C")
             if doc.results_from_file:
                 lines.append("Reloaded from the project's saved results.")

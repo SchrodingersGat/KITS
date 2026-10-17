@@ -141,6 +141,16 @@ class SolveResults:
         return next((r for r in self.layers if r.layer == name), None)
 
     @property
+    def element_losses_w(self) -> float:
+        """Joule power in the resistive elements (resistors, MOSFETs...), W: everything but the copper."""
+        return float(sum(self.element_power.values()))
+
+    @property
+    def copper_losses_w(self) -> float:
+        """Joule power in the board's copper (sheets, via barrels, solder joints), W."""
+        return self.total_power_w - self.element_losses_w
+
+    @property
     def max_temperature_c(self) -> float:
         """Highest temperature on any layer or of any element body."""
         return max([*(float(r.temperature.max()) for r in self.layers), *self.element_temperatures.values()])

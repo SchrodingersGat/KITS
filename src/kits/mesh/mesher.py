@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from collections import defaultdict
 from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import gmsh
@@ -31,6 +32,8 @@ HOLE_SIZE_GRADING = 1.0
 # size field much cheaper to evaluate; the distance error (< one point spacing)
 # only matters right at the edge, where the edge vertices themselves set the size.
 _DISTANCE_POINTS_PER_HOLE = 9
+# Mesh layers in parallel processes once the board has this many outline vertices.
+_PARALLEL_MIN_VERTICES = 20_000
 
 Progress = Callable[[str, float], None]
 
@@ -83,8 +86,10 @@ def _configure(settings: MeshSettings) -> None:
     # boundary segments at edges and grow towards max size inside.
     gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
     gmsh.option.setNumber("Mesh.Algorithm", 6)  # Frontal-Delaunay
-    # Each layer has many surfaces (copper/bare faces); mesh them in parallel.
-    gmsh.option.setNumber("General.NumThreads", os.cpu_count() or 1)
+    # One thread: gmsh's multithreaded 2D meshing corrupts memory now and then
+    # (access violations and illegal instructions inside generate(), within ~150
+    # runs of a small board). Layers are meshed in parallel processes instead.
+    gmsh.option.setNumber("General.NumThreads", 1)
 
 
 def _refine_around_holes(
@@ -328,6 +333,73 @@ def write_msh(mesh: BoardMesh, path: str | Path) -> None:
         gmsh.model.remove()
 
 
+def _parallel_worth_it(geometry: list[LayerGeometry]) -> bool:
+    """Whether meshing the layers in separate processes beats meshing them in turn.
+
+    Each process costs about a second to start (Python, gmsh), so small boards
+    are meshed in this process.
+
+    Args:
+        geometry: The layers to mesh.
+
+    Returns:
+        True for several layers with enough geometry (vertices) to be worth it.
+    """
+    if len(geometry) < 2 or (os.cpu_count() or 1) < 2:
+        return False
+    vertices = sum(
+        len(f.polygon.exterior.coords) + sum(len(r.coords) for r in f.polygon.interiors)
+        for geom in geometry
+        for f in geom.faces
+    )
+    return vertices >= _PARALLEL_MIN_VERTICES
+
+
+def _mesh_layer_job(geom: LayerGeometry, settings: MeshSettings, z_mm: float) -> LayerMesh:
+    """Mesh one layer in its own (worker process) gmsh session.
+
+    Args:
+        geom: The layer's planar partition.
+        settings: Mesh settings.
+        z_mm: Layer height.
+
+    Returns:
+        The layer mesh.
+    """
+    gmsh.initialize(interruptible=False)
+    try:
+        _configure(settings)
+        return mesh_layer(geom, settings, z_mm)
+    finally:
+        gmsh.finalize()
+
+
+def _mesh_layers_in_processes(jobs: list, done: Callable[[int], None]) -> list[LayerMesh]:
+    """Mesh layers in parallel worker processes (each runs single-threaded gmsh).
+
+    gmsh holds global state and its own threading isn't safe (see :func:`_configure`),
+    so separate processes are the way to use several cores.
+
+    Args:
+        jobs: ``(geometry, settings, z_mm)`` per layer, in order.
+        done: Called with the number of layers finished so far.
+
+    Returns:
+        The layer meshes, in the order of ``jobs``.
+
+    Raises:
+        MeshError: If gmsh fails on a layer.
+    """
+    workers = min(len(jobs), os.cpu_count() or 1)
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_mesh_layer_job, *job): i for i, job in enumerate(jobs)}
+        results: list[LayerMesh | None] = [None] * len(jobs)
+        for count, future in enumerate(as_completed(futures), 1):
+            results[futures[future]] = future.result()
+            done(count)
+    return results
+
+
 def mesh_board(
     board: Board,
     settings: MeshSettings,
@@ -359,14 +431,21 @@ def mesh_board(
     # Progress budget: geometry 30%, meshing 65%, writing 5%.
     geometry = extract_layers(board, settings, lambda msg, f: report(msg, 0.30 * f))
     heights = layer_heights(board)
+    jobs = [(geom, settings, heights[geom.layer]) for geom in geometry]
 
+    if _parallel_worth_it(geometry):
+        layers = _mesh_layers_in_processes(
+            jobs, lambda done: report(f"Meshed {done}/{n} layers", 0.30 + 0.65 * done / n)
+        )
+    else:
+        layers = []
     gmsh.initialize(interruptible=False)
     try:
         _configure(settings)
-        layers = []
-        for i, geom in enumerate(geometry):
-            report(f"Meshing {geom.layer} ({i + 1}/{n})", 0.30 + 0.65 * i / n)
-            layers.append(mesh_layer(geom, settings, heights[geom.layer]))
+        if not layers:
+            for i, job in enumerate(jobs):
+                report(f"Meshing {job[0].layer} ({i + 1}/{n})", 0.30 + 0.65 * i / n)
+                layers.append(mesh_layer(*job))
         mesh = BoardMesh(layers, settings, Path(msh_path) if msh_path else None, fingerprint)
         if msh_path:
             report("Writing mesh file", 0.95)

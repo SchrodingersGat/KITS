@@ -143,6 +143,9 @@ function fmt(value, unit) {
   }
   return `${sig(value, 3)} ${unit}`.trim();
 }
+function share(part, total) {
+  return total > 0 ? ` · ${(100 * part / total).toFixed(1)}%` : "";
+}
 function sig(value, digits) {
   if (value === 0) return "0";
   const text = Number(value).toPrecision(digits);
@@ -313,6 +316,8 @@ function buildPage() {
   const cards = [
     ...(DATA.verdict === null ? [] : [["Result", DATA.verdict ? "PASS" : "FAIL"]]),
     ["Joule power", fmt(s.power, "W")],
+    ["Copper losses" + share(s.copper_losses, s.power), fmt(s.copper_losses, "W")],
+    ["Element losses" + share(s.element_losses, s.power), fmt(s.element_losses, "W")],
     ["Max temperature", fmt(s.max_temperature, "°C")],
     ["Max current density", fmt(s.max_density, "A/mm²")],
     ["Voltage span", fmt(s.voltage_span, "V")],
