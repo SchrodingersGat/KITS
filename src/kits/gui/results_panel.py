@@ -52,8 +52,8 @@ RESULT_TABLES = {
 }
 _TABLE_TIPS = {
     "limits": (
-        "The results against the project's limits (set on the Solve tab). Current density is the peak\n"
-        "over 99.5% of the copper area: sharp inside corners have mesh-dependent spikes."
+        "The results against the project's limits (set on the Solve tab). Current density leaves out\n"
+        "corner spikes as set there: sharp inside corners have mesh-dependent spikes."
     ),
     "sources": "Current into the board at each source pad (negative: a sink), and the pad's voltage",
     "loads": "Heat into the board at each heat load's pad (negative: taken out), and its mean temperature",

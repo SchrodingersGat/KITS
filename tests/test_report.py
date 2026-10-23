@@ -12,6 +12,7 @@ pytest.importorskip("skfem")
 
 from kits.config import CurrentSource, HeatLoad, HeatLoadKind, PadGroup, ResistiveElement  # noqa: E402
 from kits.ingest import load_project  # noqa: E402
+from kits.postprocess.limits import layer_peak_current_density, peak_current_density  # noqa: E402
 from kits.project import KitsProject, load_kits_project  # noqa: E402
 from kits.report import cli  # noqa: E402
 from kits.report.builder import encode_raster, report_data  # noqa: E402
@@ -130,9 +131,12 @@ def test_report_contents(bridged_project, tmp_path):
     )
     # Each layer marks where each quantity peaks, with the exact (not pixel-sampled) value.
     peaks = data["layers"][0]["peaks"]
-    assert peaks["CURRENT_DENSITY"]["value"] == pytest.approx(
-        layer.current_density[layer.copper].max() / 1e6
-    )
+    # Current density leaves out corner spikes, as the project's limits say (0.5% by default).
+    spike_free, _ = layer_peak_current_density(layer)
+    assert peaks["CURRENT_DENSITY"]["value"] == pytest.approx(spike_free)
+    assert spike_free < layer.current_density[layer.copper].max() / 1e6
+    assert data["summary"]["peak_density"] == pytest.approx(peak_current_density(results)[0])
+    assert "99.5% of the copper area" in data["summary"]["density_basis"]
     copper_nodes = np.unique(layer.triangles[layer.copper])
     assert peaks["VOLTAGE"]["value"] == pytest.approx(layer.voltage[copper_nodes].max())
     # Temperature peaks on the hotter of the copper and the resistor body drawn on F.Cu.

@@ -38,7 +38,13 @@ from ..postprocess.fields import (
     triangle_values,
     value_range,
 )
-from ..postprocess.limits import CURRENT_DENSITY_AREA_PERCENTILE, check_limits, verdict
+from ..postprocess.limits import (
+    check_limits,
+    current_density_basis,
+    layer_peak_current_density,
+    peak_current_density,
+    verdict,
+)
 from ..project import KitsProject
 from ..solve.elements import default_ambient_conductance, default_body_thermal, terminal_thermal_resistances
 from ..solve.results import LayerResult, SolveResults
@@ -329,9 +335,9 @@ def _tables(project: KitsProject, board: Board, results: SolveResults) -> str:
     sections.append(
         _table(
             "Pass/fail limits",
-            "The project's limits. Current density is the peak over "
-            f"{CURRENT_DENSITY_AREA_PERCENTILE:g}% of the copper area: sharp inside corners have "
-            "mesh-dependent spikes.",
+            "The project's limits. Current density is the "
+            f"{current_density_basis(project.limits.current_density_spike_area_pct)}: sharp inside "
+            "corners have mesh-dependent spikes.",
             ["Check", "Limit", "Value", "Where", "Margin", "Result"],
             [
                 [
@@ -600,17 +606,19 @@ def _bodies(project: KitsProject, board: Board, results: SolveResults) -> list[d
     return bodies
 
 
-def _peaks(layer: LayerResult, bodies: list[dict]) -> dict[str, dict]:
+def _peaks(layer: LayerResult, bodies: list[dict], spike_area_pct: float) -> dict[str, dict]:
     """Where each quantity peaks on a layer, for the map markers.
 
     Taken from the solution itself rather than the map pixels, so the value is
-    exact. Current density is the raw per-triangle maximum (often a corner
-    spike); voltage and temperature are nodal maxima. On the temperature map an
-    element body drawn on the layer is the peak if it is hotter than the copper.
+    exact. Current density is the per-triangle peak, ignoring corner spikes as
+    the project's limits say; voltage and temperature are nodal maxima. On the
+    temperature map an element body drawn on the layer is the peak if it is
+    hotter than the copper.
 
     Args:
         layer: The layer's results.
         bodies: Element bodies (see :func:`_bodies`).
+        spike_area_pct: Copper area ignored as corner spikes, % (0: none).
 
     Returns:
         ``{mode name: {x, y, value, body}}`` for each quantity with a value on
@@ -622,10 +630,11 @@ def _peaks(layer: LayerResult, bodies: list[dict]) -> dict[str, dict]:
         if not shown.any():
             continue
         if mode is DisplayMode.CURRENT_DENSITY:
-            t = int(np.flatnonzero(shown)[np.argmax(values[shown])])
-            (x, y), value = layer.nodes[layer.triangles[t]].mean(axis=0), float(values[t])
-            if value <= 0:
+            found = layer_peak_current_density(layer, spike_area_pct)
+            if found is None:
                 continue  # no current on this layer: nothing to mark
+            value, t = found
+            x, y = layer.nodes[layer.triangles[t]].mean(axis=0)
         else:
             nodal = layer.voltage if mode is DisplayMode.VOLTAGE else layer.temperature
             candidates = np.unique(layer.triangles[shown])
@@ -692,6 +701,7 @@ def report_data(
         )
 
     bodies = _bodies(project, board, results)
+    spikes = project.limits.current_density_spike_area_pct
     layers = []
     for i, layer in enumerate(results.layers):
         report(f"Rendering {layer.layer}", i / len(results.layers))
@@ -703,14 +713,10 @@ def report_data(
                     mode.name: encode_raster(values, log=supports_log(mode))
                     for mode, values in sampled.items()
                 },
-                "peaks": _peaks(layer, bodies),
+                "peaks": _peaks(layer, bodies, spikes),
             }
         )
 
-    max_density = max(
-        (float(r.current_density[r.copper].max()) / 1e6 for r in results.layers if r.copper.any()),
-        default=0.0,
-    )
     voltages = [v for r in results.layers for v in (float(r.voltage.min()), float(r.voltage.max()))]
     return {
         "title": project.name,
@@ -725,7 +731,8 @@ def report_data(
             "copper_losses": results.copper_losses_w,
             "element_losses": results.element_losses_w,
             "max_temperature": results.max_temperature_c,
-            "max_density": max_density,
+            "peak_density": peak_current_density(results, spikes)[0],
+            "density_basis": current_density_basis(spikes),
             "voltage_span": max(voltages) - min(voltages) if voltages else 0.0,
             "layers": len(results.layers),
             "triangles": int(sum(len(r.triangles) for r in results.layers)),

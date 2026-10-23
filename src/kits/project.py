@@ -205,8 +205,8 @@ class KitsProject:
             data["heatsinks"] = [h.to_dict() for h in self.heatsinks]
         if self.resistive_elements:
             data["resistive_elements"] = [e.to_dict() for e in self.resistive_elements]
-        if self.limits.any:
-            data["limits"] = self.limits.to_dict()
+        if limits := self.limits.to_dict():
+            data["limits"] = limits
         data.update({k: v for k, v in self.extra.items() if k not in data})
         return data
 

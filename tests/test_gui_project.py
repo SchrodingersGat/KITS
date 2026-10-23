@@ -1175,6 +1175,17 @@ def test_pass_fail_limits(app, window, strip_kits):
 
     values["max_temperature_c"].setValue(results.max_temperature_c + 5)
     assert shown.verdict.text() == "PASS" and window._verdict_label.text().strip() == "PASS"
+    # Corner spikes are ignored by default; switched off, the check takes the true maximum.
+    from kits.postprocess.limits import check_limits
+
+    assert solve.spike_check.isChecked() and doc.limits.current_density_spike_area_pct == 0.5
+    excluded = check_limits(results, doc.limits)[0].value
+    solve.spike_check.setChecked(False)
+    assert doc.limits.current_density_spike_area_pct == 0 and not solve.spike_area.isEnabled()
+    assert check_limits(results, doc.limits)[0].value >= excluded
+    solve.spike_check.setChecked(True)
+    solve.spike_area.setValue(2.0)
+    assert doc.limits.current_density_spike_area_pct == 2.0
     # Switching a limit off drops it.
     checks["max_current_density_a_mm2"].setChecked(False)
     assert doc.limits.max_current_density_a_mm2 is None and len(shown.table_rows("limits")) == 1
@@ -1186,6 +1197,7 @@ def test_pass_fail_limits(app, window, strip_kits):
     assert window.open_path(strip_kits)
     assert checks["max_temperature_c"].isChecked() and not checks["max_current_density_a_mm2"].isChecked()
     assert values["max_temperature_c"].value() == pytest.approx(round(results.max_temperature_c + 5, 1))
+    assert solve.spike_check.isChecked() and solve.spike_area.value() == 2.0
 
 
 def test_generate_report_from_toolbar_and_results_tab(app, window, strip_kits, tmp_path, monkeypatch):

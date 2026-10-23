@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..config import ConfigError, Limits, SolveSettings
+from ..config import DEFAULT_SPIKE_AREA_PCT, MAX_SPIKE_AREA_PCT, ConfigError, Limits, SolveSettings
 from . import colors
 from .document import Document
 
@@ -35,8 +35,7 @@ _LIMIT_FIELDS = (
         " A/mm²",
         (0.1, 10_000.0),
         35.0,
-        "Fail if the current density exceeds this over more than 0.5% of the copper area. The very\n"
-        "highest values sit at sharp inside corners and depend on the mesh, so they're left out.",
+        "Fail if the peak current density exceeds this. Corner spikes are left out as set below.",
     ),
     (
         "max_temperature_c",
@@ -230,6 +229,26 @@ class SolvePanel(QWidget):
             box.valueChanged.connect(self._on_limits_edited)
             self.limit_checks[name], self.limit_values[name] = check, box
             form.addRow(check, box)
+        tip = (
+            "The highest current densities sit at sharp inside corners, where they are singular and\n"
+            "keep growing as the mesh is refined. With this on, the peak current density (for the\n"
+            "check, and in the report) ignores the highest values over this share of the copper area.\n"
+            "Off: the true maximum, corner spikes included."
+        )
+        self.spike_check = QCheckBox("Ignore corner spikes")
+        self.spike_area = QDoubleSpinBox()
+        self.spike_area.setRange(0.01, MAX_SPIKE_AREA_PCT)
+        self.spike_area.setDecimals(2)
+        self.spike_area.setSingleStep(0.1)
+        self.spike_area.setSuffix(" % of copper")
+        self.spike_area.setValue(DEFAULT_SPIKE_AREA_PCT)
+        self.spike_area.setKeyboardTracking(False)
+        for widget in (self.spike_check, self.spike_area):
+            widget.setToolTip(tip)
+        self.spike_check.toggled.connect(self.spike_area.setEnabled)
+        self.spike_check.toggled.connect(self._on_limits_edited)
+        self.spike_area.valueChanged.connect(self._on_limits_edited)
+        form.addRow(self.spike_check, self.spike_area)
         note = QLabel(
             "Checked against the results without solving again; the Results tab shows pass or fail."
         )
@@ -250,7 +269,8 @@ class SolvePanel(QWidget):
             name: self.limit_values[name].value() if self.limit_checks[name].isChecked() else None
             for name in self.limit_checks
         }
-        return Limits(**values)
+        spikes = self.spike_area.value() if self.spike_check.isChecked() else 0.0
+        return Limits(**values, current_density_spike_area_pct=spikes)
 
     def _load_limits(self) -> None:
         """Show the open project's limits."""
@@ -265,6 +285,14 @@ class SolvePanel(QWidget):
             box.setEnabled(value is not None)
             for widget in (check, box):
                 widget.blockSignals(False)
+        spikes = limits.current_density_spike_area_pct
+        for widget in (self.spike_check, self.spike_area):
+            widget.blockSignals(True)
+        self.spike_check.setChecked(spikes > 0)
+        self.spike_area.setValue(spikes if spikes > 0 else DEFAULT_SPIKE_AREA_PCT)
+        self.spike_area.setEnabled(spikes > 0)
+        for widget in (self.spike_check, self.spike_area):
+            widget.blockSignals(False)
 
     def _on_limits_edited(self, *_args) -> None:
         """Store the edited limits in the project (unsaved until File > Save).

@@ -18,6 +18,8 @@ DEFAULT_CORNER_SIZE_MM = 0.1
 # Global scale applied to every current source at solve time.
 MAX_CURRENT_MULTIPLIER = 1000.0
 ABSOLUTE_ZERO_C = -273.15
+DEFAULT_SPIKE_AREA_PCT = 0.5  # copper area whose highest current densities count as corner spikes
+MAX_SPIKE_AREA_PCT = 10.0
 MAX_LAYER_THICKNESS_MM = 10.0
 MIN_CIRCLE_POINTS_RANGE = (8, 1000)
 
@@ -1226,10 +1228,14 @@ class Limits:
             (see :func:`kits.postprocess.limits.peak_current_density`).
         max_temperature_c: Highest acceptable temperature anywhere on the board or
             any element body, °C, or None for no check.
+        current_density_spike_area_pct: Share of the copper area, %, whose highest
+            current densities are ignored as corner spikes when taking the peak
+            (for the check and the report); 0 takes the true maximum.
     """
 
     max_current_density_a_mm2: float | None = None
     max_temperature_c: float | None = None
+    current_density_spike_area_pct: float = DEFAULT_SPIKE_AREA_PCT
 
     @property
     def any(self) -> bool:
@@ -1249,6 +1255,11 @@ class Limits:
         t = self.max_temperature_c
         if t is not None and not (math.isfinite(t) and t > ABSOLUTE_ZERO_C):
             raise ConfigError("the temperature limit must be above absolute zero")
+        s = self.current_density_spike_area_pct
+        if not (math.isfinite(s) and 0 <= s <= MAX_SPIKE_AREA_PCT):
+            raise ConfigError(
+                f"the current density spike area must be between 0 and {MAX_SPIKE_AREA_PCT:g}% of the copper"
+            )
 
     def to_dict(self) -> dict:
         """Return the YAML representation.
@@ -1261,6 +1272,8 @@ class Limits:
             data["max_current_density_a_mm2"] = self.max_current_density_a_mm2
         if self.max_temperature_c is not None:
             data["max_temperature_c"] = self.max_temperature_c
+        if self.current_density_spike_area_pct != DEFAULT_SPIKE_AREA_PCT:
+            data["current_density_spike_area_pct"] = self.current_density_spike_area_pct
         return data
 
     @classmethod
@@ -1287,6 +1300,9 @@ class Limits:
                 max_temperature_c=None
                 if data.get("max_temperature_c") is None
                 else float(data["max_temperature_c"]),
+                current_density_spike_area_pct=float(
+                    data.get("current_density_spike_area_pct", DEFAULT_SPIKE_AREA_PCT)
+                ),
             )
         except (TypeError, ValueError) as exc:
             raise ConfigError(f"invalid limit: {exc}") from exc

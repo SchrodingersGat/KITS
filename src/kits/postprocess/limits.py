@@ -9,14 +9,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..config import Limits
-from ..solve.results import SolveResults
+from ..config import DEFAULT_SPIKE_AREA_PCT, Limits
+from ..solve.results import LayerResult, SolveResults
 
-# Current density is compared at this area-weighted percentile of the copper:
-# the value exceeded over only 0.5% of the copper area. The true maximum sits
-# at sharp inside corners, where the density is singular and grows as the mesh
-# is refined, so it would make the check depend on the mesh rather than the design.
-CURRENT_DENSITY_AREA_PERCENTILE = 99.5
+# The peak current density ignores the highest values over a small share of the
+# copper area (Limits.current_density_spike_area_pct): the true maximum sits at
+# sharp inside corners, where the density is singular and grows as the mesh is
+# refined, so it would make the peak depend on the mesh rather than the design.
 
 
 @dataclass(frozen=True)
@@ -29,7 +28,7 @@ class LimitCheck:
         limit: The threshold.
         value: The results' value compared with it.
         where: Where that value occurs (a layer, or an element body).
-        basis: How the value is taken, e.g. ``"peak over 99.5% of the copper area"``.
+        basis: How the value is taken (see :func:`current_density_basis`).
     """
 
     quantity: str
@@ -82,33 +81,101 @@ def _weighted_percentile(values: np.ndarray, weights: np.ndarray, percentile: fl
     return float(values[order][min(index, len(values) - 1)])
 
 
-def peak_current_density(results: SolveResults) -> tuple[float, str]:
-    """The current density exceeded over only 0.5% of the copper area, and the layer it's highest on.
+def current_density_basis(spike_area_pct: float) -> str:
+    """How the peak current density is taken, in words.
+
+    Args:
+        spike_area_pct: See :attr:`kits.config.Limits.current_density_spike_area_pct`.
+
+    Returns:
+        E.g. ``"peak over 99.5% of the copper area (corner spikes excluded)"``.
+    """
+    if spike_area_pct > 0:
+        return f"peak over {100 - spike_area_pct:g}% of the copper area (corner spikes excluded)"
+    return "true maximum (corner spikes included)"
+
+
+def _copper_density(layer: LayerResult) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """A layer's copper triangles with their current density and area.
+
+    Args:
+        layer: The layer's results.
+
+    Returns:
+        ``(triangles, A/mm², mm²)``: indices of the copper triangles, and each one's
+        current density and area.
+    """
+    copper = np.flatnonzero(layer.copper)
+    return copper, layer.current_density[copper] / 1e6, _triangle_areas(layer)[copper]  # A/m² -> A/mm²
+
+
+def _peak(values: np.ndarray, areas: np.ndarray, spike_area_pct: float) -> float:
+    """The highest value once the top ``spike_area_pct`` % of the area is ignored.
+
+    Args:
+        values: Values per triangle.
+        areas: Their areas.
+        spike_area_pct: Share of the area to ignore, %; 0 for the maximum.
+
+    Returns:
+        The peak (0 if there are no values).
+    """
+    if spike_area_pct <= 0:
+        return float(values.max()) if len(values) else 0.0
+    return _weighted_percentile(values, areas, 100 - spike_area_pct)
+
+
+def peak_current_density(
+    results: SolveResults, spike_area_pct: float = DEFAULT_SPIKE_AREA_PCT
+) -> tuple[float, str]:
+    """The peak current density, ignoring corner spikes, and the layer it's highest on.
 
     Args:
         results: The results.
+        spike_area_pct: Share of the copper area whose highest densities are
+            ignored, % (see :attr:`kits.config.Limits.current_density_spike_area_pct`);
+            0 for the true maximum.
 
     Returns:
-        ``(A/mm², layer)``: the area-weighted :data:`CURRENT_DENSITY_AREA_PERCENTILE`
-        of every copper triangle on every layer, and the layer whose own
-        percentile is highest.
+        ``(A/mm², layer)``: the peak over every copper triangle on every layer,
+        and the layer whose own peak is highest.
     """
     values, areas, per_layer = [], [], {}
     for layer in results.layers:
-        copper = layer.copper
-        if not copper.any():
+        if not layer.copper.any():
             continue
-        density = layer.current_density[copper] / 1e6  # A/m² -> A/mm²
-        area = _triangle_areas(layer)[copper]
+        _, density, area = _copper_density(layer)
         values.append(density)
         areas.append(area)
-        per_layer[layer.layer] = _weighted_percentile(density, area, CURRENT_DENSITY_AREA_PERCENTILE)
+        per_layer[layer.layer] = _peak(density, area, spike_area_pct)
     if not values:
         return 0.0, ""
-    peak = _weighted_percentile(
-        np.concatenate(values), np.concatenate(areas), CURRENT_DENSITY_AREA_PERCENTILE
-    )
+    peak = _peak(np.concatenate(values), np.concatenate(areas), spike_area_pct)
     return peak, max(per_layer, key=per_layer.get)
+
+
+def layer_peak_current_density(
+    layer: LayerResult, spike_area_pct: float = DEFAULT_SPIKE_AREA_PCT
+) -> tuple[float, int] | None:
+    """A layer's own peak current density and a triangle where it occurs.
+
+    With spikes excluded, the triangle is the densest one at or below the peak:
+    a real hot spot (e.g. the neck of a track) rather than a corner singularity.
+
+    Args:
+        layer: The layer's results.
+        spike_area_pct: As for :func:`peak_current_density`.
+
+    Returns:
+        ``(A/mm², triangle index)``, or None if the layer carries no current.
+    """
+    triangles, density, area = _copper_density(layer)
+    if not len(density) or density.max() <= 0:
+        return None
+    peak = _peak(density, area, spike_area_pct)
+    at_or_below = np.flatnonzero(density <= peak)
+    best = at_or_below[np.argmax(density[at_or_below])]
+    return float(density[best]), int(triangles[best])
 
 
 def hottest(results: SolveResults) -> tuple[float, str]:
@@ -140,7 +207,7 @@ def check_limits(results: SolveResults, limits: Limits) -> list[LimitCheck]:
     """
     checks = []
     if limits.max_current_density_a_mm2 is not None:
-        value, where = peak_current_density(results)
+        value, where = peak_current_density(results, limits.current_density_spike_area_pct)
         checks.append(
             LimitCheck(
                 "Current density",
@@ -148,7 +215,7 @@ def check_limits(results: SolveResults, limits: Limits) -> list[LimitCheck]:
                 limits.max_current_density_a_mm2,
                 value,
                 where,
-                f"peak over {CURRENT_DENSITY_AREA_PERCENTILE:g}% of the copper area (corner spikes excluded)",
+                current_density_basis(limits.current_density_spike_area_pct),
             )
         )
     if limits.max_temperature_c is not None:
