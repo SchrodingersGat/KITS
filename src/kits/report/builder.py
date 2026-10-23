@@ -35,12 +35,13 @@ from ..postprocess.fields import (
     format_value,
     sample_layer,
     supports_log,
+    triangle_values,
     value_range,
 )
 from ..postprocess.limits import CURRENT_DENSITY_AREA_PERCENTILE, check_limits, verdict
 from ..project import KitsProject
 from ..solve.elements import default_ambient_conductance, default_body_thermal, terminal_thermal_resistances
-from ..solve.results import SolveResults
+from ..solve.results import LayerResult, SolveResults
 
 DEFAULT_MAX_PIXELS = 1600  # map width/height along the board's longer side
 OUNCE_COPPER_MM = 0.0348  # 1 oz/ft² copper
@@ -599,6 +600,48 @@ def _bodies(project: KitsProject, board: Board, results: SolveResults) -> list[d
     return bodies
 
 
+def _peaks(layer: LayerResult, bodies: list[dict]) -> dict[str, dict]:
+    """Where each quantity peaks on a layer, for the map markers.
+
+    Taken from the solution itself rather than the map pixels, so the value is
+    exact. Current density is the raw per-triangle maximum (often a corner
+    spike); voltage and temperature are nodal maxima. On the temperature map an
+    element body drawn on the layer is the peak if it is hotter than the copper.
+
+    Args:
+        layer: The layer's results.
+        bodies: Element bodies (see :func:`_bodies`).
+
+    Returns:
+        ``{mode name: {x, y, value, body}}`` for each quantity with a value on
+        the layer; ``body`` names the element when the peak is its body.
+    """
+    peaks = {}
+    for mode in (DisplayMode.CURRENT_DENSITY, DisplayMode.VOLTAGE, DisplayMode.TEMPERATURE):
+        values, shown = triangle_values(layer, mode)
+        if not shown.any():
+            continue
+        if mode is DisplayMode.CURRENT_DENSITY:
+            t = int(np.flatnonzero(shown)[np.argmax(values[shown])])
+            (x, y), value = layer.nodes[layer.triangles[t]].mean(axis=0), float(values[t])
+            if value <= 0:
+                continue  # no current on this layer: nothing to mark
+        else:
+            nodal = layer.voltage if mode is DisplayMode.VOLTAGE else layer.temperature
+            candidates = np.unique(layer.triangles[shown])
+            n = int(candidates[np.argmax(nodal[candidates])])
+            (x, y), value = layer.nodes[n], float(nodal[n])
+        peak = {"x": round(float(x), 4), "y": round(float(y), 4), "value": value, "body": None}
+        if mode is DisplayMode.TEMPERATURE:
+            for body in bodies:
+                if body["layer"] == layer.layer and body["temperature"] > peak["value"]:
+                    polygon = shapely.Polygon(max(body["polygons"], key=len))
+                    centre = polygon.representative_point()
+                    peak = {"x": centre.x, "y": centre.y, "value": body["temperature"], "body": body["name"]}
+        peaks[mode.name] = peak
+    return peaks
+
+
 def report_data(
     project: KitsProject,
     board: Board,
@@ -648,6 +691,7 @@ def report_data(
             }
         )
 
+    bodies = _bodies(project, board, results)
     layers = []
     for i, layer in enumerate(results.layers):
         report(f"Rendering {layer.layer}", i / len(results.layers))
@@ -659,6 +703,7 @@ def report_data(
                     mode.name: encode_raster(values, log=supports_log(mode))
                     for mode, values in sampled.items()
                 },
+                "peaks": _peaks(layer, bodies),
             }
         )
 
@@ -696,7 +741,7 @@ def report_data(
         },
         "modes": modes,
         "layers": layers,
-        "bodies": _bodies(project, board, results),
+        "bodies": bodies,
     }
 
 

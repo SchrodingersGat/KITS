@@ -1,6 +1,6 @@
 board: Resistors.kicad_pro
 mesh:
-  max_size_mm: 0.2
+  max_size_mm: 0.1
   min_size_mm: 0.005
   min_circle_points: 36
   corner_size_mm: 0.01
@@ -14,9 +14,13 @@ materials:
     thermal_conductivity_w_mk: 0.3
   solder_mask:
     thermal_conductivity_w_mk: 0.25
+  via_fill:
+    type: none
+    thermal_conductivity_w_mk: 0.3
 convection:
   top_w_m2k: 10.0
   bottom_w_m2k: 10.0
+current_multiplier: 1.5
 current_sources:
 - ref: J1
   pad: '1'
@@ -43,6 +47,7 @@ heatsinks:
   thermal_resistance_board_k_w: 1.0
   thermal_resistance_ambient_k_w: 10.0
   mount: components
+  enabled: false
 - name: HS2
   side: top
   x_mm: 120.134
@@ -65,17 +70,6 @@ resistive_elements:
     name: Net-(R1-Pad2)
     pads:
     - '2'
-- name: R1
-  ref: R1
-  resistance_ohm: 1.0
-  pads_a:
-    name: Net-(J1-Pin_1)
-    pads:
-    - '1'
-  pads_b:
-    name: Net-(R1-Pad2)
-    pads:
-    - '2'
 - name: R3
   ref: R3
   resistance_ohm: 1.0
@@ -85,5 +79,16 @@ resistive_elements:
     - '1'
   pads_b:
     name: GND
+    pads:
+    - '2'
+- name: R1
+  ref: R1
+  resistance_ohm: 1.0
+  pads_a:
+    name: Net-(J1-Pin_1)
+    pads:
+    - '1'
+  pads_b:
+    name: Net-(R1-Pad2)
     pads:
     - '2'

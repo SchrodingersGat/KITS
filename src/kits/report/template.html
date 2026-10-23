@@ -92,10 +92,11 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
 
   <h2>Field maps</h2>
   <p class="note">Hover over a layer to read the value under the cursor; the same point is marked on every layer.
-    Coordinates are from the board's lower-left corner, Y up.</p>
+    The ring on each layer marks that layer's peak. Coordinates are from the board's lower-left corner, Y up.</p>
   <div class="controls">
     <div class="segmented" id="modes" role="group" aria-label="Quantity"></div>
     <label class="check" id="log-toggle"><input type="checkbox" id="log" checked> Log scale</label>
+    <label class="check"><input type="checkbox" id="peaks" checked> Peak markers</label>
     <div class="legend">
       <div class="bar" id="legend-bar"></div>
       <div class="ticks"><span id="legend-low"></span><span id="legend-mid"></span><span id="legend-high"></span></div>
@@ -123,7 +124,7 @@ footer { color: var(--muted); font-size: 12px; margin-top: 32px; }
 const DATA = JSON.parse(document.getElementById("report-data").textContent);
 const CODES = 65534;
 const STEPS = 256;
-const state = { mode: DATA.modes[0].key, log: true, hover: null };
+const state = { mode: DATA.modes[0].key, log: true, peaks: true, hover: null };
 const decoded = {};   // "layer|mode" -> Uint16Array
 const maps = [];      // per layer: {layer, canvas, overlay, readout}
 
@@ -228,9 +229,38 @@ async function draw() {
       ctx.lineWidth = Math.max(1, G.width / 600);
       for (const polygon of body.polygons) { const path = bodyPath(polygon); ctx.fill(path); ctx.stroke(path); }
     }
+    if (state.peaks) drawPeak(ctx, m.layer.peaks[state.mode], s.info.unit);
   }
   drawLegend(s, colors);
   updateHover();
+}
+
+function peakText(peak, unit) {
+  return `Peak ${fmt(peak.value, unit)}` + (peak.body ? ` (${peak.body} body)` : "");
+}
+function drawPeak(ctx, peak, unit) {
+  if (!peak) return;
+  const [px, py] = toPixel([peak.x, peak.y]);
+  const r = G.width / 60, line = Math.max(1.5, G.width / 500);
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(px, py, r, 0, 2 * Math.PI);
+  ctx.lineWidth = line * 3; ctx.strokeStyle = "rgba(0,0,0,0.75)"; ctx.stroke();
+  ctx.lineWidth = line; ctx.strokeStyle = "#fff"; ctx.stroke();
+  // Label beside the ring, flipped to stay inside the map near its edges.
+  const text = fmt(peak.value, unit);
+  const size = Math.round(G.width / 45);
+  ctx.font = `600 ${size}px system-ui, sans-serif`;
+  const w = ctx.measureText(text).width, gap = r + line * 2;
+  const right = px + gap + w < G.width;
+  ctx.textAlign = right ? "left" : "right";
+  ctx.textBaseline = py - gap < size ? "top" : "bottom";
+  const tx = right ? px + gap : px - gap, ty = ctx.textBaseline === "top" ? py + gap : py - gap;
+  ctx.lineJoin = "round"; ctx.lineWidth = line * 3; ctx.strokeStyle = "rgba(0,0,0,0.75)";
+  ctx.strokeText(text, tx, ty);
+  ctx.fillStyle = "#fff";
+  ctx.fillText(text, tx, ty);
+  ctx.restore();
 }
 
 function drawLegend(s, colors) {
@@ -272,7 +302,11 @@ function updateHover(event) {
   for (const m of maps) {
     const octx = m.overlay.getContext("2d");
     octx.clearRect(0, 0, G.width, G.height);
-    if (!state.hover) { m.readout.textContent = ""; continue; }
+    if (!state.hover) {
+      const peak = m.layer.peaks[state.mode];
+      m.readout.textContent = peak ? peakText(peak, unit) : "";
+      continue;
+    }
     const { col, row } = state.hover;
     const hit = lookup(m, col, row);
     m.readout.textContent = hit.body ? `${hit.body.name} body: ${fmt(hit.value, unit)}` : fmt(hit.value, unit);
@@ -342,6 +376,7 @@ function buildPage() {
   }
   syncButtons();
   $("log").addEventListener("change", (e) => { state.log = e.target.checked; draw(); });
+  $("peaks").addEventListener("change", (e) => { state.peaks = e.target.checked; draw(); });
 
   DATA.layers.forEach((layer, index) => {
     const card = document.createElement("div");

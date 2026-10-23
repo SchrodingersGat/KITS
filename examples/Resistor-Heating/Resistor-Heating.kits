@@ -34,14 +34,15 @@ current_sources:
 - ref: J2
   pad: '1'
   current_a: 4.0
+  enabled: false
 - ref: J1
   pad: '1'
   current_a: -4.0
+  enabled: false
 heat_loads:
 - ref: J1
   pad: '1'
   power_w: 2.0
-  enabled: false
 heatsinks:
 - name: HS1
   side: top

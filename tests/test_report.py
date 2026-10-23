@@ -11,9 +11,10 @@ import pytest
 pytest.importorskip("skfem")
 
 from kits.config import CurrentSource, HeatLoad, HeatLoadKind, PadGroup, ResistiveElement  # noqa: E402
+from kits.ingest import load_project  # noqa: E402
 from kits.project import KitsProject, load_kits_project  # noqa: E402
 from kits.report import cli  # noqa: E402
-from kits.report.builder import encode_raster  # noqa: E402
+from kits.report.builder import encode_raster, report_data  # noqa: E402
 from kits.solve.cli import solve_project  # noqa: E402
 
 from .test_solve import _HEADER, _RESISTOR, _pad, _zone  # noqa: E402
@@ -127,8 +128,33 @@ def test_report_contents(bridged_project, tmp_path):
     assert body["layer"] == "F.Cu" and body["temperature"] == pytest.approx(
         results.element_temperatures["R1 <b>"]
     )
+    # Each layer marks where each quantity peaks, with the exact (not pixel-sampled) value.
+    peaks = data["layers"][0]["peaks"]
+    assert peaks["CURRENT_DENSITY"]["value"] == pytest.approx(
+        layer.current_density[layer.copper].max() / 1e6
+    )
+    copper_nodes = np.unique(layer.triangles[layer.copper])
+    assert peaks["VOLTAGE"]["value"] == pytest.approx(layer.voltage[copper_nodes].max())
+    # Temperature peaks on the hotter of the copper and the resistor body drawn on F.Cu.
+    hottest = peaks["TEMPERATURE"]
+    assert hottest["value"] == pytest.approx(max(layer.temperature.max(), body["temperature"]))
+    assert (hottest["body"] == "R1 <b>") == (body["temperature"] > layer.temperature.max())
+    for peak in peaks.values():
+        assert grid["x0"] <= peak["x"] <= grid["x0"] + grid["width"] * grid["step"]
+
     # Fresh results carry each element's heat through its terminals.
     assert "Heat to A, B" in page and results.element_terminal_heat["R1 <b>"]
+
+    # Without the heat load on P1 the resistor body is the hottest thing on F.Cu: the marker sits on it.
+    project.heat_loads = []
+    project.save()
+    cool, _, _ = solve_project(bridged_project)
+    cool_data = report_data(project, load_project(project.board).board, cool)
+    hottest = cool_data["layers"][0]["peaks"]["TEMPERATURE"]
+    assert hottest["body"] == "R1 <b>"
+    assert hottest["value"] == pytest.approx(cool.element_temperatures["R1 <b>"])
+    xs, ys = zip(*body["polygons"][0], strict=True)
+    assert min(xs) <= hottest["x"] <= max(xs) and min(ys) <= hottest["y"] <= max(ys)
 
 
 def test_report_command_line(bridged_project, capsys):
